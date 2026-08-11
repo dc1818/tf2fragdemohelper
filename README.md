@@ -53,7 +53,7 @@ Each run creates a timestamped folder beside the selected output location.
 
 ## Candidate selection rules
 
-The current scorer creates candidates only inside closed live-round intervals. Tournament ready-up events (`teamplay_team_ready`, `teamplay_ready_restart`, and the restart countdown) are retained as evidence but never start an interval. The interval starts at `teamplay_round_active`, moves to `teamplay_setup_finished` when setup exists, and ends at round win, stalemate, game over, or restart. Each candidate records that start/end evidence under `round_state`.
+The current scorer creates candidates only inside closed live-round intervals. Tournament ready-up events (`teamplay_team_ready`, `teamplay_ready_restart`, and the restart countdown) are retained as evidence but never start an interval. TF2 can emit `teamplay_round_active` during map/warmup initialization, so the scorer accepts that event only after a real round-transition event (`teamplay_round_start`, restart, or ready-restart). The interval then moves to `teamplay_setup_finished` when setup exists and ends at round win, stalemate, game over, or waiting. Each candidate records that start/end evidence under `round_state`.
 
 Candidates are grouped by attacker within the same round when consecutive kills are no more than four seconds apart. Every candidate includes a five-second lead-in and three-second outro, clipped to the active round.
 

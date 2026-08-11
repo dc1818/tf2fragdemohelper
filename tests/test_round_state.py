@@ -141,6 +141,53 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(metrics["linked_building_destructions"], 1)
         self.assertEqual([item["reason"] for item in breakdown if item["reason"] == "building_destruction_led_to_kills"], ["building_destruction_led_to_kills"])
 
+    def test_point_capture_is_scored_once_even_with_payload_progress(self):
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 120, "event_type": "player_team", "event": {"user_id": 1, "team": 3}},
+            {"tick": 220, "event_type": "payload_pushed", "event": {"pusher": 1, "distance": 450}},
+            {"tick": 240, "event_type": "teamplay_point_captured", "event": {"team": 3, "cp": 2, "cp_name": "second"}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        objectives = ANALYZER.normalized_objective_events(events, rounds, ANALYZER.player_team_history(events))
+        kill = dict(self.kill(200, 2), attacker_team="blu")
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], rounds[0], objective_events=objectives)
+        self.assertEqual(metrics["point_capture_followups"], 1)
+        self.assertEqual(metrics["payload_progress_followups"], 1)
+        self.assertIn("objective_capture_followup", tags)
+        self.assertNotIn("payload_progress_followup", tags)
+        self.assertEqual(metrics["objective_conversion_kind"], "point_capture")
+        self.assertEqual(score, 34.0)
+        self.assertEqual(
+            {item["reason"] for item in breakdown},
+            {"candidate_base", "kill_sequence_led_to_point_capture"},
+        )
+
+    def test_payload_progress_is_scored_once_without_a_capture(self):
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 120, "event_type": "player_team", "event": {"user_id": 1, "team": 3}},
+            {"tick": 220, "event_type": "payload_pushed", "event": {"pusher": 1, "distance": 450}},
+            {"tick": 230, "event_type": "payload_pushed", "event": {"pusher": 1, "distance": 500}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        objectives = ANALYZER.normalized_objective_events(events, rounds, ANALYZER.player_team_history(events))
+        kill = dict(self.kill(200, 2), attacker_team="blu")
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], rounds[0], objective_events=objectives)
+        self.assertEqual(metrics["payload_progress_followups"], 2)
+        self.assertEqual(metrics["objective_conversion_kind"], "payload_progress")
+        self.assertIn("payload_progress_followup", tags)
+        self.assertIn("payload_pusher", tags)
+        self.assertEqual(score, 26.0)
+        self.assertEqual(
+            [item["reason"] for item in breakdown],
+            ["candidate_base", "kill_sequence_led_to_payload_progress"],
+        )
+
     def test_server_tick_is_authoritative_over_demo_packet_tick(self):
         with tempfile.TemporaryDirectory() as temp:
             events_path = Path(temp) / "events.ndjson"

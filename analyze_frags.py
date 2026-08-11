@@ -111,7 +111,12 @@ def read_events(path: Path) -> List[Dict[str, Any]]:
                 raise ValueError("Invalid JSON on events.ndjson line {}: {}".format(line_number, error))
             if not isinstance(item, dict):
                 continue
-            item["tick"] = as_int(item.get("tick"))
+            # Game events now carry both namespaces. `server_tick` is the
+            # authoritative TF2 simulation tick; `demo_tick` is the packet
+            # stream position and is retained for diagnostics only.
+            item["demo_tick"] = as_int(item.get("demo_tick", item.get("tick")))
+            item["server_tick"] = as_int(item.get("server_tick"), 0) if item.get("server_tick") is not None else 0
+            item["tick"] = item["server_tick"] or item["demo_tick"]
             events.append(item)
     return sorted(
         events,
@@ -321,10 +326,28 @@ def find_player_by_name(history: Dict[int, List[Tuple[int, str]]], name: str) ->
     return next(iter(matches)) if len(matches) == 1 else None
 
 
+def find_player_in_roster(roster: Dict[str, Any], name: str) -> Optional[int]:
+    """Resolve header.nick from the parser's decoded userinfo string table."""
+    normalized = name.strip().casefold()
+    if not normalized or not isinstance(roster, dict):
+        return None
+    matches = set()
+    for key, value in roster.items():
+        if not isinstance(value, dict):
+            continue
+        if as_text(value.get("name")).casefold() != normalized:
+            continue
+        user_id = as_int(value.get("user_id", key), 0)
+        if user_id > 0:
+            matches.add(user_id)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, str]]]) -> Dict[str, Any]:
     """Select all-player or POV-only analysis without guessing a POV identity."""
     manifest = read_json_if_present(export_directory / "manifest.json")
     header = read_json_if_present(export_directory / "header.json")
+    roster = read_json_if_present(export_directory / "players.json")
     capture = manifest.get("demo_capture", {})
     capture = capture if isinstance(capture, dict) else {}
     capture_type = as_text(capture.get("classification")).lower() or "unknown"
@@ -334,9 +357,11 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
     reason = "STV and unknown demos retain candidates from every player."
     if capture_type == "pov":
         pov_user_id = find_player_by_name(names, header_nick)
+        if pov_user_id is None:
+            pov_user_id = find_player_in_roster(roster, header_nick)
         if pov_user_id is not None:
             scope = "pov_player_only"
-            reason = "POV recorder matched to a player_connect/player_changename event."
+            reason = "POV recorder matched to player events or the decoded userinfo roster."
         else:
             reason = "POV recording detected, but the recorded player could not be matched safely; all players were retained."
     return {
@@ -346,6 +371,7 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
         "header_nick": header_nick or None,
         "analysis_scope": scope,
         "pov_player_user_id": pov_user_id,
+        "roster_match_available": bool(roster),
         "scope_reason": reason,
     }
 
@@ -383,6 +409,8 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
             # precise game-event timestamp used for this kill.
             "tick": tick,
             "event_tick": tick,
+            "demo_tick": as_int(item.get("demo_tick", tick)),
+            "server_tick": as_int(item.get("server_tick", tick)),
             "packet_sequence": as_int(item.get("packet_sequence")),
             "event_index_in_packet": as_int(item.get("event_index_in_packet")),
             "round_index": round_data["round_index"],
@@ -598,6 +626,8 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                 "point_of_kill_events": [
                     {
                         "tick": kill["event_tick"],
+                        "demo_tick": kill.get("demo_tick"),
+                        "server_tick": kill.get("server_tick"),
                         "packet_sequence": kill["packet_sequence"],
                         "event_index_in_packet": kill["event_index_in_packet"],
                     }

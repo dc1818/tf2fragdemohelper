@@ -749,6 +749,7 @@ namespace Tf2StvParserGui
             text.AppendLine("Server analysis ticks: " + JoinValues(List(candidate, "point_of_kill_server_ticks")));
             text.AppendLine("Clip window (includes lead-in/out): " + ClipTick(candidate, "clip_start_tick", "start_tick") + " to " + ClipTick(candidate, "clip_end_tick", "end_tick") + " ticks");
             AppendScoreBreakdown(text, List(candidate, "score_breakdown"));
+            AppendObjectiveEvidence(text, List(candidate, "objective_followups"));
             AppendBuildingEvidence(text, List(candidate, "building_destructions"));
             AppendDemoContext(text, Map(candidate, "demo_context"));
             AppendRoundState(text, Map(candidate, "round_state"));
@@ -793,6 +794,32 @@ namespace Tf2StvParserGui
                 IDictionary building = item as IDictionary;
                 if (building == null) continue;
                 text.AppendLine("  tick " + DisplayValue(building, "event_tick") + " | " + DisplayValue(building, "object_type") + " | attacker #" + DisplayValue(building, "attacker_user_id"));
+            }
+        }
+
+        private static void AppendObjectiveEvidence(StringBuilder text, IList objectives)
+        {
+            text.AppendLine("Objective follow-up evidence");
+            if (objectives.Count == 0)
+            {
+                text.AppendLine("  None within eight seconds after the final kill.");
+                return;
+            }
+            foreach (object item in objectives)
+            {
+                IDictionary objective = item as IDictionary;
+                if (objective == null) continue;
+                string kind = DisplayValue(objective, "kind");
+                string detail = "";
+                if (String.Equals(kind, "point_capture", StringComparison.Ordinal))
+                {
+                    detail = " | point " + DisplayValue(objective, "point") + " " + DisplayValue(objective, "point_name");
+                }
+                else if (String.Equals(kind, "payload_progress", StringComparison.Ordinal))
+                {
+                    detail = " | pusher #" + DisplayValue(objective, "pusher_user_id") + " | distance " + DisplayValue(objective, "distance");
+                }
+                text.AppendLine("  tick " + DisplayValue(objective, "event_tick") + " | " + kind + " | team " + DisplayValue(objective, "team") + detail);
             }
         }
 

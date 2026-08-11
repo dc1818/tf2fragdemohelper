@@ -21,6 +21,7 @@ TICKS_PER_SECOND = 66.6666667
 SEQUENCE_GAP_TICKS = round(TICKS_PER_SECOND * 4.0)
 PRE_ROLL_TICKS = round(TICKS_PER_SECOND * 5.0)
 POST_ROLL_TICKS = round(TICKS_PER_SECOND * 3.0)
+OBJECTIVE_CONVERSION_TICKS = round(TICKS_PER_SECOND * 8.0)
 
 ROUND_END_EVENTS = {
     "teamplay_round_win", "teamplay_round_stalemate", "teamplay_game_over",
@@ -36,6 +37,8 @@ ROUND_RESET_EVENTS = {
 BUILDING_DESTRUCTION_EVENTS = {
     "object_destroyed", "building_destroyed", "building_destruction",
 }
+OBJECTIVE_CAPTURE_EVENTS = {"teamplay_point_captured"}
+PAYLOAD_PROGRESS_EVENTS = {"payload_pushed"}
 READY_TEAM_NAMES = {2: "red", 3: "blu"}
 PROJECTILE_WEAPONS = {
     "rocketlauncher", "directhit", "blackbox", "liberty_launcher", "airstrike",
@@ -469,6 +472,55 @@ def normalized_building_destructions(events: Iterable[Dict[str, Any]], rounds: L
     return destructions
 
 
+def team_id(team: Any) -> int:
+    """Normalize the team values used by game events and player state."""
+    value = scalar(team)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "red":
+            return 2
+        if normalized in {"blu", "blue"}:
+            return 3
+    return as_int(value)
+
+
+def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], teams: Dict[int, List[Tuple[int, Optional[str]]]], debug: bool = False) -> List[Dict[str, Any]]:
+    """Keep live-round objective progress as evidence for kill-to-objective conversions."""
+    objectives: List[Dict[str, Any]] = []
+    for item in events:
+        name = event_name(item)
+        if name not in OBJECTIVE_CAPTURE_EVENTS and name not in PAYLOAD_PROGRESS_EVENTS:
+            continue
+        tick = item["tick"]
+        if round_for_tick(rounds, tick) is None:
+            continue
+        fields = event_fields(item)
+        if name in OBJECTIVE_CAPTURE_EVENTS:
+            objective = {
+                "event_tick": tick,
+                "event_type": name,
+                "kind": "point_capture",
+                "team": as_int(fields.get("team")),
+                "point": as_int(fields.get("cp")),
+                "point_name": as_text(fields.get("cp_name")),
+                "cappers": as_text(fields.get("cappers")),
+            }
+        else:
+            pusher = as_int(fields.get("pusher"))
+            objective = {
+                "event_tick": tick,
+                "event_type": name,
+                "kind": "payload_progress",
+                "team": team_id(player_team_at(teams, pusher, tick)),
+                "pusher_user_id": pusher,
+                "distance": as_int(fields.get("distance")),
+            }
+        objectives.append(objective)
+        if debug:
+            print("[candidate-debug] objective tick={} kind={} team={} data={}".format(tick, objective["kind"], objective.get("team"), objective))
+    return objectives
+
+
 def weapon_tags(weapon: str) -> List[str]:
     tags: List[str] = []
     if weapon in PROJECTILE_WEAPONS:
@@ -486,7 +538,7 @@ def weapon_tags(weapon: str) -> List[str]:
     return tags
 
 
-def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
+def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None, objective_events: Optional[List[Dict[str, Any]]] = None) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
     """Score one sequence and expose every contribution for auditing."""
     tags = set()
     score = 10.0
@@ -544,6 +596,34 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         score += 6.0
         tags.add("building_to_kill_sequence")
         breakdown.append({"reason": "building_destruction_led_to_kills", "points": 6.0, "count": len(linked_buildings), "event_tick": linked_buildings[-1]["event_tick"]})
+    attacker_team = team_id(kills[0].get("attacker_team"))
+    objective_followups = [
+        objective for objective in (objective_events or [])
+        if 0 <= objective["event_tick"] - kills[-1]["event_tick"] <= OBJECTIVE_CONVERSION_TICKS
+        and objective.get("team", 0) == attacker_team
+    ]
+    # A point capture is the strongest event-only proof that the fight was
+    # converted. Payload progress can be emitted more than once while a cart
+    # moves, so score at most one of those signals and never stack it on a
+    # completed capture from the same short sequence.
+    point_capture = next((item for item in objective_followups if item["kind"] == "point_capture"), None)
+    payload_progress = next((item for item in objective_followups if item["kind"] == "payload_progress"), None)
+    objective_score = 0.0
+    objective_conversion_kind = ""
+    if point_capture is not None:
+        objective_score = 24.0
+        objective_conversion_kind = "point_capture"
+        score += objective_score
+        tags.add("objective_capture_followup")
+        breakdown.append({"reason": "kill_sequence_led_to_point_capture", "points": objective_score, "event_tick": point_capture["event_tick"], "point": point_capture.get("point"), "point_name": point_capture.get("point_name")})
+    elif payload_progress is not None:
+        objective_score = 16.0 if payload_progress.get("pusher_user_id") == kills[0]["attacker_user_id"] else 12.0
+        objective_conversion_kind = "payload_progress"
+        score += objective_score
+        tags.add("payload_progress_followup")
+        if payload_progress.get("pusher_user_id") == kills[0]["attacker_user_id"]:
+            tags.add("payload_pusher")
+        breakdown.append({"reason": "kill_sequence_led_to_payload_progress", "points": objective_score, "event_tick": payload_progress["event_tick"], "pusher_user_id": payload_progress.get("pusher_user_id"), "distance": payload_progress.get("distance")})
     raw_score = round(score, 2)
     metrics = {
         "kills": len(kills),
@@ -557,6 +637,12 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "score_before_floor": raw_score,
         "score_floor_applied": raw_score < 0.0,
         "linked_building_destructions": len(linked_buildings),
+        "objective_followups": len(objective_followups),
+        "point_capture_followups": sum(item["kind"] == "point_capture" for item in objective_followups),
+        "payload_progress_followups": sum(item["kind"] == "payload_progress" for item in objective_followups),
+        "objective_followup_evidence": objective_followups,
+        "objective_conversion_kind": objective_conversion_kind,
+        "objective_score": objective_score,
     }
     return round(max(0.0, raw_score), 2), sorted(tags), metrics, breakdown
 
@@ -580,7 +666,7 @@ def group_kills(kills: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     return groups
 
 
-def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None, debug: bool = False) -> List[Dict[str, Any]]:
+def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None, objective_events: Optional[List[Dict[str, Any]]] = None, debug: bool = False) -> List[Dict[str, Any]]:
     by_attacker: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
     for death in deaths:
         by_attacker[(death["round_index"], death["attacker_user_id"])].append(death)
@@ -593,7 +679,8 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
             print("[candidate-debug] grouping round={} attacker={} input_kills={} groups={}".format(round_index, attacker, len(kills), [[kill["event_tick"] for kill in group] for group in groups]))
         round_data = round_lookup[round_index]
         for group in groups:
-            score, tags, metrics, score_breakdown = score_candidate(group, round_data, building_destructions)
+            score, tags, metrics, score_breakdown = score_candidate(group, round_data, building_destructions, objective_events)
+            objective_followups = metrics.get("objective_followup_evidence", [])
             # Keep single kills only when they contain a meaningful known signal.
             if len(group) == 1 and score < 25.0:
                 if debug:
@@ -648,6 +735,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                 "metrics": metrics,
                 "kills": group,
                 "building_destructions": [building for building in (building_destructions or []) if building.get("attacker_user_id") == attacker and first_tick - round(TICKS_PER_SECOND * 2.0) <= building["event_tick"] <= first_tick],
+                "objective_followups": objective_followups,
                 "state_pass": {
                     "status": "pending",
                     "next": ["airshot confirmation", "projectile flight", "health", "position", "objective proximity"],
@@ -686,7 +774,8 @@ def main() -> int:
             print("[candidate-debug] live round #{} start={} ({}) end={} ({})".format(round_data["round_index"], round_data["live_start_tick"], round_data["live_start_event"], round_data["end_tick"], round_data["end_reason"]))
     deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug)
     building_destructions = normalized_building_destructions(events, rounds, context, arguments.debug)
-    candidates = build_candidates(deaths, rounds, context, building_destructions, arguments.debug)
+    objective_events = normalized_objective_events(events, rounds, teams, arguments.debug)
+    candidates = build_candidates(deaths, rounds, context, building_destructions, objective_events, arguments.debug)
     write_ndjson(export_directory / "frag_candidates.ndjson", candidates)
     summary = {
         "format": "tf2-frag-candidates",
@@ -697,6 +786,7 @@ def main() -> int:
         "live_rounds": len(rounds),
         "live_round_kills": len(deaths),
         "live_round_building_destructions": len(building_destructions),
+        "live_round_objective_events": len(objective_events),
         "candidate_count": len(candidates),
         "limitations": [
             "This event-only pass does not confirm airshots.",

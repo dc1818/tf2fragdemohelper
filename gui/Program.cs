@@ -436,7 +436,7 @@ namespace Tf2StvParserGui
             AddColumn("Attacker", 88);
             AddColumn("Class", 95);
             AddColumn("Team", 72);
-            AddColumn("Kill ticks", 145);
+            AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 430);
             grid.SelectionChanged += ShowSelectedCandidate;
             split.Panel1.Controls.Add(grid);
@@ -511,7 +511,7 @@ namespace Tf2StvParserGui
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
-            summary.Text = visible + " of " + records.Count + " ranked candidates. Select one to inspect its clip range, round evidence, and individual kills.";
+            summary.Text = visible + " of " + records.Count + " ranked candidates. Kill-event ticks are exact; clip boundaries include lead-in and follow-through.";
             if (grid.Rows.Count > 0) grid.Rows[0].Selected = true;
             else details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
         }
@@ -526,13 +526,15 @@ namespace Tf2StvParserGui
             text.AppendLine("Score " + DisplayValue(candidate, "overall_score") + " | attacker #" + DisplayValue(candidate, "attacker_user_id") + " | " + DisplayValue(candidate, "attacker_team") + " " + DisplayValue(candidate, "attacker_class"));
             text.AppendLine("Tags: " + JoinValues(Value(candidate, "tags")));
             text.AppendLine();
-            text.AppendLine("Clip range: " + DisplayValue(candidate, "start_tick") + " to " + DisplayValue(candidate, "end_tick") + " ticks");
-            text.AppendLine("Point-of-kill ticks: " + JoinValues(List(candidate, "point_of_kill_ticks")));
+            IList kills = List(candidate, "kills");
+            text.AppendLine("Kill count: " + kills.Count);
+            text.AppendLine("Exact player_death ticks: " + JoinValues(List(candidate, "point_of_kill_ticks")));
+            text.AppendLine("Clip window (includes lead-in/out): " + ClipTick(candidate, "clip_start_tick", "start_tick") + " to " + ClipTick(candidate, "clip_end_tick", "end_tick") + " ticks");
+            AppendScoreBreakdown(text, List(candidate, "score_breakdown"));
             AppendDemoContext(text, Map(candidate, "demo_context"));
             AppendRoundState(text, Map(candidate, "round_state"));
             text.AppendLine();
             text.AppendLine("Kills");
-            IList kills = List(candidate, "kills");
             for (int i = 0; i < kills.Count; i++)
             {
                 IDictionary kill = kills[i] as IDictionary;
@@ -549,6 +551,28 @@ namespace Tf2StvParserGui
             details.Text = text.ToString();
             details.SelectionStart = 0;
             details.SelectionLength = 0;
+        }
+
+        private static void AppendScoreBreakdown(StringBuilder text, IList breakdown)
+        {
+            text.AppendLine("Score breakdown");
+            if (breakdown.Count == 0)
+            {
+                text.AppendLine("  Not available in this candidate file.");
+                return;
+            }
+            foreach (object item in breakdown)
+            {
+                IDictionary contribution = item as IDictionary;
+                if (contribution == null) continue;
+                string points = DisplayValue(contribution, "points");
+                if (!points.StartsWith("-", StringComparison.Ordinal)) points = "+" + points;
+                string eventTick = TextValue(contribution, "event_tick");
+                string count = TextValue(contribution, "count");
+                text.AppendLine("  " + points + "  " + DisplayValue(contribution, "reason") +
+                    (String.IsNullOrEmpty(count) ? "" : " (count " + count + ")") +
+                    (String.IsNullOrEmpty(eventTick) ? "" : " at tick " + eventTick));
+            }
         }
 
         private static void AppendRoundState(StringBuilder text, IDictionary state)
@@ -604,6 +628,12 @@ namespace Tf2StvParserGui
         {
             string eventTick = TextValue(values, "event_tick");
             return String.IsNullOrEmpty(eventTick) ? DisplayValue(values, "tick") : eventTick;
+        }
+
+        private static string ClipTick(IDictionary values, string preferredKey, string legacyKey)
+        {
+            string value = TextValue(values, preferredKey);
+            return String.IsNullOrEmpty(value) ? DisplayValue(values, legacyKey) : value;
         }
 
         private static string JoinValues(object values)

@@ -56,11 +56,27 @@ Each run creates a timestamped folder beside the selected output location.
 
 The current scorer creates candidates only inside closed live-round intervals. Tournament ready-up events (`teamplay_team_ready`, `teamplay_ready_restart`, and the restart countdown) are retained as evidence but never start an interval. TF2 can emit `teamplay_round_active` during map/warmup initialization, so the scorer accepts that event only after a real round-transition event (`teamplay_round_start`, restart, or ready-restart). The interval then moves to `teamplay_setup_finished` when setup exists and ends at round win, stalemate, game over, or waiting. Each candidate records that start/end evidence under `round_state`.
 
-Candidates are grouped by attacker within the same round when consecutive kills are no more than four seconds apart. Every candidate includes a five-second lead-in and three-second outro, clipped to the active round.
+Candidates are grouped by attacker within the same round only when the entire first-to-last kill span is no more than four seconds. Measuring the total window prevents a chain of individually close kills from becoming one overly long multikill. Every candidate includes a five-second lead-in and three-second outro, clipped to the active round.
 
-The score is intentionally explainable. `frag_candidates.ndjson` records the tags and raw metrics that produced it, including the kill count, duration, weapons, projectile kills, Medic kills, and full-crit count.
+The score is intentionally explainable. `frag_candidates.ndjson` records `score_breakdown` plus the raw metrics that produced it. Assists are recorded on kills when present, but do not count as kills and currently add no score.
 
-Every kill records its original `player_death` event tick. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player only when the header nickname matches exactly one decoded player-name event; otherwise the all-player result is retained and marked in `demo_context`.
+| Signal | Score |
+|---|---:|
+| Candidate base | +10 |
+| Each kill after the first | +18 |
+| Three-kill sequence | +15 |
+| Four-or-more-kill sequence | +25 |
+| Two or more kills within two seconds | +12 |
+| At least one projectile kill | +8 |
+| Each Medic killed | +18 |
+| Each rocket-jumping victim | +10 |
+| Killstreak total of 10+ on a kill | +5 |
+| Final kill within eight seconds of round end | +8 |
+| Each random full-crit kill | -12 |
+
+The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
+
+Every kill records its exact original `player_death` event tick in `event_tick` and `point_of_kill_ticks`. `clip_start_tick` and `clip_end_tick` are editing boundaries with lead-in/out padding; they are not kill times. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player only when the header nickname matches exactly one decoded player-name event; otherwise the all-player result is retained and marked in `demo_context`.
 
 After an export completes, use **View candidates** in the GUI. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo.
 

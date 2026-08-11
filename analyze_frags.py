@@ -409,42 +409,56 @@ def weapon_tags(weapon: str) -> List[str]:
     return tags
 
 
-def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any]) -> Tuple[float, List[str], Dict[str, Any]]:
+def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any]) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
+    """Score one sequence and expose every contribution for auditing."""
     tags = set()
     score = 10.0
+    breakdown: List[Dict[str, Any]] = [{"reason": "candidate_base", "points": 10.0}]
     for kill in kills:
         tags.update(weapon_tags(kill["weapon"]))
         if kill["victim_class"] == "medic":
             score += 18.0
             tags.add("medic_pick")
+            breakdown.append({"reason": "medic_pick", "points": 18.0, "event_tick": kill["event_tick"]})
         if kill["rocket_jump_victim"]:
             score += 10.0
             tags.add("rocket_jump_victim")
+            breakdown.append({"reason": "rocket_jump_victim", "points": 10.0, "event_tick": kill["event_tick"]})
         if kill["kill_streak_total"] >= 10:
             score += 5.0
             tags.add("streak_10_plus")
+            breakdown.append({"reason": "streak_10_plus", "points": 5.0, "event_tick": kill["event_tick"]})
         if kill["crit_type"] == 2:
             score -= 12.0
             tags.add("random_full_crit")
+            breakdown.append({"reason": "random_full_crit", "points": -12.0, "event_tick": kill["event_tick"]})
     if len(kills) > 1:
-        score += 18.0 * (len(kills) - 1)
+        multi_points = 18.0 * (len(kills) - 1)
+        score += multi_points
         tags.add("multi_kill")
+        breakdown.append({"reason": "additional_kills", "points": multi_points, "count": len(kills) - 1})
     if len(kills) >= 3:
         score += 15.0
         tags.add("three_kill")
+        breakdown.append({"reason": "three_kill", "points": 15.0})
     if len(kills) >= 4:
         score += 25.0
         tags.add("four_kill_plus")
-    duration_ticks = max(0, kills[-1]["tick"] - kills[0]["tick"])
+        breakdown.append({"reason": "four_kill_plus", "points": 25.0})
+    duration_ticks = max(0, kills[-1]["event_tick"] - kills[0]["event_tick"])
     duration_seconds = duration_ticks / TICKS_PER_SECOND
     if len(kills) >= 2 and duration_seconds <= 2.0:
         score += 12.0
         tags.add("rapid_sequence")
+        breakdown.append({"reason": "rapid_sequence", "points": 12.0})
     if any("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills):
         score += 8.0
-    if round_data["end_tick"] - kills[-1]["tick"] <= round(TICKS_PER_SECOND * 8.0):
+        breakdown.append({"reason": "projectile_sequence", "points": 8.0})
+    if round_data["end_tick"] - kills[-1]["event_tick"] <= round(TICKS_PER_SECOND * 8.0):
         score += 8.0
         tags.add("late_round")
+        breakdown.append({"reason": "late_round", "points": 8.0})
+    raw_score = round(score, 2)
     metrics = {
         "kills": len(kills),
         "duration_seconds": round(duration_seconds, 3),
@@ -452,8 +466,31 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any]) -> 
         "projectile_kills": sum("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills),
         "medic_kills": sum(kill["victim_class"] == "medic" for kill in kills),
         "full_crit_kills": sum(kill["crit_type"] == 2 for kill in kills),
+        "first_kill_tick": kills[0]["event_tick"],
+        "last_kill_tick": kills[-1]["event_tick"],
+        "score_before_floor": raw_score,
+        "score_floor_applied": raw_score < 0.0,
     }
-    return round(max(0.0, score), 2), sorted(tags), metrics
+    return round(max(0.0, raw_score), 2), sorted(tags), metrics, breakdown
+
+
+def group_kills(kills: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Group kills into non-overlapping first-to-last windows of at most four seconds.
+
+    This intentionally measures from the first kill rather than repeatedly
+    comparing adjacent kills. Otherwise a chain of kills can remain grouped
+    indefinitely even though the first and last kills are far apart.
+    """
+    groups: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    for kill in kills:
+        if current and kill["event_tick"] - current[0]["event_tick"] > SEQUENCE_GAP_TICKS:
+            groups.append(current)
+            current = []
+        current.append(kill)
+    if current:
+        groups.append(current)
+    return groups
 
 
 def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -464,23 +501,15 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
     candidates: List[Dict[str, Any]] = []
     for (round_index, attacker), kills in by_attacker.items():
         kills.sort(key=lambda item: (item["event_tick"], item["packet_sequence"], item["event_index_in_packet"]))
-        groups: List[List[Dict[str, Any]]] = []
-        current: List[Dict[str, Any]] = []
-        for kill in kills:
-            if current and kill["tick"] - current[-1]["tick"] > SEQUENCE_GAP_TICKS:
-                groups.append(current)
-                current = []
-            current.append(kill)
-        if current:
-            groups.append(current)
+        groups = group_kills(kills)
         round_data = round_lookup[round_index]
         for group in groups:
-            score, tags, metrics = score_candidate(group, round_data)
+            score, tags, metrics, score_breakdown = score_candidate(group, round_data)
             # Keep single kills only when they contain a meaningful known signal.
             if len(group) == 1 and score < 25.0:
                 continue
-            first_tick = group[0]["tick"]
-            last_tick = group[-1]["tick"]
+            first_tick = group[0]["event_tick"]
+            last_tick = group[-1]["event_tick"]
             candidates.append({
                 "candidate_id": "r{}-p{}-t{}".format(round_index, attacker, first_tick),
                 "round_index": round_index,
@@ -497,8 +526,12 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                     "end_tick": round_data["end_tick"],
                     "end_event": round_data["end_reason"],
                 },
+                "clip_start_tick": max(round_data["live_start_tick"], first_tick - PRE_ROLL_TICKS),
+                "clip_end_tick": min(round_data["end_tick"], last_tick + POST_ROLL_TICKS),
                 "start_tick": max(round_data["live_start_tick"], first_tick - PRE_ROLL_TICKS),
-                "point_of_kill_ticks": [kill["tick"] for kill in group],
+                "first_kill_tick": first_tick,
+                "last_kill_tick": last_tick,
+                "point_of_kill_ticks": [kill["event_tick"] for kill in group],
                 "point_of_kill_events": [
                     {
                         "tick": kill["event_tick"],
@@ -512,6 +545,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                 "attacker_class": group[0]["attacker_class"],
                 "attacker_team": group[0]["attacker_team"],
                 "overall_score": score,
+                "score_breakdown": score_breakdown,
                 "tags": tags,
                 "metrics": metrics,
                 "kills": group,

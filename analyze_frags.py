@@ -26,9 +26,12 @@ ROUND_END_EVENTS = {
     "teamplay_round_win", "teamplay_round_stalemate", "teamplay_game_over",
     "tf_game_over", "game_end", "round_end",
 }
+ROUND_ACTIVATION_EVENTS = {
+    "teamplay_round_start", "teamplay_restart_round", "teamplay_ready_restart",
+    "teamplay_round_restart_seconds", "round_start",
+}
 ROUND_RESET_EVENTS = {
-    "teamplay_round_start", "teamplay_restart_round", "teamplay_waiting_begins",
-    "round_start",
+    "teamplay_waiting_begins",
 }
 READY_TEAM_NAMES = {2: "red", 3: "blu"}
 PROJECTILE_WEAPONS = {
@@ -113,9 +116,11 @@ def read_events(path: Path) -> List[Dict[str, Any]]:
 def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build closed playable intervals and retain tournament ready-up evidence.
 
-    `teamplay_team_ready` only means a team has readied.  It never opens a
-    highlight window.  A window opens at `teamplay_round_active`, then moves to
-    `teamplay_setup_finished` on maps where setup time gates real combat.
+    `teamplay_team_ready` only means a team has readied. It never opens a
+    highlight window. A bare `teamplay_round_active` is also insufficient:
+    TF2 emits one during map/warmup initialization. A window opens only when
+    `teamplay_round_active` follows a real round-transition event, then moves
+    to `teamplay_setup_finished` on maps where setup gates real combat.
     """
     rounds: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
@@ -123,6 +128,7 @@ def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ready_ticks: Dict[int, Optional[int]] = {team: None for team in READY_TEAM_NAMES}
     ready_restart_tick: Optional[int] = None
     countdown_tick: Optional[int] = None
+    pending_activation: Optional[Dict[str, Any]] = None
 
     def clear_ready_up() -> None:
         nonlocal ready_ticks, ready_restart_tick, countdown_tick
@@ -151,21 +157,22 @@ def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             team = as_int(fields.get("team"))
             if team in READY_TEAM_NAMES:
                 ready_ticks[team] = tick if as_bool(fields.get("ready"), True) else None
-        elif name == "teamplay_ready_restart":
+        elif name in ROUND_ACTIVATION_EVENTS:
             if current is not None:
                 current["end_tick"] = tick
                 current["end_reason"] = name
                 rounds.append(current)
                 current = None
-            ready_restart_tick = tick
-        elif name == "teamplay_round_restart_seconds":
-            if current is not None:
-                current["end_tick"] = tick
-                current["end_reason"] = name
-                rounds.append(current)
-                current = None
-            countdown_tick = tick
+            if name == "teamplay_ready_restart":
+                ready_restart_tick = tick
+            elif name == "teamplay_round_restart_seconds":
+                countdown_tick = tick
+            pending_activation = {"event": name, "tick": tick}
         elif name == "teamplay_round_active":
+            # The initial map/warmup activation has no preceding round
+            # transition. Do not turn warmup deathmatch into frag candidates.
+            if pending_activation is None:
+                continue
             if current is not None:
                 current["end_tick"] = tick
                 current["end_reason"] = "superseded_by_round_active"
@@ -178,9 +185,11 @@ def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "live_start_event": "teamplay_round_active",
                 "setup_finished_tick": None,
                 "ready_up": ready_up_evidence(),
+                "activation_trigger": pending_activation,
                 "end_tick": None,
                 "end_reason": None,
             }
+            pending_activation = None
             clear_ready_up()
         elif name == "teamplay_setup_finished" and current is not None:
             current["setup_finished_tick"] = tick
@@ -194,12 +203,15 @@ def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             rounds.append(current)
             current = None
             clear_ready_up()
-        elif name in ROUND_RESET_EVENTS and current is not None:
-            current["end_tick"] = tick
-            current["end_reason"] = name
-            rounds.append(current)
-            current = None
+            pending_activation = None
+        elif name in ROUND_RESET_EVENTS:
+            if current is not None:
+                current["end_tick"] = tick
+                current["end_reason"] = name
+                rounds.append(current)
+                current = None
             clear_ready_up()
+            pending_activation = None
     return [item for item in rounds if item["end_tick"] is not None and item["end_tick"] > item["live_start_tick"]]
 
 
@@ -365,6 +377,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]])
                     "start_event": round_data["live_start_event"],
                     "round_active_tick": round_data["round_active_tick"],
                     "setup_finished_tick": round_data["setup_finished_tick"],
+                    "activation_trigger": round_data["activation_trigger"],
                     "ready_up": round_data["ready_up"],
                     "end_tick": round_data["end_tick"],
                     "end_event": round_data["end_reason"],

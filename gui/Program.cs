@@ -243,14 +243,17 @@ namespace Tf2StvParserGui
         {
             string script = Path.Combine(root, "analyze_frags.py");
             if (!File.Exists(script)) throw new FileNotFoundException("Frag analyzer is missing.", script);
+            Exception pythonFailure = null;
             try
             {
                 await RunWorker("python.exe", Quote(script) + " " + Quote(exportDirectory));
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                await RunWorker("py.exe", "-3 " + Quote(script) + " " + Quote(exportDirectory));
+                pythonFailure = ex;
             }
+            if (pythonFailure != null)
+                await RunWorker("py.exe", "-3 " + Quote(script) + " " + Quote(exportDirectory));
         }
 
         private void Cancel(object sender, EventArgs e)

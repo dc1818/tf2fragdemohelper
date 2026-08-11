@@ -14,6 +14,7 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Ranks live-round candidates using multi-kills, rapid sequences, projectile kills, Medic picks, killstreaks, late-round timing, and random-crit penalties.
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
 - Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
+- The candidate browser can launch the original demo in TF2 at a selectable lead-in before the first event; double-click a candidate or use **Open selected in TF2**.
 - Streams candidate-debug decisions into the embedded parser terminal, including rejected deaths, POV filtering, grouping windows, building events, and score outcomes.
 
 ## Planned analysis passes
@@ -82,6 +83,8 @@ Building/object destruction events are not kills and do not create important sta
 Every kill records its exact original `player_death` event tick in `event_tick` and `point_of_kill_ticks`. Candidate `point_of_kill_ticks` and clip boundaries use the demo/playback tick you can seek to in TF2; `point_of_kill_server_ticks` and `event_tick` preserve the authoritative server tick used for analysis. The exporter preserves both namespaces because they are not interchangeable. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. Two same-tick deaths are still a valid multikill when they have different victims and event indexes. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player when the header nickname matches a decoded player event or the parser's `players.json` userinfo roster; the roster fallback handles POV demos that omit usable `player_connect` events. If neither source resolves the nickname, the result is marked and candidates are not silently labeled POV-only.
 
 After an export completes, use **View candidates** in the GUI. The parser log remains visible in the embedded terminal and can be used to trace every accepted/rejected event. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo. The GUI invokes `analyze_frags.py --debug` automatically.
+
+The candidate viewer reads the original `.dem` path from `manifest.json`. Set **Seconds before first event** (8 seconds by default), then double-click a candidate or press **Open selected in TF2**. The first use asks for `tf.exe`; TF2 is launched with the demo playback tick calculated from the candidate's first event. This uses demo/playback ticks, not the separate server-analysis tick.
 
 ## Project structure
 

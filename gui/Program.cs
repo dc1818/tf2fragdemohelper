@@ -1,9 +1,12 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 namespace Tf2StvParserGui
@@ -28,6 +31,7 @@ namespace Tf2StvParserGui
         private readonly Button parseButton = GreenButton("Parse STV demo", 150);
         private readonly Button cancelButton = GreenButton("Cancel", 90);
         private readonly Button openButton = GreenButton("Open export folder", 150);
+        private readonly Button candidatesButton = GreenButton("View candidates", 130);
         private readonly ProgressBar progress = new ProgressBar();
         private readonly Label status = new Label();
         private Process activeProcess;
@@ -134,9 +138,12 @@ namespace Tf2StvParserGui
             cancelButton.Click += Cancel;
             openButton.Enabled = false;
             openButton.Click += OpenExport;
+            candidatesButton.Enabled = false;
+            candidatesButton.Click += OpenCandidates;
             actions.Controls.Add(parseButton);
             actions.Controls.Add(cancelButton);
             actions.Controls.Add(openButton);
+            actions.Controls.Add(candidatesButton);
             layout.SetColumnSpan(actions, 3);
             layout.Controls.Add(actions, 0, 5);
 
@@ -176,6 +183,7 @@ namespace Tf2StvParserGui
             parseButton.Enabled = false;
             cancelButton.Enabled = true;
             openButton.Enabled = false;
+            candidatesButton.Enabled = false;
             log.Clear();
             progress.Style = ProgressBarStyle.Marquee;
             status.Text = "Parsing demo...";
@@ -192,7 +200,8 @@ namespace Tf2StvParserGui
                 status.Text = "Export and frag analysis complete.";
                 status.ForeColor = Color.LightGreen;
                 openButton.Enabled = true;
-                Append("\r\nSUCCESS: Export and frag analysis complete. Open frag_candidates.ndjson to see ranked clips.\r\n");
+                candidatesButton.Enabled = true;
+                Append("\r\nSUCCESS: Export and frag analysis complete. Use View candidates to inspect ranked clips.\r\n");
             }
             catch (Exception ex)
             {
@@ -294,6 +303,19 @@ namespace Tf2StvParserGui
             if (Directory.Exists(target)) Process.Start("explorer.exe", Quote(target));
         }
 
+        private void OpenCandidates(object sender, EventArgs e)
+        {
+            if (String.IsNullOrEmpty(lastExport)) return;
+            string path = Path.Combine(lastExport, "frag_candidates.ndjson");
+            if (!File.Exists(path))
+            {
+                MessageBox.Show(this, "frag_candidates.ndjson was not found in the latest export.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            CandidateViewerForm viewer = new CandidateViewerForm(path);
+            viewer.Show(this);
+        }
+
         private void OnDragEnter(object sender, DragEventArgs e)
         {
             if (e.Data.GetDataPresent(DataFormats.FileDrop)) e.Effect = DragDropEffects.Copy;
@@ -312,5 +334,292 @@ namespace Tf2StvParserGui
         }
 
         private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
+    }
+
+    internal sealed class CandidateViewerForm : Form
+    {
+        private readonly string candidatesPath;
+        private readonly DataGridView grid = new DataGridView();
+        private readonly TextBox details = new TextBox();
+        private readonly Label summary = new Label();
+        private readonly TextBox filterBox = new TextBox();
+        private readonly NumericUpDown minimumScore = new NumericUpDown();
+        private readonly List<CandidateRecord> records = new List<CandidateRecord>();
+
+        public CandidateViewerForm(string path)
+        {
+            candidatesPath = path;
+            Text = "TF2 Frag Candidates";
+            StartPosition = FormStartPosition.CenterScreen;
+            MinimumSize = new Size(1050, 620);
+            Size = new Size(1350, 820);
+            Font = new Font("Segoe UI", 9F);
+            BackColor = Color.FromArgb(30, 32, 36);
+            ForeColor = Color.Gainsboro;
+            BuildPage();
+            LoadCandidates();
+        }
+
+        private void BuildPage()
+        {
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.Padding = new Padding(14);
+            layout.ColumnCount = 1;
+            layout.RowCount = 2;
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            Controls.Add(layout);
+
+            FlowLayoutPanel filters = new FlowLayoutPanel();
+            filters.Dock = DockStyle.Fill;
+            filters.FlowDirection = FlowDirection.LeftToRight;
+            filters.WrapContents = true;
+            summary.AutoSize = true;
+            summary.Margin = new Padding(3, 7, 18, 2);
+            summary.ForeColor = Color.Silver;
+            filters.Controls.Add(summary);
+            Label filterLabel = new Label();
+            filterLabel.Text = "Filter";
+            filterLabel.AutoSize = true;
+            filterLabel.Margin = new Padding(3, 9, 4, 2);
+            filters.Controls.Add(filterLabel);
+            filterBox.Width = 250;
+            filterBox.Margin = new Padding(0, 5, 14, 2);
+            filterBox.TextChanged += delegate { ApplyFilter(); };
+            filters.Controls.Add(filterBox);
+            Label minimumLabel = new Label();
+            minimumLabel.Text = "Minimum score";
+            minimumLabel.AutoSize = true;
+            minimumLabel.Margin = new Padding(3, 9, 4, 2);
+            filters.Controls.Add(minimumLabel);
+            minimumScore.Width = 70;
+            minimumScore.Maximum = 1000;
+            minimumScore.Margin = new Padding(0, 5, 2, 2);
+            minimumScore.ValueChanged += delegate { ApplyFilter(); };
+            filters.Controls.Add(minimumScore);
+            Label hint = new Label();
+            hint.Text = "Matches tags, class, team, weapon, or player ID";
+            hint.AutoSize = true;
+            hint.ForeColor = Color.Gray;
+            hint.Margin = new Padding(12, 9, 2, 2);
+            filters.Controls.Add(hint);
+            layout.Controls.Add(filters, 0, 0);
+
+            SplitContainer split = new SplitContainer();
+            split.Dock = DockStyle.Fill;
+            split.Orientation = Orientation.Horizontal;
+            split.SplitterDistance = 330;
+            layout.Controls.Add(split, 0, 1);
+
+            grid.Dock = DockStyle.Fill;
+            grid.ReadOnly = true;
+            grid.AllowUserToAddRows = false;
+            grid.AllowUserToDeleteRows = false;
+            grid.AllowUserToResizeRows = false;
+            grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            grid.MultiSelect = false;
+            grid.AutoGenerateColumns = false;
+            grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+            grid.BackgroundColor = Color.FromArgb(17, 18, 20);
+            grid.GridColor = Color.FromArgb(62, 66, 72);
+            grid.DefaultCellStyle.BackColor = Color.FromArgb(24, 26, 29);
+            grid.DefaultCellStyle.ForeColor = Color.Gainsboro;
+            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(46, 105, 76);
+            grid.DefaultCellStyle.SelectionForeColor = Color.White;
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(44, 48, 54);
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
+            grid.EnableHeadersVisualStyles = false;
+            AddColumn("#", 42);
+            AddColumn("Score", 60);
+            AddColumn("Kills", 52);
+            AddColumn("Attacker", 88);
+            AddColumn("Class", 95);
+            AddColumn("Team", 72);
+            AddColumn("Kill ticks", 145);
+            AddColumn("Tags", 430);
+            grid.SelectionChanged += ShowSelectedCandidate;
+            split.Panel1.Controls.Add(grid);
+
+            details.Dock = DockStyle.Fill;
+            details.Multiline = true;
+            details.ReadOnly = true;
+            details.ScrollBars = ScrollBars.Both;
+            details.WordWrap = false;
+            details.BackColor = Color.FromArgb(17, 18, 20);
+            details.ForeColor = Color.FromArgb(218, 224, 230);
+            details.Font = new Font("Consolas", 10F);
+            split.Panel2.Controls.Add(details);
+        }
+
+        private void AddColumn(string name, int width)
+        {
+            DataGridViewTextBoxColumn column = new DataGridViewTextBoxColumn();
+            column.HeaderText = name;
+            column.Width = width;
+            column.SortMode = DataGridViewColumnSortMode.NotSortable;
+            grid.Columns.Add(column);
+        }
+
+        private void LoadCandidates()
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            int rank = 0;
+            try
+            {
+                foreach (string line in File.ReadLines(candidatesPath))
+                {
+                    if (String.IsNullOrWhiteSpace(line)) continue;
+                    IDictionary candidate = serializer.DeserializeObject(line) as IDictionary;
+                    if (candidate == null) continue;
+                    rank++;
+                    records.Add(new CandidateRecord(rank, candidate, line));
+                }
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Could not read frag_candidates.ndjson:\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Close();
+                return;
+            }
+            ApplyFilter();
+        }
+
+        private void ApplyFilter()
+        {
+            if (grid.Columns.Count == 0) return;
+            string filter = filterBox.Text.Trim().ToLowerInvariant();
+            decimal requiredScore = minimumScore.Value;
+            grid.Rows.Clear();
+            int visible = 0;
+            foreach (CandidateRecord record in records)
+            {
+                if (record.Score < requiredScore) continue;
+                if (filter.Length > 0 && record.SearchText.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                IDictionary candidate = record.Candidate;
+                IDictionary metrics = Map(candidate, "metrics");
+                IList killTicks = List(candidate, "point_of_kill_ticks");
+                int row = grid.Rows.Add(
+                    record.Rank,
+                    TextValue(candidate, "overall_score"),
+                    TextValue(metrics, "kills"),
+                    "#" + TextValue(candidate, "attacker_user_id"),
+                    DisplayValue(candidate, "attacker_class"),
+                    DisplayValue(candidate, "attacker_team"),
+                    JoinValues(killTicks),
+                    JoinValues(Value(candidate, "tags")));
+                grid.Rows[row].Tag = candidate;
+                visible++;
+            }
+            summary.Text = visible + " of " + records.Count + " ranked candidates. Select one to inspect its clip range, round evidence, and individual kills.";
+            if (grid.Rows.Count > 0) grid.Rows[0].Selected = true;
+            else details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
+        }
+
+        private void ShowSelectedCandidate(object sender, EventArgs e)
+        {
+            if (grid.SelectedRows.Count == 0) return;
+            IDictionary candidate = grid.SelectedRows[0].Tag as IDictionary;
+            if (candidate == null) return;
+            StringBuilder text = new StringBuilder();
+            text.AppendLine("Candidate " + DisplayValue(candidate, "candidate_id"));
+            text.AppendLine("Score " + DisplayValue(candidate, "overall_score") + " | attacker #" + DisplayValue(candidate, "attacker_user_id") + " | " + DisplayValue(candidate, "attacker_team") + " " + DisplayValue(candidate, "attacker_class"));
+            text.AppendLine("Tags: " + JoinValues(Value(candidate, "tags")));
+            text.AppendLine();
+            text.AppendLine("Clip range: " + DisplayValue(candidate, "start_tick") + " to " + DisplayValue(candidate, "end_tick") + " ticks");
+            text.AppendLine("Point-of-kill ticks: " + JoinValues(List(candidate, "point_of_kill_ticks")));
+            AppendRoundState(text, Map(candidate, "round_state"));
+            text.AppendLine();
+            text.AppendLine("Kills");
+            IList kills = List(candidate, "kills");
+            for (int i = 0; i < kills.Count; i++)
+            {
+                IDictionary kill = kills[i] as IDictionary;
+                if (kill == null) continue;
+                text.AppendLine(
+                    "  " + (i + 1) + ". tick " + DisplayValue(kill, "tick") +
+                    " | #" + DisplayValue(kill, "attacker_user_id") + " " + DisplayValue(kill, "attacker_team") + " " + DisplayValue(kill, "attacker_class") +
+                    " -> #" + DisplayValue(kill, "victim_user_id") + " " + DisplayValue(kill, "victim_team") + " " + DisplayValue(kill, "victim_class") +
+                    " | " + DisplayValue(kill, "weapon") +
+                    " | streak " + DisplayValue(kill, "kill_streak_total") +
+                    " | crit " + DisplayValue(kill, "crit_type"));
+            }
+            details.Text = text.ToString();
+            details.SelectionStart = 0;
+            details.SelectionLength = 0;
+        }
+
+        private static void AppendRoundState(StringBuilder text, IDictionary state)
+        {
+            if (state == null) return;
+            text.AppendLine("Round evidence");
+            text.AppendLine("  playable start: " + DisplayValue(state, "start_tick") + " (" + DisplayValue(state, "start_event") + ")");
+            IDictionary trigger = Map(state, "activation_trigger");
+            text.AppendLine("  activation trigger: " + DisplayValue(trigger, "event") + " at " + DisplayValue(trigger, "tick"));
+            text.AppendLine("  round-active tick: " + DisplayValue(state, "round_active_tick") + " | setup-finished tick: " + DisplayValue(state, "setup_finished_tick"));
+            text.AppendLine("  round end: " + DisplayValue(state, "end_tick") + " (" + DisplayValue(state, "end_event") + ")");
+            IDictionary ready = Map(state, "ready_up");
+            text.AppendLine("  ready-up: RED " + DisplayValue(ready, "red_ready_tick") + ", BLU " + DisplayValue(ready, "blu_ready_tick") + ", both ready " + DisplayValue(ready, "both_teams_ready"));
+        }
+
+        private static object Value(IDictionary values, string key)
+        {
+            return values != null && values.Contains(key) ? values[key] : null;
+        }
+
+        private static IDictionary Map(IDictionary values, string key)
+        {
+            return Value(values, key) as IDictionary;
+        }
+
+        private static IList List(IDictionary values, string key)
+        {
+            IList result = Value(values, key) as IList;
+            return result ?? new ArrayList();
+        }
+
+        private static string TextValue(IDictionary values, string key)
+        {
+            object value = Value(values, key);
+            return value == null ? "" : Convert.ToString(value);
+        }
+
+        private static string DisplayValue(IDictionary values, string key)
+        {
+            string value = TextValue(values, key);
+            return String.IsNullOrEmpty(value) ? "Unknown" : value;
+        }
+
+        private static string JoinValues(object values)
+        {
+            IList list = values as IList;
+            if (list == null || list.Count == 0) return "None";
+            List<string> text = new List<string>();
+            foreach (object value in list) text.Add(Convert.ToString(value));
+            return String.Join(", ", text.ToArray());
+        }
+
+        private sealed class CandidateRecord
+        {
+            public readonly int Rank;
+            public readonly IDictionary Candidate;
+            public readonly decimal Score;
+            public readonly string SearchText;
+
+            public CandidateRecord(int rank, IDictionary candidate, string sourceLine)
+            {
+                Rank = rank;
+                Candidate = candidate;
+                Score = DecimalValue(candidate, "overall_score");
+                SearchText = sourceLine ?? "";
+            }
+        }
+
+        private static decimal DecimalValue(IDictionary values, string key)
+        {
+            object value = Value(values, key);
+            try { return Convert.ToDecimal(value); }
+            catch (Exception) { return 0; }
+        }
     }
 }

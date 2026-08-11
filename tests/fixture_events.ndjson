@@ -1,3 +1,5 @@
+{"tick":10,"event_type":"teamplay_round_active","event":{"type":"TeamPlayRoundActive"}}
+{"tick":20,"event_type":"player_death","event":{"type":"PlayerDeath","user_id":2,"attacker":1,"weapon":"grenadelauncher","crit_type":0}}
 {"tick":50,"event_type":"player_death","event":{"type":"PlayerDeath","user_id":2,"attacker":1,"weapon":"grenadelauncher","crit_type":0}}
 {"tick":60,"event_type":"teamplay_team_ready","event":{"type":"TeamPlayTeamReady","team":2,"ready":true}}
 {"tick":70,"event_type":"teamplay_team_ready","event":{"type":"TeamPlayTeamReady","team":3,"ready":true}}

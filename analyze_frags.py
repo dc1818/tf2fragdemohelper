@@ -33,6 +33,9 @@ ROUND_ACTIVATION_EVENTS = {
 ROUND_RESET_EVENTS = {
     "teamplay_waiting_begins",
 }
+BUILDING_DESTRUCTION_EVENTS = {
+    "object_destroyed", "building_destroyed", "building_destruction",
+}
 READY_TEAM_NAMES = {2: "red", 3: "blu"}
 PROJECTILE_WEAPONS = {
     "rocketlauncher", "directhit", "blackbox", "liberty_launcher", "airstrike",
@@ -347,8 +350,9 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
     }
 
 
-def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
+def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any], debug: bool = False) -> List[Dict[str, Any]]:
     deaths: List[Dict[str, Any]] = []
+    pov_user_id = context.get("pov_player_user_id") if context.get("analysis_scope") == "pov_player_only" else None
     for item in events:
         if event_name(item) != "player_death":
             continue
@@ -356,12 +360,22 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
         tick = item["tick"]
         round_data = round_for_tick(rounds, tick)
         if round_data is None:
+            if debug:
+                print("[candidate-debug] reject player_death tick={} reason=outside_live_round".format(tick))
             continue
         attacker = as_int(fields.get("attacker"))
         victim = as_int(fields.get("user_id"))
         if attacker <= 0 or victim <= 0 or attacker == victim:
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} victim={} reason=invalid_or_world_damage".format(tick, attacker, victim))
+            continue
+        if pov_user_id is not None and victim == pov_user_id:
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} victim={} reason=pov_recorder_death".format(tick, attacker, victim))
             continue
         if context["analysis_scope"] == "pov_player_only" and attacker != context["pov_player_user_id"]:
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} reason=not_pov_attacker".format(tick, attacker))
             continue
         weapon = as_text(fields.get("weapon")).lower()
         deaths.append({
@@ -389,7 +403,42 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
             "kill_streak_total": as_int(fields.get("kill_streak_total")),
             "assister_user_id": as_int(fields.get("assister")),
         })
+        if debug:
+            assister = as_int(fields.get("assister"))
+            print("[candidate-debug] accept kill tick={} attacker={} victim={} assister={} weapon={}".format(tick, attacker, victim, assister or "none", weapon or "unknown"))
     return deaths
+
+
+def normalized_building_destructions(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], debug: bool = False) -> List[Dict[str, Any]]:
+    """Normalize building/object destruction events without treating them as kills."""
+    destructions: List[Dict[str, Any]] = []
+    pov_user_id = context.get("pov_player_user_id") if context.get("analysis_scope") == "pov_player_only" else None
+    for item in events:
+        if event_name(item) not in BUILDING_DESTRUCTION_EVENTS:
+            continue
+        tick = item["tick"]
+        if round_for_tick(rounds, tick) is None:
+            if debug:
+                print("[candidate-debug] reject building tick={} reason=outside_live_round".format(tick))
+            continue
+        fields = event_fields(item)
+        attacker = as_int(fields.get("attacker", fields.get("userid", fields.get("user_id"))))
+        if context.get("analysis_scope") == "pov_player_only" and pov_user_id is not None and attacker != pov_user_id:
+            if debug:
+                print("[candidate-debug] reject building tick={} attacker={} reason=not_pov_attacker".format(tick, attacker))
+            continue
+        object_type = as_text(fields.get("objecttype", fields.get("object_type", fields.get("object")))).lower() or "building"
+        destruction = {
+            "event_tick": tick,
+            "attacker_user_id": attacker,
+            "object_type": object_type,
+            "packet_sequence": as_int(item.get("packet_sequence")),
+            "event_index_in_packet": as_int(item.get("event_index_in_packet")),
+        }
+        destructions.append(destruction)
+        if debug:
+            print("[candidate-debug] building destruction tick={} attacker={} type={} weight=low_until_followed_by_kills".format(tick, attacker, object_type))
+    return destructions
 
 
 def weapon_tags(weapon: str) -> List[str]:
@@ -409,7 +458,7 @@ def weapon_tags(weapon: str) -> List[str]:
     return tags
 
 
-def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any]) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
+def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
     """Score one sequence and expose every contribution for auditing."""
     tags = set()
     score = 10.0
@@ -458,6 +507,15 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any]) -> 
         score += 8.0
         tags.add("late_round")
         breakdown.append({"reason": "late_round", "points": 8.0})
+    linked_buildings = [
+        building for building in (building_destructions or [])
+        if building["attacker_user_id"] == kills[0]["attacker_user_id"]
+        and 0 <= kills[0]["event_tick"] - building["event_tick"] <= round(TICKS_PER_SECOND * 2.0)
+    ]
+    if linked_buildings:
+        score += 6.0
+        tags.add("building_to_kill_sequence")
+        breakdown.append({"reason": "building_destruction_led_to_kills", "points": 6.0, "count": len(linked_buildings), "event_tick": linked_buildings[-1]["event_tick"]})
     raw_score = round(score, 2)
     metrics = {
         "kills": len(kills),
@@ -470,6 +528,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any]) -> 
         "last_kill_tick": kills[-1]["event_tick"],
         "score_before_floor": raw_score,
         "score_floor_applied": raw_score < 0.0,
+        "linked_building_destructions": len(linked_buildings),
     }
     return round(max(0.0, raw_score), 2), sorted(tags), metrics, breakdown
 
@@ -493,7 +552,7 @@ def group_kills(kills: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     return groups
 
 
-def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
+def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None, debug: bool = False) -> List[Dict[str, Any]]:
     by_attacker: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
     for death in deaths:
         by_attacker[(death["round_index"], death["attacker_user_id"])].append(death)
@@ -502,11 +561,15 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
     for (round_index, attacker), kills in by_attacker.items():
         kills.sort(key=lambda item: (item["event_tick"], item["packet_sequence"], item["event_index_in_packet"]))
         groups = group_kills(kills)
+        if debug:
+            print("[candidate-debug] grouping round={} attacker={} input_kills={} groups={}".format(round_index, attacker, len(kills), [[kill["event_tick"] for kill in group] for group in groups]))
         round_data = round_lookup[round_index]
         for group in groups:
-            score, tags, metrics, score_breakdown = score_candidate(group, round_data)
+            score, tags, metrics, score_breakdown = score_candidate(group, round_data, building_destructions)
             # Keep single kills only when they contain a meaningful known signal.
             if len(group) == 1 and score < 25.0:
+                if debug:
+                    print("[candidate-debug] discard group round={} attacker={} ticks={} kills={} score={} reason=single_kill_below_threshold".format(round_index, attacker, [kill["event_tick"] for kill in group], len(group), score))
                 continue
             first_tick = group[0]["event_tick"]
             last_tick = group[-1]["event_tick"]
@@ -549,11 +612,14 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                 "tags": tags,
                 "metrics": metrics,
                 "kills": group,
+                "building_destructions": [building for building in (building_destructions or []) if building.get("attacker_user_id") == attacker and first_tick - round(TICKS_PER_SECOND * 2.0) <= building["event_tick"] <= first_tick],
                 "state_pass": {
                     "status": "pending",
                     "next": ["airshot confirmation", "projectile flight", "health", "position", "objective proximity"],
                 },
             })
+            if debug:
+                print("[candidate-debug] candidate id={} round={} attacker={} kills={} exact_ticks={} score={} tags={}".format(candidates[-1]["candidate_id"], round_index, attacker, len(group), [kill["event_tick"] for kill in group], score, ",".join(tags) or "none"))
     return sorted(candidates, key=lambda item: (-item["overall_score"], item["start_tick"]))
 
 
@@ -567,6 +633,7 @@ def write_ndjson(path: Path, values: Iterable[Dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rank live-round TF2 frag candidates from events.ndjson.")
     parser.add_argument("export_directory", type=Path, help="Folder produced by export_all.exe")
+    parser.add_argument("--debug", action="store_true", help="Print candidate acceptance, rejection, grouping, and scoring decisions")
     arguments = parser.parse_args()
     export_directory = arguments.export_directory.resolve()
     events_path = export_directory / "events.ndjson"
@@ -578,8 +645,13 @@ def main() -> int:
     teams = player_team_history(events)
     names = player_name_history(events)
     context = analysis_context(export_directory, names)
-    deaths = normalized_deaths(events, rounds, classes, teams, names, context)
-    candidates = build_candidates(deaths, rounds, context)
+    if arguments.debug:
+        print("[candidate-debug] demo capture={} scope={} pov_user_id={} header_nick={}".format(context["capture_type"], context["analysis_scope"], context.get("pov_player_user_id") or "none", context.get("header_nick") or "unknown"))
+        for round_data in rounds:
+            print("[candidate-debug] live round #{} start={} ({}) end={} ({})".format(round_data["round_index"], round_data["live_start_tick"], round_data["live_start_event"], round_data["end_tick"], round_data["end_reason"]))
+    deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug)
+    building_destructions = normalized_building_destructions(events, rounds, context, arguments.debug)
+    candidates = build_candidates(deaths, rounds, context, building_destructions, arguments.debug)
     write_ndjson(export_directory / "frag_candidates.ndjson", candidates)
     summary = {
         "format": "tf2-frag-candidates",
@@ -589,6 +661,7 @@ def main() -> int:
         "ticks_per_second_assumption": TICKS_PER_SECOND,
         "live_rounds": len(rounds),
         "live_round_kills": len(deaths),
+        "live_round_building_destructions": len(building_destructions),
         "candidate_count": len(candidates),
         "limitations": [
             "This event-only pass does not confirm airshots.",

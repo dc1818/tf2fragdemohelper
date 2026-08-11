@@ -255,14 +255,14 @@ namespace Tf2StvParserGui
             Exception pythonFailure = null;
             try
             {
-                await RunWorker("python.exe", Quote(script) + " " + Quote(exportDirectory));
+                await RunWorker("python.exe", Quote(script) + " --debug " + Quote(exportDirectory));
             }
             catch (Exception ex)
             {
                 pythonFailure = ex;
             }
             if (pythonFailure != null)
-                await RunWorker("py.exe", "-3 " + Quote(script) + " " + Quote(exportDirectory));
+                await RunWorker("py.exe", "-3 " + Quote(script) + " --debug " + Quote(exportDirectory));
         }
 
         private void Cancel(object sender, EventArgs e)
@@ -531,6 +531,7 @@ namespace Tf2StvParserGui
             text.AppendLine("Exact player_death ticks: " + JoinValues(List(candidate, "point_of_kill_ticks")));
             text.AppendLine("Clip window (includes lead-in/out): " + ClipTick(candidate, "clip_start_tick", "start_tick") + " to " + ClipTick(candidate, "clip_end_tick", "end_tick") + " ticks");
             AppendScoreBreakdown(text, List(candidate, "score_breakdown"));
+            AppendBuildingEvidence(text, List(candidate, "building_destructions"));
             AppendDemoContext(text, Map(candidate, "demo_context"));
             AppendRoundState(text, Map(candidate, "round_state"));
             text.AppendLine();
@@ -545,12 +546,29 @@ namespace Tf2StvParserGui
                     " | #" + DisplayValue(kill, "attacker_user_id") + " " + DisplayValue(kill, "attacker_team") + " " + DisplayValue(kill, "attacker_class") +
                     " -> #" + DisplayValue(kill, "victim_user_id") + " " + DisplayValue(kill, "victim_team") + " " + DisplayValue(kill, "victim_class") +
                     " | " + DisplayValue(kill, "weapon") +
+                    " | assist by #" + DisplayValue(kill, "assister_user_id") +
                     " | streak " + DisplayValue(kill, "kill_streak_total") +
                     " | crit " + DisplayValue(kill, "crit_type"));
             }
             details.Text = text.ToString();
             details.SelectionStart = 0;
             details.SelectionLength = 0;
+        }
+
+        private static void AppendBuildingEvidence(StringBuilder text, IList buildings)
+        {
+            text.AppendLine("Building events linked to this sequence");
+            if (buildings.Count == 0)
+            {
+                text.AppendLine("  None (building destruction alone is not treated as a kill).");
+                return;
+            }
+            foreach (object item in buildings)
+            {
+                IDictionary building = item as IDictionary;
+                if (building == null) continue;
+                text.AppendLine("  tick " + DisplayValue(building, "event_tick") + " | " + DisplayValue(building, "object_type") + " | attacker #" + DisplayValue(building, "attacker_user_id"));
+            }
         }
 
         private static void AppendScoreBreakdown(StringBuilder text, IList breakdown)

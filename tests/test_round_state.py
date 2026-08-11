@@ -108,6 +108,27 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(candidate["clip_start_tick"], 667)
         self.assertEqual(candidate["clip_end_tick"], 1200)
 
+    def test_pov_recorder_death_and_assist_are_not_frag_kills(self):
+        events = [
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {"user_id": 1, "attacker": 2, "assister": 3}},
+            {"tick": 210, "event_type": "player_death", "event": {"user_id": 4, "attacker": 1, "assister": 3}},
+            {"tick": 500, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(sorted(events + [{"tick": 90, "event_type": "round_start", "event": {}}], key=lambda item: item["tick"]))
+        context = {"analysis_scope": "pov_player_only", "pov_player_user_id": 1}
+        deaths = ANALYZER.normalized_deaths(events, rounds, {}, {}, {}, context)
+        self.assertEqual([death["event_tick"] for death in deaths], [210])
+        self.assertEqual(deaths[0]["assister_user_id"], 3)
+
+    def test_building_destruction_only_adds_weight_when_followed_by_kills(self):
+        kill = self.kill(200, 2)
+        building = {"event_tick": 190, "attacker_user_id": 1, "object_type": "sentrygun"}
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], {"end_tick": 1000}, [building])
+        self.assertIn("building_to_kill_sequence", tags)
+        self.assertEqual(metrics["linked_building_destructions"], 1)
+        self.assertEqual([item["reason"] for item in breakdown if item["reason"] == "building_destruction_led_to_kills"], ["building_destruction_led_to_kills"])
+
 
 if __name__ == "__main__":
     unittest.main()

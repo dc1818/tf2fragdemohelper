@@ -14,6 +14,7 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Ranks live-round candidates using multi-kills, rapid sequences, projectile kills, Medic picks, killstreaks, late-round timing, and random-crit penalties.
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
 - Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
+- Streams candidate-debug decisions into the embedded parser terminal, including rejected deaths, POV filtering, grouping windows, building events, and score outcomes.
 
 ## Planned analysis passes
 
@@ -76,9 +77,11 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 
 The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
 
+Building/object destruction events are not kills and do not create important standalone candidates. A destruction can add a small contextual bonus only when the same attacker produces a real player-kill sequence within two seconds. In a resolved POV demo, the recorded player's own deaths are rejected, and a death where that player appears only as an assister is never counted as a POV kill.
+
 Every kill records its exact original `player_death` event tick in `event_tick` and `point_of_kill_ticks`. `clip_start_tick` and `clip_end_tick` are editing boundaries with lead-in/out padding; they are not kill times. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player only when the header nickname matches exactly one decoded player-name event; otherwise the all-player result is retained and marked in `demo_context`.
 
-After an export completes, use **View candidates** in the GUI. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo.
+After an export completes, use **View candidates** in the GUI. The parser log remains visible in the embedded terminal and can be used to trace every accepted/rejected event. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo. The GUI invokes `analyze_frags.py --debug` automatically.
 
 ## Project structure
 

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+from bisect import bisect_right
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -48,6 +50,11 @@ PROJECTILE_WEAPONS = {
     "grenadelauncher", "loch_n_load", "iron_bomber", "stickybomb_launcher",
     "quickiebomb_launcher", "flaregun", "detonator", "scorch_shot", "compound_bow",
     "crusaders_crossbow", "syringegun_medic", "rescue_ranger", "righteous_bison",
+}
+AIRSHOT_PROJECTILE_WEAPONS = {
+    "rocketlauncher", "directhit", "blackbox", "liberty_launcher", "airstrike",
+    "grenadelauncher", "loch_n_load", "iron_bomber", "loose_cannon",
+    "flaregun", "detonator", "scorch_shot", "compound_bow", "huntsman",
 }
 SPECIAL_WEAPON_TAGS = {
     "market_gardener": "market_garden",
@@ -140,6 +147,225 @@ def read_json_if_present(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as source:
         value = json.load(source)
     return value if isinstance(value, dict) else {}
+
+
+class StateTimeline:
+    """Index parser-reconstructed state deltas by authoritative analysis tick."""
+
+    def __init__(self) -> None:
+        self.players: Dict[int, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+        self.projectiles: Dict[int, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+        self.projectile_removals: Dict[int, List[int]] = defaultdict(list)
+        self.sample_count = 0
+
+    @staticmethod
+    def _at(history: List[Tuple[int, Dict[str, Any]]], tick: int, require_alive: bool = False) -> Optional[Dict[str, Any]]:
+        if not history:
+            return None
+        index = bisect_right([item[0] for item in history], tick) - 1
+        while index >= 0:
+            state = history[index][1]
+            if not require_alive or (as_text(state.get("life_state")).lower() == "alive" and as_int(state.get("health")) > 0):
+                return state
+            index -= 1
+        return None
+
+    def player_at(self, user_id: int, tick: int, require_alive: bool = False) -> Optional[Dict[str, Any]]:
+        return self._at(self.players.get(user_id, []), tick, require_alive)
+
+    def team_counts_at(self, tick: int) -> Tuple[Dict[str, int], Dict[str, int]]:
+        alive: Dict[str, int] = defaultdict(int)
+        roster: Dict[str, int] = defaultdict(int)
+        for history in self.players.values():
+            state = self._at(history, tick)
+            if state is None:
+                continue
+            team = as_text(state.get("team")).lower()
+            if team not in {"red", "blue", "blu"}:
+                continue
+            team = "blu" if team in {"blue", "blu"} else "red"
+            roster[team] += 1
+            if as_text(state.get("life_state")).lower() == "alive" and as_int(state.get("health")) > 0:
+                alive[team] += 1
+        return dict(alive), dict(roster)
+
+
+def read_state_timeline(path: Path, debug: bool = False) -> StateTimeline:
+    timeline = StateTimeline()
+    if not path.is_file():
+        if debug:
+            print("[candidate-debug] state timeline unavailable path={}".format(path))
+        return timeline
+    entity_to_user: Dict[int, int] = {}
+    with path.open("r", encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError("Invalid JSON on state_samples.ndjson line {}: {}".format(line_number, error))
+            tick = as_int(record.get("server_tick")) or as_int(record.get("demo_tick"))
+            timeline.sample_count += 1
+            for player in record.get("players", []):
+                if not isinstance(player, dict):
+                    continue
+                entity_id = as_int(player.get("entity_id"))
+                user_id = as_int(player.get("user_id"))
+                if user_id:
+                    entity_to_user[entity_id] = user_id
+                else:
+                    user_id = entity_to_user.get(entity_id, 0)
+                if user_id:
+                    sample = dict(player)
+                    sample["state_tick"] = tick
+                    timeline.players[user_id].append((tick, sample))
+            for projectile in record.get("projectiles", []):
+                if not isinstance(projectile, dict):
+                    continue
+                entity_id = as_int(projectile.get("entity_id"))
+                if entity_id:
+                    sample = dict(projectile)
+                    sample["state_tick"] = tick
+                    timeline.projectiles[entity_id].append((tick, sample))
+            for entity_id in record.get("removed_projectiles", []):
+                timeline.projectile_removals[as_int(entity_id)].append(tick)
+    if debug:
+        print("[candidate-debug] state timeline samples={} players={} projectiles={}".format(timeline.sample_count, len(timeline.players), len(timeline.projectiles)))
+    return timeline
+
+
+def vector3(value: Any) -> Tuple[float, float, float]:
+    if not isinstance(value, list) or len(value) < 3:
+        return 0.0, 0.0, 0.0
+    try:
+        return float(value[0]), float(value[1]), float(value[2])
+    except (TypeError, ValueError):
+        return 0.0, 0.0, 0.0
+
+
+def projectile_type_matches_weapon(projectile_type: str, weapon: str) -> bool:
+    projectile_type = projectile_type.lower()
+    if weapon in {"rocketlauncher", "directhit", "blackbox", "liberty_launcher", "airstrike"}:
+        return projectile_type == "rocket"
+    if weapon in {"grenadelauncher", "loch_n_load", "iron_bomber"}:
+        return projectile_type == "pipe"
+    if weapon == "loose_cannon":
+        return projectile_type == "loosecannon"
+    if weapon in {"flaregun", "detonator", "scorch_shot"}:
+        return projectile_type == "flare"
+    if weapon in {"compound_bow", "huntsman"}:
+        return projectile_type in {"arrow", "unknown"}
+    return False
+
+
+def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_state: Optional[Dict[str, Any]], victim_state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if attacker_state is None or victim_state is None:
+        return None
+    tick = kill["event_tick"]
+    handles = {as_int(value) for value in attacker_state.get("weapon_handles", []) if as_int(value)}
+    if not handles:
+        return None
+    victim_position = vector3(victim_state.get("position"))
+    best: Optional[Tuple[float, Dict[str, Any]]] = None
+    for entity_id, history in timeline.projectiles.items():
+        projectile = timeline._at(history, tick + 3)
+        if projectile is None or as_int(projectile.get("launcher_handle")) not in handles:
+            continue
+        if not projectile_type_matches_weapon(as_text(projectile.get("projectile_type")), kill["weapon"]):
+            continue
+        projectile_tick = as_int(projectile.get("state_tick"))
+        removals = timeline.projectile_removals.get(entity_id, [])
+        removal_distance = min((abs(removed_tick - tick) for removed_tick in removals), default=999999)
+        if removal_distance > 5 and abs(projectile_tick - tick) > 5:
+            continue
+        projectile_position = vector3(projectile.get("position"))
+        distance = math.sqrt(sum((projectile_position[index] - victim_position[index]) ** 2 for index in range(3)))
+        if distance > 220.0:
+            continue
+        usable_history = [item for item in history if item[0] <= tick + 3]
+        path_distance = 0.0
+        for previous, current in zip(usable_history, usable_history[1:]):
+            previous_position = vector3(previous[1].get("position"))
+            current_position = vector3(current[1].get("position"))
+            path_distance += math.sqrt(sum((current_position[index] - previous_position[index]) ** 2 for index in range(3)))
+        launch_tick = usable_history[0][0] if usable_history else projectile_tick
+        impact_tick = min((removed_tick for removed_tick in removals if removed_tick >= launch_tick), default=tick)
+        evidence = {
+            "entity_id": entity_id,
+            "projectile_type": as_text(projectile.get("projectile_type")),
+            "launcher_handle": as_int(projectile.get("launcher_handle")),
+            "last_state_tick": projectile_tick,
+            "nearest_removal_tick_distance": removal_distance if removal_distance < 999999 else None,
+            "distance_to_victim": round(distance, 2),
+            "impact_proximity": "direct" if distance <= 64.0 else "splash",
+            "launch_tick": launch_tick,
+            "flight_ticks": max(0, impact_tick - launch_tick),
+            "flight_seconds": round(max(0, impact_tick - launch_tick) / TICKS_PER_SECOND, 3),
+            "tracked_path_distance": round(path_distance, 2),
+        }
+        if best is None or distance < best[0]:
+            best = distance, evidence
+    return best[1] if best is not None else None
+
+
+def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, Any]], timeline: StateTimeline, debug: bool = False) -> None:
+    deploys: Dict[int, List[int]] = defaultdict(list)
+    charged_deaths = set()
+    for event in events:
+        fields = event_fields(event)
+        if event_name(event) == "player_chargedeployed":
+            deploys[as_int(fields.get("user_id", fields.get("userid")))].append(event["tick"])
+        elif event_name(event) == "medic_death" and as_bool(fields.get("charged"), False):
+            charged_deaths.add((event["tick"], as_int(fields.get("user_id", fields.get("userid")))))
+
+    for kill in deaths:
+        tick = kill["event_tick"]
+        attacker = kill["attacker_user_id"]
+        victim = kill["victim_user_id"]
+        attacker_state = timeline.player_at(attacker, tick, require_alive=True)
+        victim_state = timeline.player_at(victim, tick, require_alive=True)
+        if attacker_state is not None:
+            kill["attacker_class"] = kill.get("attacker_class") or as_text(attacker_state.get("class")) or None
+            state_team = as_text(attacker_state.get("team")).lower()
+            kill["attacker_team"] = kill.get("attacker_team") or ("blu" if state_team == "blue" else state_team or None)
+        if victim_state is not None:
+            kill["victim_class"] = kill.get("victim_class") or as_text(victim_state.get("class")) or None
+            state_team = as_text(victim_state.get("team")).lower()
+            kill["victim_team"] = kill.get("victim_team") or ("blu" if state_team == "blue" else state_team or None)
+
+        airborne = bool(victim_state is not None and victim_state.get("on_ground") is False)
+        projectile_evidence = None
+        if airborne and kill["weapon"] in AIRSHOT_PROJECTILE_WEAPONS:
+            projectile_evidence = matching_projectile(timeline, kill, attacker_state, victim_state)
+        medic_charge = as_int(victim_state.get("medic_charge")) if victim_state is not None else 0
+        deployed_recently = any(0 <= tick - deployed_tick <= round(TICKS_PER_SECOND * 2.0) for deployed_tick in deploys.get(victim, []))
+        uber_drop = kill.get("victim_class") == "medic" and (
+            (tick, victim) in charged_deaths or (medic_charge >= 95 and not deployed_recently)
+        )
+        # State deltas are written after the packet is applied. Use the prior
+        # server tick for pre-frag alive counts so the victim is not already
+        # removed from the situation we are measuring.
+        alive_counts, roster_counts = timeline.team_counts_at(max(0, tick - 1))
+        attacker_team = as_text(kill.get("attacker_team")).lower()
+        victim_team = as_text(kill.get("victim_team")).lower()
+        evidence = {
+            "state_available": attacker_state is not None and victim_state is not None,
+            "victim_airborne": airborne,
+            "confirmed_airshot": projectile_evidence is not None,
+            "projectile": projectile_evidence,
+            "medic_charge_before_death": medic_charge if kill.get("victim_class") == "medic" else None,
+            "uber_deployed_recently": deployed_recently if kill.get("victim_class") == "medic" else None,
+            "confirmed_uber_drop": uber_drop,
+            "friendly_alive_before": alive_counts.get(attacker_team, 0),
+            "enemy_alive_before": alive_counts.get(victim_team, 0),
+            "friendly_state_roster": roster_counts.get(attacker_team, 0),
+            "enemy_state_roster": roster_counts.get(victim_team, 0),
+        }
+        kill["state_evidence"] = evidence
+        if debug:
+            print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} uber_drop={} alive={}:{}".format(tick, attacker, victim, airborne, bool(projectile_evidence), uber_drop, evidence["friendly_alive_before"], evidence["enemy_alive_before"]))
 
 
 def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -560,15 +786,37 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     breakdown: List[Dict[str, Any]] = [{"reason": "candidate_base", "points": 10.0}]
     for kill in kills:
         tags.update(weapon_tags(kill["weapon"]))
+        state_evidence = kill.get("state_evidence", {})
         if kill["victim_class"] == "medic":
             score += 18.0
             tags.add("medic_pick")
             breakdown.append({"reason": "medic_pick", "points": 18.0, "event_tick": kill["event_tick"]})
+            if state_evidence.get("confirmed_uber_drop"):
+                score += 20.0
+                tags.add("uber_drop")
+                breakdown.append({"reason": "confirmed_uber_drop", "points": 20.0, "event_tick": kill["event_tick"], "charge": state_evidence.get("medic_charge_before_death")})
         if kill["victim_class"] == "demoman":
             score += 10.0
             tags.add("demoman_pick")
             breakdown.append({"reason": "demoman_pick", "points": 10.0, "event_tick": kill["event_tick"]})
-        if kill["rocket_jump_victim"]:
+        if state_evidence.get("confirmed_airshot"):
+            score += 20.0
+            tags.add("confirmed_airshot")
+            breakdown.append({"reason": "state_confirmed_airshot", "points": 20.0, "event_tick": kill["event_tick"], "projectile": state_evidence.get("projectile")})
+            projectile = state_evidence.get("projectile") or {}
+            if projectile.get("impact_proximity") == "direct":
+                score += 6.0
+                tags.add("direct_airshot")
+                breakdown.append({"reason": "direct_airshot_proximity", "points": 6.0, "event_tick": kill["event_tick"], "distance": projectile.get("distance_to_victim")})
+            if float(projectile.get("flight_seconds") or 0.0) >= 0.5:
+                score += 5.0
+                tags.add("long_flight_airshot")
+                breakdown.append({"reason": "long_flight_airshot", "points": 5.0, "event_tick": kill["event_tick"], "flight_seconds": projectile.get("flight_seconds")})
+        elif state_evidence.get("victim_airborne") and kill["weapon"] in AIRSHOT_PROJECTILE_WEAPONS:
+            score += 8.0
+            tags.add("airborne_projectile_kill")
+            breakdown.append({"reason": "state_confirmed_airborne_victim", "points": 8.0, "event_tick": kill["event_tick"]})
+        elif kill["rocket_jump_victim"]:
             score += 10.0
             tags.add("rocket_jump_victim")
             breakdown.append({"reason": "rocket_jump_victim", "points": 10.0, "event_tick": kill["event_tick"]})
@@ -593,6 +841,27 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         score += 25.0
         tags.add("four_kill_plus")
         breakdown.append({"reason": "four_kill_plus", "points": 25.0})
+    confirmed_airshot_count = sum(bool(kill.get("state_evidence", {}).get("confirmed_airshot")) for kill in kills)
+    if confirmed_airshot_count >= 2:
+        score += 15.0
+        tags.add("double_airshot_sequence")
+        breakdown.append({"reason": "multiple_confirmed_airshots", "points": 15.0, "count": confirmed_airshot_count})
+    first_state = kills[0].get("state_evidence", {})
+    enemy_alive_before = as_int(first_state.get("enemy_alive_before"))
+    friendly_alive_before = as_int(first_state.get("friendly_alive_before"))
+    enemy_state_roster = as_int(first_state.get("enemy_state_roster"))
+    unique_group_victims = len({kill["victim_user_id"] for kill in kills})
+    if enemy_state_roster >= 4 and enemy_alive_before > 0 and unique_group_victims >= enemy_alive_before:
+        score += 18.0
+        tags.add("team_wipe")
+        if enemy_alive_before == 1:
+            tags.add("last_enemy_alive")
+        breakdown.append({"reason": "sequence_finished_enemy_team", "points": 18.0, "enemy_alive_before": enemy_alive_before})
+    enemy_alive_after = max(0, enemy_alive_before - unique_group_victims)
+    if friendly_alive_before > 0 and enemy_alive_before >= friendly_alive_before + 2 and enemy_alive_after <= friendly_alive_before:
+        score += 16.0
+        tags.add("disadvantage_swing")
+        breakdown.append({"reason": "sequence_erased_player_disadvantage", "points": 16.0, "friendly_alive_before": friendly_alive_before, "enemy_alive_before": enemy_alive_before, "enemy_alive_after": enemy_alive_after})
     duration_ticks = max(0, kills[-1]["event_tick"] - kills[0]["event_tick"])
     duration_seconds = duration_ticks / TICKS_PER_SECOND
     if len(kills) >= 2 and duration_seconds <= 2.0:
@@ -675,6 +944,13 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "medic_kills": sum(kill["victim_class"] == "medic" for kill in kills),
         "demoman_kills": sum(kill["victim_class"] == "demoman" for kill in kills),
         "full_crit_kills": sum(kill["crit_type"] == 2 for kill in kills),
+        "confirmed_airshots": confirmed_airshot_count,
+        "direct_airshots": sum((kill.get("state_evidence", {}).get("projectile") or {}).get("impact_proximity") == "direct" for kill in kills),
+        "airborne_projectile_kills": sum(bool(kill.get("state_evidence", {}).get("victim_airborne")) and kill["weapon"] in AIRSHOT_PROJECTILE_WEAPONS for kill in kills),
+        "confirmed_uber_drops": sum(bool(kill.get("state_evidence", {}).get("confirmed_uber_drop")) for kill in kills),
+        "friendly_alive_before": friendly_alive_before,
+        "enemy_alive_before": enemy_alive_before,
+        "enemy_alive_after_sequence": enemy_alive_after,
         "first_kill_tick": kills[0]["event_tick"],
         "last_kill_tick": kills[-1]["event_tick"],
         "score_before_floor": raw_score,
@@ -781,8 +1057,11 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                 "building_destructions": [building for building in (building_destructions or []) if building.get("attacker_user_id") == attacker and first_tick - round(TICKS_PER_SECOND * 2.0) <= building["event_tick"] <= first_tick],
                 "objective_followups": objective_followups,
                 "state_pass": {
-                    "status": "pending",
-                    "next": ["airshot confirmation", "projectile flight", "health", "position", "objective proximity", "uber drop confirmation", "alive-player count"],
+                    "status": "complete" if any(kill.get("state_evidence", {}).get("state_available") for kill in group) else "unavailable",
+                    "confirmed_airshots": metrics.get("confirmed_airshots", 0),
+                    "confirmed_uber_drops": metrics.get("confirmed_uber_drops", 0),
+                    "enemy_alive_before": metrics.get("enemy_alive_before", 0),
+                    "enemy_alive_after_sequence": metrics.get("enemy_alive_after_sequence", 0),
                 },
             })
             if debug:
@@ -807,6 +1086,7 @@ def main() -> int:
     if not events_path.is_file():
         raise FileNotFoundError("events.ndjson is missing. Rebuild and run the updated parser first: {}".format(events_path))
     events = read_events(events_path)
+    state_timeline = read_state_timeline(export_directory / "state_samples.ndjson", arguments.debug)
     rounds = build_rounds(events)
     classes = class_history(events)
     teams = player_team_history(events)
@@ -817,6 +1097,7 @@ def main() -> int:
         for round_data in rounds:
             print("[candidate-debug] live round #{} start={} ({}) end={} ({})".format(round_data["round_index"], round_data["live_start_tick"], round_data["live_start_event"], round_data["end_tick"], round_data["end_reason"]))
     deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug)
+    enrich_state_evidence(deaths, events, state_timeline, arguments.debug)
     building_destructions = normalized_building_destructions(events, rounds, context, arguments.debug)
     objective_events = normalized_objective_events(events, rounds, teams, arguments.debug)
     candidates = build_candidates(deaths, rounds, context, building_destructions, objective_events, arguments.debug)
@@ -831,10 +1112,12 @@ def main() -> int:
         "live_round_kills": len(deaths),
         "live_round_building_destructions": len(building_destructions),
         "live_round_objective_events": len(objective_events),
+        "state_sample_count": state_timeline.sample_count,
+        "state_backed_analysis": state_timeline.sample_count > 0,
         "candidate_count": len(candidates),
         "limitations": [
-            "This event-only pass does not confirm airshots.",
-            "Airshot, position, health, projectile-flight, and objective-proximity scoring require the planned packet-state pass.",
+            "Confirmed airshots require an airborne victim plus a matching reconstructed projectile owner, type, timing, and impact proximity.",
+            "When state_samples.ndjson is unavailable, the analyzer retains event-only scoring and does not invent state-backed tags.",
             "Only kills inside closed playable intervals are candidates; team ready-up and countdown events are recorded as evidence but never open an interval.",
             "Kill ticks are the original player_death event ticks. Packet sequence and event-index fields preserve ordering when multiple events share one tick.",
             "POV-only filtering is enabled only when the demo is identified as POV and its header nickname resolves to exactly one player event; otherwise all players are retained.",

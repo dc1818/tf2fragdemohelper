@@ -1,0 +1,9 @@
+{"tick":50,"event_type":"player_death","event":{"type":"PlayerDeath","user_id":2,"attacker":1,"weapon":"grenadelauncher","crit_type":0}}
+{"tick":100,"event_type":"teamplay_round_active","event":{"type":"TeamPlayRoundActive"}}
+{"tick":120,"event_type":"player_class","event":{"type":"PlayerClass","user_id":1,"class":"demoman"}}
+{"tick":121,"event_type":"player_class","event":{"type":"PlayerClass","user_id":2,"class":"scout"}}
+{"tick":122,"event_type":"player_class","event":{"type":"PlayerClass","user_id":3,"class":"medic"}}
+{"tick":200,"event_type":"player_death","event":{"type":"PlayerDeath","user_id":2,"attacker":1,"weapon":"grenadelauncher","crit_type":0,"rocket_jump":true,"kill_streak_total":1}}
+{"tick":300,"event_type":"player_death","event":{"type":"PlayerDeath","user_id":3,"attacker":1,"weapon":"grenadelauncher","crit_type":0,"rocket_jump":false,"kill_streak_total":2}}
+{"tick":1000,"event_type":"teamplay_round_win","event":{"type":"TeamPlayRoundWin","team":3}}
+{"tick":1050,"event_type":"player_death","event":{"type":"PlayerDeath","user_id":2,"attacker":1,"weapon":"grenadelauncher","crit_type":0}}

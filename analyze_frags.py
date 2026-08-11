@@ -110,7 +110,22 @@ def read_events(path: Path) -> List[Dict[str, Any]]:
                 continue
             item["tick"] = as_int(item.get("tick"))
             events.append(item)
-    return sorted(events, key=lambda item: item["tick"])
+    return sorted(
+        events,
+        key=lambda item: (
+            item["tick"],
+            as_int(item.get("packet_sequence")),
+            as_int(item.get("event_index_in_packet")),
+        ),
+    )
+
+
+def read_json_if_present(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
+        return {}
+    with path.open("r", encoding="utf-8") as source:
+        value = json.load(source)
+    return value if isinstance(value, dict) else {}
 
 
 def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -267,7 +282,72 @@ def player_team_at(history: Dict[int, List[Tuple[int, Optional[str]]]], user_id:
     return found
 
 
-def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]]) -> List[Dict[str, Any]]:
+def player_name_history(events: Iterable[Dict[str, Any]]) -> Dict[int, List[Tuple[int, str]]]:
+    """Collect player names when the demo emits connection/name-change events."""
+    history: Dict[int, List[Tuple[int, str]]] = defaultdict(list)
+    for item in events:
+        name = event_name(item)
+        if name not in {"player_connect", "player_connect_client", "player_changename"}:
+            continue
+        fields = event_fields(item)
+        user_id = as_int(fields.get("user_id", fields.get("userid")))
+        player_name = as_text(fields.get("newname" if name == "player_changename" else "name"))
+        if user_id and player_name:
+            history[user_id].append((item["tick"], player_name))
+    return history
+
+
+def player_name_at(history: Dict[int, List[Tuple[int, str]]], user_id: int, tick: int) -> Optional[str]:
+    found: Optional[str] = None
+    for changed_tick, player_name in history.get(user_id, []):
+        if changed_tick > tick:
+            break
+        found = player_name
+    return found
+
+
+def find_player_by_name(history: Dict[int, List[Tuple[int, str]]], name: str) -> Optional[int]:
+    normalized = name.strip().casefold()
+    if not normalized:
+        return None
+    matches = {
+        user_id
+        for user_id, changes in history.items()
+        if any(player_name.casefold() == normalized for _, player_name in changes)
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, str]]]) -> Dict[str, Any]:
+    """Select all-player or POV-only analysis without guessing a POV identity."""
+    manifest = read_json_if_present(export_directory / "manifest.json")
+    header = read_json_if_present(export_directory / "header.json")
+    capture = manifest.get("demo_capture", {})
+    capture = capture if isinstance(capture, dict) else {}
+    capture_type = as_text(capture.get("classification")).lower() or "unknown"
+    header_nick = as_text(header.get("nick"))
+    pov_user_id: Optional[int] = None
+    scope = "all_players"
+    reason = "STV and unknown demos retain candidates from every player."
+    if capture_type == "pov":
+        pov_user_id = find_player_by_name(names, header_nick)
+        if pov_user_id is not None:
+            scope = "pov_player_only"
+            reason = "POV recorder matched to a player_connect/player_changename event."
+        else:
+            reason = "POV recording detected, but the recorded player could not be matched safely; all players were retained."
+    return {
+        "capture_type": capture_type,
+        "capture_confidence": as_text(capture.get("confidence")) or "unknown",
+        "capture_evidence": capture.get("evidence", []),
+        "header_nick": header_nick or None,
+        "analysis_scope": scope,
+        "pov_player_user_id": pov_user_id,
+        "scope_reason": reason,
+    }
+
+
+def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
     deaths: List[Dict[str, Any]] = []
     for item in events:
         if event_name(item) != "player_death":
@@ -281,12 +361,21 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
         victim = as_int(fields.get("user_id"))
         if attacker <= 0 or victim <= 0 or attacker == victim:
             continue
+        if context["analysis_scope"] == "pov_player_only" and attacker != context["pov_player_user_id"]:
+            continue
         weapon = as_text(fields.get("weapon")).lower()
         deaths.append({
+            # `tick` stays for compatibility. `event_tick` identifies the
+            # precise game-event timestamp used for this kill.
             "tick": tick,
+            "event_tick": tick,
+            "packet_sequence": as_int(item.get("packet_sequence")),
+            "event_index_in_packet": as_int(item.get("event_index_in_packet")),
             "round_index": round_data["round_index"],
             "attacker_user_id": attacker,
             "victim_user_id": victim,
+            "attacker_name": player_name_at(names, attacker, tick),
+            "victim_name": player_name_at(names, victim, tick),
             "attacker_class": player_class_at(classes, attacker, tick),
             "victim_class": player_class_at(classes, victim, tick),
             "attacker_team": player_team_at(teams, attacker, tick),
@@ -367,14 +456,14 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any]) -> 
     return round(max(0.0, score), 2), sorted(tags), metrics
 
 
-def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any]) -> List[Dict[str, Any]]:
     by_attacker: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
     for death in deaths:
         by_attacker[(death["round_index"], death["attacker_user_id"])].append(death)
     round_lookup = {item["round_index"]: item for item in rounds}
     candidates: List[Dict[str, Any]] = []
     for (round_index, attacker), kills in by_attacker.items():
-        kills.sort(key=lambda item: item["tick"])
+        kills.sort(key=lambda item: (item["event_tick"], item["packet_sequence"], item["event_index_in_packet"]))
         groups: List[List[Dict[str, Any]]] = []
         current: List[Dict[str, Any]] = []
         for kill in kills:
@@ -396,6 +485,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]])
                 "candidate_id": "r{}-p{}-t{}".format(round_index, attacker, first_tick),
                 "round_index": round_index,
                 "live_round": True,
+                "demo_context": context,
                 "round_state": {
                     "classification": "live",
                     "start_tick": round_data["live_start_tick"],
@@ -409,6 +499,14 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]])
                 },
                 "start_tick": max(round_data["live_start_tick"], first_tick - PRE_ROLL_TICKS),
                 "point_of_kill_ticks": [kill["tick"] for kill in group],
+                "point_of_kill_events": [
+                    {
+                        "tick": kill["event_tick"],
+                        "packet_sequence": kill["packet_sequence"],
+                        "event_index_in_packet": kill["event_index_in_packet"],
+                    }
+                    for kill in group
+                ],
                 "end_tick": min(round_data["end_tick"], last_tick + POST_ROLL_TICKS),
                 "attacker_user_id": attacker,
                 "attacker_class": group[0]["attacker_class"],
@@ -444,13 +542,16 @@ def main() -> int:
     rounds = build_rounds(events)
     classes = class_history(events)
     teams = player_team_history(events)
-    deaths = normalized_deaths(events, rounds, classes, teams)
-    candidates = build_candidates(deaths, rounds)
+    names = player_name_history(events)
+    context = analysis_context(export_directory, names)
+    deaths = normalized_deaths(events, rounds, classes, teams, names, context)
+    candidates = build_candidates(deaths, rounds, context)
     write_ndjson(export_directory / "frag_candidates.ndjson", candidates)
     summary = {
         "format": "tf2-frag-candidates",
         "format_version": 1,
         "source": "events.ndjson",
+        "demo_context": context,
         "ticks_per_second_assumption": TICKS_PER_SECOND,
         "live_rounds": len(rounds),
         "live_round_kills": len(deaths),
@@ -459,6 +560,8 @@ def main() -> int:
             "This event-only pass does not confirm airshots.",
             "Airshot, position, health, projectile-flight, and objective-proximity scoring require the planned packet-state pass.",
             "Only kills inside closed playable intervals are candidates; team ready-up and countdown events are recorded as evidence but never open an interval.",
+            "Kill ticks are the original player_death event ticks. Packet sequence and event-index fields preserve ordering when multiple events share one tick.",
+            "POV-only filtering is enabled only when the demo is identified as POV and its header nickname resolves to exactly one player event; otherwise all players are retained.",
         ],
     }
     with (export_directory / "frag_summary.json").open("w", encoding="utf-8", newline="\n") as output:

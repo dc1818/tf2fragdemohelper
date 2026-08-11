@@ -19,6 +19,7 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(len(rounds), 1)
         self.assertEqual(rounds[0]["live_start_tick"], 100)
         self.assertEqual(rounds[0]["live_start_event"], "teamplay_round_active")
+        self.assertEqual(rounds[0]["activation_trigger"], {"event": "teamplay_round_restart_seconds", "tick": 80})
         self.assertTrue(rounds[0]["ready_up"]["both_teams_ready"])
         self.assertEqual(rounds[0]["ready_up"]["ready_restart_tick"], 75)
         self.assertEqual(rounds[0]["ready_up"]["countdown_tick"], 80)

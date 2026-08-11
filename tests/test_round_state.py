@@ -188,6 +188,50 @@ class RoundStateTests(unittest.TestCase):
             ["candidate_base", "kill_sequence_led_to_payload_progress"],
         )
 
+    def test_demoman_pick_and_round_clinch_are_scored(self):
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 210, "event_type": "teamplay_round_win", "event": {"team": 3}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        kill = dict(self.kill(200, 2), attacker_team="blu", victim_class="demoman")
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], rounds[0])
+        self.assertEqual(score, 40.0)
+        self.assertEqual(metrics["demoman_kills"], 1)
+        self.assertIn("demoman_pick", tags)
+        self.assertIn("late_round", tags)
+        self.assertIn("round_clinch", tags)
+        self.assertEqual(
+            {item["reason"] for item in breakdown},
+            {"candidate_base", "demoman_pick", "late_round", "team_won_immediately_after_sequence"},
+        )
+
+    def test_capture_denial_requires_the_fragging_player_to_be_the_blocker(self):
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 120, "event_type": "player_team", "event": {"user_id": 1, "team": 3}},
+            {"tick": 120, "event_type": "player_team", "event": {"user_id": 2, "team": 3}},
+            {"tick": 220, "event_type": "teamplay_capture_blocked", "event": {"blocker": 1, "victim": 9, "cp": 3, "cp_name": "last"}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        objectives = ANALYZER.normalized_objective_events(events, rounds, ANALYZER.player_team_history(events))
+        kill = dict(self.kill(200, 9), attacker_team="blu")
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], rounds[0], objective_events=objectives)
+        self.assertEqual(score, 30.0)
+        self.assertEqual(metrics["capture_denial_followups"], 1)
+        self.assertEqual(metrics["objective_conversion_kind"], "capture_denial")
+        self.assertIn("capture_denial_followup", tags)
+        self.assertEqual([item["reason"] for item in breakdown], ["candidate_base", "kill_sequence_blocked_capture"])
+
+        wrong_blocker = [dict(objectives[0], blocker_user_id=2)]
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], rounds[0], objective_events=wrong_blocker)
+        self.assertEqual(score, 10.0)
+        self.assertEqual(metrics["objective_conversion_kind"], "")
+        self.assertNotIn("capture_denial_followup", tags)
+
     def test_server_tick_is_authoritative_over_demo_packet_tick(self):
         with tempfile.TemporaryDirectory() as temp:
             events_path = Path(temp) / "events.ndjson"

@@ -819,6 +819,10 @@ namespace Tf2StvParserGui
                 {
                     detail = " | pusher #" + DisplayValue(objective, "pusher_user_id") + " | distance " + DisplayValue(objective, "distance");
                 }
+                else if (String.Equals(kind, "capture_denial", StringComparison.Ordinal))
+                {
+                    detail = " | blocker #" + DisplayValue(objective, "blocker_user_id") + " | point " + DisplayValue(objective, "point") + " " + DisplayValue(objective, "point_name");
+                }
                 text.AppendLine("  tick " + DisplayValue(objective, "event_tick") + " | " + kind + " | team " + DisplayValue(objective, "team") + detail);
             }
         }

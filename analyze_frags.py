@@ -407,7 +407,7 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
         deaths.append({
             # `tick` stays for compatibility. `event_tick` identifies the
             # precise game-event timestamp used for this kill.
-            "tick": tick,
+            "tick": as_int(item.get("demo_tick", tick)),
             "event_tick": tick,
             "demo_tick": as_int(item.get("demo_tick", tick)),
             "server_tick": as_int(item.get("server_tick", tick)),
@@ -601,6 +601,8 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                 continue
             first_tick = group[0]["event_tick"]
             last_tick = group[-1]["event_tick"]
+            first_demo_tick = group[0]["tick"]
+            last_demo_tick = group[-1]["tick"]
             candidates.append({
                 "candidate_id": "r{}-p{}-t{}".format(round_index, attacker, first_tick),
                 "round_index": round_index,
@@ -617,15 +619,18 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                     "end_tick": round_data["end_tick"],
                     "end_event": round_data["end_reason"],
                 },
-                "clip_start_tick": max(round_data["live_start_tick"], first_tick - PRE_ROLL_TICKS),
-                "clip_end_tick": min(round_data["end_tick"], last_tick + POST_ROLL_TICKS),
-                "start_tick": max(round_data["live_start_tick"], first_tick - PRE_ROLL_TICKS),
-                "first_kill_tick": first_tick,
-                "last_kill_tick": last_tick,
-                "point_of_kill_ticks": [kill["event_tick"] for kill in group],
+                "clip_start_tick": max(0, first_demo_tick - PRE_ROLL_TICKS),
+                "clip_end_tick": last_demo_tick + POST_ROLL_TICKS,
+                "start_tick": max(0, first_demo_tick - PRE_ROLL_TICKS),
+                "first_kill_tick": first_demo_tick,
+                "last_kill_tick": last_demo_tick,
+                "first_kill_server_tick": first_tick,
+                "last_kill_server_tick": last_tick,
+                "point_of_kill_ticks": [kill["tick"] for kill in group],
+                "point_of_kill_server_ticks": [kill["event_tick"] for kill in group],
                 "point_of_kill_events": [
                     {
-                        "tick": kill["event_tick"],
+                        "tick": kill["tick"],
                         "demo_tick": kill.get("demo_tick"),
                         "server_tick": kill.get("server_tick"),
                         "packet_sequence": kill["packet_sequence"],
@@ -633,7 +638,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                     }
                     for kill in group
                 ],
-                "end_tick": min(round_data["end_tick"], last_tick + POST_ROLL_TICKS),
+                "end_tick": last_demo_tick + POST_ROLL_TICKS,
                 "attacker_user_id": attacker,
                 "attacker_class": group[0]["attacker_class"],
                 "attacker_team": group[0]["attacker_team"],

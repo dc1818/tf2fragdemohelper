@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -331,6 +332,9 @@ namespace Tf2StvParserGui
         {
             if (log.InvokeRequired) { log.BeginInvoke(new Action<string>(Append), text); return; }
             log.AppendText(text);
+            log.SelectionStart = log.TextLength;
+            log.SelectionLength = 0;
+            log.ScrollToCaret();
         }
 
         private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
@@ -338,6 +342,7 @@ namespace Tf2StvParserGui
 
     internal sealed class CandidateViewerForm : Form
     {
+        private const string PlaybackTempPrefix = "tf2fragdemohelper_temp_";
         private readonly string candidatesPath;
         private readonly DataGridView grid = new DataGridView();
         private readonly TextBox details = new TextBox();
@@ -389,58 +394,60 @@ namespace Tf2StvParserGui
             layout.Padding = new Padding(14);
             layout.ColumnCount = 1;
             layout.RowCount = 2;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(layout);
 
-            FlowLayoutPanel filters = new FlowLayoutPanel();
+            TableLayoutPanel filters = new TableLayoutPanel();
             filters.Dock = DockStyle.Fill;
-            filters.FlowDirection = FlowDirection.LeftToRight;
-            filters.WrapContents = true;
+            filters.ColumnCount = 1;
+            filters.RowCount = 2;
+            filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             summary.AutoSize = true;
-            summary.Margin = new Padding(3, 7, 18, 2);
+            summary.Margin = new Padding(3, 5, 3, 0);
             summary.ForeColor = Color.Silver;
             filters.Controls.Add(summary);
+
+            FlowLayoutPanel filterControls = new FlowLayoutPanel();
+            filterControls.Dock = DockStyle.Fill;
+            filterControls.FlowDirection = FlowDirection.LeftToRight;
+            filterControls.WrapContents = false;
             Label filterLabel = new Label();
-            filterLabel.Text = "Filter";
+            filterLabel.Text = "Filter candidates (tags, class, team, weapon, or player ID)";
             filterLabel.AutoSize = true;
             filterLabel.Margin = new Padding(3, 9, 4, 2);
-            filters.Controls.Add(filterLabel);
-            filterBox.Width = 250;
+            filterControls.Controls.Add(filterLabel);
+            filterBox.Width = 230;
             filterBox.Margin = new Padding(0, 5, 14, 2);
             filterBox.TextChanged += delegate { ApplyFilter(); };
-            filters.Controls.Add(filterBox);
+            filterControls.Controls.Add(filterBox);
             Label minimumLabel = new Label();
             minimumLabel.Text = "Minimum score";
             minimumLabel.AutoSize = true;
             minimumLabel.Margin = new Padding(3, 9, 4, 2);
-            filters.Controls.Add(minimumLabel);
+            filterControls.Controls.Add(minimumLabel);
             minimumScore.Width = 70;
             minimumScore.Maximum = 1000;
             minimumScore.Margin = new Padding(0, 5, 2, 2);
             minimumScore.ValueChanged += delegate { ApplyFilter(); };
-            filters.Controls.Add(minimumScore);
-            Label hint = new Label();
-            hint.Text = "Matches tags, class, team, weapon, or player ID";
-            hint.AutoSize = true;
-            hint.ForeColor = Color.Gray;
-            hint.Margin = new Padding(12, 9, 2, 2);
-            filters.Controls.Add(hint);
+            filterControls.Controls.Add(minimumScore);
             Label leadLabel = new Label();
             leadLabel.Text = "Seconds before first event";
             leadLabel.AutoSize = true;
             leadLabel.Margin = new Padding(14, 9, 4, 2);
-            filters.Controls.Add(leadLabel);
+            filterControls.Controls.Add(leadLabel);
             leadInSeconds.Width = 58;
             leadInSeconds.Minimum = 0;
             leadInSeconds.Maximum = 60;
             leadInSeconds.Value = 8;
             leadInSeconds.Increment = 1;
             leadInSeconds.Margin = new Padding(0, 5, 10, 2);
-            filters.Controls.Add(leadInSeconds);
-            launchButton.Margin = new Padding(0, 4, 2, 2);
+            filterControls.Controls.Add(leadInSeconds);
+            launchButton.Margin = new Padding(0, 3, 2, 2);
             launchButton.Click += delegate { LaunchSelectedCandidate(); };
-            filters.Controls.Add(launchButton);
+            filterControls.Controls.Add(launchButton);
+            filters.Controls.Add(filterControls, 0, 1);
             layout.Controls.Add(filters, 0, 0);
 
             SplitContainer split = new SplitContainer();
@@ -583,7 +590,7 @@ namespace Tf2StvParserGui
                 using (OpenFileDialog dialog = new OpenFileDialog())
                 {
                     dialog.Title = "Select Team Fortress 2 executable";
-                    dialog.Filter = "Team Fortress 2 (tf.exe)|tf.exe|Executable (*.exe)|*.exe";
+                    dialog.Filter = "Team Fortress 2 (tf.exe or tf_win64.exe)|tf.exe;tf_win64.exe|Executable (*.exe)|*.exe";
                     if (dialog.ShowDialog(this) != DialogResult.OK) return;
                     tf2Executable = dialog.FileName;
                 }
@@ -595,17 +602,27 @@ namespace Tf2StvParserGui
             catch { MessageBox.Show(this, "This candidate has no usable demo playback tick.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             int leadTicks = (int)Math.Round((double)leadInSeconds.Value * 66.6666667);
             int targetTick = Math.Max(0, firstTick - leadTicks);
-            string arguments = "-game tf +playdemo " + Quote(demoPath) + " +demo_gototick " + targetTick;
             try
             {
-                Process.Start(new ProcessStartInfo
+                string gameDirectory = GetTfGameDirectory();
+                if (IsTf2AlreadyRunning())
+                {
+                    MessageBox.Show(this, "TF2 is already running. Close it before opening another candidate so the new demo and tick command are not ignored.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                DeleteStalePlaybackVdms(gameDirectory);
+                string stagedDemo = StageDemoForPlayback(gameDirectory);
+                string playbackVdm = WritePlaybackVdm(gameDirectory, stagedDemo, targetTick);
+                string arguments = "-novid -console -game tf +playdemo " + Quote(stagedDemo);
+                Process launchedTf2 = Process.Start(new ProcessStartInfo
                 {
                     FileName = tf2Executable,
                     Arguments = arguments,
                     UseShellExecute = true,
                     WorkingDirectory = Path.GetDirectoryName(tf2Executable)
                 });
-                AppendLaunchNote(candidate, targetTick, firstTick);
+                AppendLaunchNote(candidate, targetTick, firstTick, stagedDemo, playbackVdm);
+                if (launchedTf2 != null) SchedulePlaybackVdmCleanup(launchedTf2, playbackVdm);
             }
             catch (Exception error)
             {
@@ -613,9 +630,107 @@ namespace Tf2StvParserGui
             }
         }
 
-        private void AppendLaunchNote(IDictionary candidate, int targetTick, int firstTick)
+        private string GetTfGameDirectory()
         {
-            details.AppendText("\r\nTF2 launch requested: demo tick " + targetTick + " (" + leadInSeconds.Value + " seconds before first event at " + firstTick + ").\r\n");
+            string executableDirectory = Path.GetDirectoryName(tf2Executable);
+            string gameDirectory = Path.Combine(executableDirectory, "tf");
+            if (Directory.Exists(gameDirectory)) return gameDirectory;
+            if (String.Equals(Path.GetFileName(executableDirectory), "tf", StringComparison.OrdinalIgnoreCase)) return executableDirectory;
+            throw new DirectoryNotFoundException("Could not find TF2's tf game folder next to the selected executable. Select tf.exe from your Team Fortress 2 installation folder.");
+        }
+
+        private bool IsTf2AlreadyRunning()
+        {
+            string[] processNames = new string[] { Path.GetFileNameWithoutExtension(tf2Executable), "tf", "tf_win64" };
+            foreach (string processName in processNames)
+            {
+                Process[] processes = Process.GetProcessesByName(processName);
+                foreach (Process process in processes)
+                {
+                    try
+                    {
+                        if (!process.HasExited) return true;
+                    }
+                    catch { }
+                    finally { process.Dispose(); }
+                }
+            }
+            return false;
+        }
+
+        private string StageDemoForPlayback(string gameDirectory)
+        {
+            string demoDirectory = Path.Combine(gameDirectory, "demos", "tf2fragdemohelper");
+            Directory.CreateDirectory(demoDirectory);
+            string sourceName = Path.GetFileNameWithoutExtension(demoPath);
+            StringBuilder safeName = new StringBuilder();
+            foreach (char character in sourceName)
+            {
+                if (Char.IsLetterOrDigit(character) || character == '_' || character == '-') safeName.Append(character);
+                else safeName.Append('_');
+            }
+            if (safeName.Length == 0) safeName.Append("candidate_demo");
+            string stagedFileName = PlaybackTempPrefix + safeName.ToString() + "_" + new FileInfo(demoPath).Length + ".dem";
+            string stagedPath = Path.Combine(demoDirectory, stagedFileName);
+            if (!File.Exists(stagedPath) || new FileInfo(stagedPath).Length != new FileInfo(demoPath).Length)
+                File.Copy(demoPath, stagedPath, true);
+            return "demos/tf2fragdemohelper/" + stagedFileName;
+        }
+
+        private static string WritePlaybackVdm(string gameDirectory, string stagedDemo, int targetTick)
+        {
+            string stagedPath = Path.Combine(gameDirectory, stagedDemo.Replace('/', Path.DirectorySeparatorChar));
+            string vdmPath = Path.ChangeExtension(stagedPath, ".vdm");
+            List<string> lines = new List<string>();
+            lines.Add("demoactions");
+            lines.Add("{");
+            lines.Add("    \"1\"");
+            lines.Add("    {");
+            lines.Add("        factory \"SkipAhead\"");
+            lines.Add("        name \"TF2 Frag Demo Helper seek\"");
+            lines.Add("        starttick \"1\"");
+            lines.Add("        skiptotick \"" + targetTick + "\"");
+            lines.Add("    }");
+            lines.Add("}");
+            File.WriteAllLines(vdmPath, lines.ToArray());
+            return vdmPath;
+        }
+
+        private static void DeleteStalePlaybackVdms(string gameDirectory)
+        {
+            string demoDirectory = Path.Combine(gameDirectory, "demos", "tf2fragdemohelper");
+            if (!Directory.Exists(demoDirectory)) return;
+            foreach (string vdmPath in Directory.GetFiles(demoDirectory, PlaybackTempPrefix + "*.vdm"))
+            {
+                try { File.Delete(vdmPath); }
+                catch { }
+            }
+        }
+
+        private void SchedulePlaybackVdmCleanup(Process launchedTf2, string playbackVdm)
+        {
+            Task.Run(delegate
+            {
+                try
+                {
+                    launchedTf2.WaitForExit();
+                    Thread.Sleep(2500);
+                    while (IsTf2AlreadyRunning()) Thread.Sleep(1000);
+                }
+                catch { }
+                finally
+                {
+                    launchedTf2.Dispose();
+                    try { if (File.Exists(playbackVdm)) File.Delete(playbackVdm); }
+                    catch { }
+                }
+            });
+        }
+
+        private void AppendLaunchNote(IDictionary candidate, int targetTick, int firstTick, string stagedDemo, string playbackVdm)
+        {
+            details.AppendText("\r\nTF2 launch requested with -novid. Demo staged as " + stagedDemo + ".\r\nTemporary VDM seek script: " + playbackVdm + ". It will be removed after TF2 closes.\r\nSkipping to demo tick " + targetTick + " (" + leadInSeconds.Value + " seconds before first event at " + firstTick + ").\r\n");
+            ScrollDetailsToBottom();
         }
 
         private void ShowSelectedCandidate(object sender, EventArgs e)
@@ -654,8 +769,15 @@ namespace Tf2StvParserGui
                     " | crit " + DisplayValue(kill, "crit_type"));
             }
             details.Text = text.ToString();
-            details.SelectionStart = 0;
+            ScrollDetailsToBottom();
             details.SelectionLength = 0;
+        }
+
+        private void ScrollDetailsToBottom()
+        {
+            details.SelectionStart = details.TextLength;
+            details.SelectionLength = 0;
+            details.ScrollToCaret();
         }
 
         private static void AppendBuildingEvidence(StringBuilder text, IList buildings)

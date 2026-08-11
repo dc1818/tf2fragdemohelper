@@ -53,7 +53,7 @@ Each run creates a timestamped folder beside the selected output location.
 
 ## Candidate selection rules
 
-The current scorer creates candidates only inside closed live-round intervals. It starts at `teamplay_round_active`, moves the live start to `teamplay_setup_finished` when setup exists, and ends at round win, stalemate, game over, or restart.
+The current scorer creates candidates only inside closed live-round intervals. Tournament ready-up events (`teamplay_team_ready`, `teamplay_ready_restart`, and the restart countdown) are retained as evidence but never start an interval. The interval starts at `teamplay_round_active`, moves to `teamplay_setup_finished` when setup exists, and ends at round win, stalemate, game over, or restart. Each candidate records that start/end evidence under `round_state`.
 
 Candidates are grouped by attacker within the same round when consecutive kills are no more than four seconds apart. Every candidate includes a five-second lead-in and three-second outro, clipped to the active round.
 
@@ -71,7 +71,7 @@ Build_Parser_Only.bat   Builds export_all without the GUI
 
 ## Validation
 
-`tests/fixture_events.ndjson` is a small controlled event stream used to verify that the analyzer keeps a live-round multi-kill and excludes pre-round and post-round deaths.
+`tests/fixture_events.ndjson` is a small controlled event stream used to verify that the analyzer keeps a live-round multi-kill and excludes ready-up, countdown, pre-round, and post-round deaths. Run `python -m unittest tests/test_round_state.py` from the project root to verify the round-state rules.
 
 ## Upstream parser
 

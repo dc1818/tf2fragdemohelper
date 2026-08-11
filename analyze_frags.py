@@ -28,8 +28,9 @@ ROUND_END_EVENTS = {
 }
 ROUND_RESET_EVENTS = {
     "teamplay_round_start", "teamplay_restart_round", "teamplay_waiting_begins",
-    "teamplay_round_restart_seconds", "round_start",
+    "round_start",
 }
+READY_TEAM_NAMES = {2: "red", 3: "blu"}
 PROJECTILE_WEAPONS = {
     "rocketlauncher", "directhit", "blackbox", "liberty_launcher", "airstrike",
     "grenadelauncher", "loch_n_load", "iron_bomber", "stickybomb_launcher",
@@ -66,6 +67,22 @@ def as_text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def as_bool(value: Any, default: bool = True) -> bool:
+    """Decode the ready value without treating the string 'false' as true."""
+    value = scalar(value)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return default
+
+
 def event_fields(record: Dict[str, Any]) -> Dict[str, Any]:
     event = record.get("event", {})
     return event if isinstance(event, dict) else {}
@@ -94,14 +111,61 @@ def read_events(path: Path) -> List[Dict[str, Any]]:
 
 
 def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Build closed live intervals; setup_finished overrides provisional active start."""
+    """Build closed playable intervals and retain tournament ready-up evidence.
+
+    `teamplay_team_ready` only means a team has readied.  It never opens a
+    highlight window.  A window opens at `teamplay_round_active`, then moves to
+    `teamplay_setup_finished` on maps where setup time gates real combat.
+    """
     rounds: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     index = 0
+    ready_ticks: Dict[int, Optional[int]] = {team: None for team in READY_TEAM_NAMES}
+    ready_restart_tick: Optional[int] = None
+    countdown_tick: Optional[int] = None
+
+    def clear_ready_up() -> None:
+        nonlocal ready_ticks, ready_restart_tick, countdown_tick
+        ready_ticks = {team: None for team in READY_TEAM_NAMES}
+        ready_restart_tick = None
+        countdown_tick = None
+
+    def ready_up_evidence() -> Dict[str, Any]:
+        red_tick = ready_ticks[2]
+        blu_tick = ready_ticks[3]
+        both_ready = red_tick is not None and blu_tick is not None
+        return {
+            "red_ready_tick": red_tick,
+            "blu_ready_tick": blu_tick,
+            "both_teams_ready": both_ready,
+            "both_teams_ready_tick": max(red_tick, blu_tick) if both_ready else None,
+            "ready_restart_tick": ready_restart_tick,
+            "countdown_tick": countdown_tick,
+        }
+
     for item in events:
         name = event_name(item)
         tick = item["tick"]
-        if name == "teamplay_round_active":
+        fields = event_fields(item)
+        if name == "teamplay_team_ready":
+            team = as_int(fields.get("team"))
+            if team in READY_TEAM_NAMES:
+                ready_ticks[team] = tick if as_bool(fields.get("ready"), True) else None
+        elif name == "teamplay_ready_restart":
+            if current is not None:
+                current["end_tick"] = tick
+                current["end_reason"] = name
+                rounds.append(current)
+                current = None
+            ready_restart_tick = tick
+        elif name == "teamplay_round_restart_seconds":
+            if current is not None:
+                current["end_tick"] = tick
+                current["end_reason"] = name
+                rounds.append(current)
+                current = None
+            countdown_tick = tick
+        elif name == "teamplay_round_active":
             if current is not None:
                 current["end_tick"] = tick
                 current["end_reason"] = "superseded_by_round_active"
@@ -109,28 +173,33 @@ def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             index += 1
             current = {
                 "round_index": index,
-                "provisional_start_tick": tick,
+                "round_active_tick": tick,
                 "live_start_tick": tick,
+                "live_start_event": "teamplay_round_active",
                 "setup_finished_tick": None,
+                "ready_up": ready_up_evidence(),
                 "end_tick": None,
                 "end_reason": None,
             }
+            clear_ready_up()
         elif name == "teamplay_setup_finished" and current is not None:
             current["setup_finished_tick"] = tick
             current["live_start_tick"] = tick
+            current["live_start_event"] = "teamplay_setup_finished"
         elif name in ROUND_END_EVENTS and current is not None:
             current["end_tick"] = tick
             current["end_reason"] = name
-            fields = event_fields(item)
             if "team" in fields:
                 current["winning_team"] = as_int(fields.get("team"))
             rounds.append(current)
             current = None
+            clear_ready_up()
         elif name in ROUND_RESET_EVENTS and current is not None:
             current["end_tick"] = tick
             current["end_reason"] = name
             rounds.append(current)
             current = None
+            clear_ready_up()
     return [item for item in rounds if item["end_tick"] is not None and item["end_tick"] > item["live_start_tick"]]
 
 
@@ -290,6 +359,16 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]])
                 "candidate_id": "r{}-p{}-t{}".format(round_index, attacker, first_tick),
                 "round_index": round_index,
                 "live_round": True,
+                "round_state": {
+                    "classification": "live",
+                    "start_tick": round_data["live_start_tick"],
+                    "start_event": round_data["live_start_event"],
+                    "round_active_tick": round_data["round_active_tick"],
+                    "setup_finished_tick": round_data["setup_finished_tick"],
+                    "ready_up": round_data["ready_up"],
+                    "end_tick": round_data["end_tick"],
+                    "end_event": round_data["end_reason"],
+                },
                 "start_tick": max(round_data["live_start_tick"], first_tick - PRE_ROLL_TICKS),
                 "point_of_kill_ticks": [kill["tick"] for kill in group],
                 "end_tick": min(round_data["end_tick"], last_tick + POST_ROLL_TICKS),
@@ -339,7 +418,7 @@ def main() -> int:
         "limitations": [
             "This event-only pass does not confirm airshots.",
             "Airshot, position, health, projectile-flight, and objective-proximity scoring require the planned packet-state pass.",
-            "Only kills inside closed live-round intervals are candidates.",
+            "Only kills inside closed playable intervals are candidates; team ready-up and countdown events are recorded as evidence but never open an interval.",
         ],
     }
     with (export_directory / "frag_summary.json").open("w", encoding="utf-8", newline="\n") as output:

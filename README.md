@@ -11,7 +11,7 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Writes a compact, named game-event stream for deaths, damage, round transitions, class changes, objectives, and other TF2 events.
 - Excludes setup, waiting, and post-round deaths from highlight candidates.
 - Groups a player's rapid kills into one clip candidate instead of treating each kill as unrelated.
-- Ranks live-round candidates using multi-kills, rapid sequences, projectile kills, Medic picks, killstreaks, late-round timing, objective conversions, and random-crit penalties.
+- Ranks live-round candidates using multi-kills, rapid sequences, projectile kills, key picks, killstreaks, round-clinching timing, objective conversions, and random-crit penalties.
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
 - Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
 - The candidate browser can launch the original demo in TF2 at a selectable lead-in before the first event; double-click a candidate or use **Open selected in TF2**.
@@ -71,10 +71,13 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Two or more kills within two seconds | +12 |
 | At least one projectile kill | +8 |
 | Each Medic killed | +18 |
+| Each Demoman killed | +10 |
 | Each rocket-jumping victim | +10 |
 | Killstreak total of 10+ on a kill | +5 |
 | Final kill within eight seconds of round end | +8 |
+| Team wins within three seconds after the final kill | +12 |
 | Point capture within eight seconds after the final kill | +24 |
+| Capture block by the fragging player within two seconds | +20 |
 | Payload progress within eight seconds after the final kill | +12 |
 | Payload progress pushed by the attacker | +16 |
 | Each random full-crit kill | -12 |
@@ -83,7 +86,7 @@ The final score is floored at zero. `metrics.score_before_floor` preserves the p
 
 Building/object destruction events are not kills and do not create important standalone candidates. A destruction can add a small contextual bonus only when the same attacker produces a real player-kill sequence within two seconds. In a resolved POV demo, the recorded player's own deaths are rejected, and a death where that player appears only as an assister is never counted as a POV kill.
 
-Objective follow-ups are kept as raw event evidence on the candidate. A `teamplay_point_captured` event by the attacker's team within eight seconds of the final kill is the confirmed conversion signal. `payload_pushed` is weaker progress evidence: it scores only when no capture follows the sequence, and only its first matching event adds score, so repeated cart-progress events cannot inflate a candidate. The selected-candidate view shows every matching objective event and the score breakdown records which single outcome was rated.
+Objective follow-ups are kept as raw event evidence on the candidate. A `teamplay_point_captured` event by the attacker's team within eight seconds of the final kill is the confirmed conversion signal. A `teamplay_capture_blocked` event scores only when its recorded blocker is the fragging player and it occurs within two seconds of the sequence. `payload_pushed` is weaker progress evidence: it scores only when neither a capture nor a confirmed block follows the sequence, and only its first matching event adds score, so repeated cart-progress events cannot inflate a candidate. A team-matched round win within three seconds is separately scored as a clinch. The selected-candidate view shows every matching objective event and the score breakdown records which single outcome was rated.
 
 Every kill records its exact original `player_death` event tick in `event_tick` and `point_of_kill_ticks`. Candidate `point_of_kill_ticks` and clip boundaries use the demo/playback tick you can seek to in TF2; `point_of_kill_server_ticks` and `event_tick` preserve the authoritative server tick used for analysis. The exporter preserves both namespaces because they are not interchangeable. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. Two same-tick deaths are still a valid multikill when they have different victims and event indexes. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player when the header nickname matches a decoded player event or the parser's `players.json` userinfo roster; the roster fallback handles POV demos that omit usable `player_connect` events. If neither source resolves the nickname, the result is marked and candidates are not silently labeled POV-only.
 

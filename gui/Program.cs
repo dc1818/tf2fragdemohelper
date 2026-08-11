@@ -528,6 +528,7 @@ namespace Tf2StvParserGui
             text.AppendLine();
             text.AppendLine("Clip range: " + DisplayValue(candidate, "start_tick") + " to " + DisplayValue(candidate, "end_tick") + " ticks");
             text.AppendLine("Point-of-kill ticks: " + JoinValues(List(candidate, "point_of_kill_ticks")));
+            AppendDemoContext(text, Map(candidate, "demo_context"));
             AppendRoundState(text, Map(candidate, "round_state"));
             text.AppendLine();
             text.AppendLine("Kills");
@@ -537,7 +538,8 @@ namespace Tf2StvParserGui
                 IDictionary kill = kills[i] as IDictionary;
                 if (kill == null) continue;
                 text.AppendLine(
-                    "  " + (i + 1) + ". tick " + DisplayValue(kill, "tick") +
+                    "  " + (i + 1) + ". event tick " + EventTick(kill) +
+                    " (packet " + DisplayValue(kill, "packet_sequence") + ", event " + DisplayValue(kill, "event_index_in_packet") + ")" +
                     " | #" + DisplayValue(kill, "attacker_user_id") + " " + DisplayValue(kill, "attacker_team") + " " + DisplayValue(kill, "attacker_class") +
                     " -> #" + DisplayValue(kill, "victim_user_id") + " " + DisplayValue(kill, "victim_team") + " " + DisplayValue(kill, "victim_class") +
                     " | " + DisplayValue(kill, "weapon") +
@@ -560,6 +562,14 @@ namespace Tf2StvParserGui
             text.AppendLine("  round end: " + DisplayValue(state, "end_tick") + " (" + DisplayValue(state, "end_event") + ")");
             IDictionary ready = Map(state, "ready_up");
             text.AppendLine("  ready-up: RED " + DisplayValue(ready, "red_ready_tick") + ", BLU " + DisplayValue(ready, "blu_ready_tick") + ", both ready " + DisplayValue(ready, "both_teams_ready"));
+        }
+
+        private static void AppendDemoContext(StringBuilder text, IDictionary context)
+        {
+            if (context == null) return;
+            text.AppendLine("Demo scope: " + DisplayValue(context, "capture_type") + " (" + DisplayValue(context, "capture_confidence") + ") | " + DisplayValue(context, "analysis_scope"));
+            text.AppendLine("  POV recorder: " + DisplayValue(context, "header_nick") + " | user ID " + DisplayValue(context, "pov_player_user_id"));
+            text.AppendLine("  scope reason: " + DisplayValue(context, "scope_reason"));
         }
 
         private static object Value(IDictionary values, string key)
@@ -588,6 +598,12 @@ namespace Tf2StvParserGui
         {
             string value = TextValue(values, key);
             return String.IsNullOrEmpty(value) ? "Unknown" : value;
+        }
+
+        private static string EventTick(IDictionary values)
+        {
+            string eventTick = TextValue(values, "event_tick");
+            return String.IsNullOrEmpty(eventTick) ? DisplayValue(values, "tick") : eventTick;
         }
 
         private static string JoinValues(object values)

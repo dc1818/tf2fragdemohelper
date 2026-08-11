@@ -156,6 +156,25 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(events[0]["server_tick"], 104745)
         self.assertEqual(events[0]["tick"], 104745)
 
+    def test_candidate_keeps_demo_seek_ticks_separate_from_server_ticks(self):
+        first = dict(self.kill(70386, 42), event_tick=71302, demo_tick=70386, server_tick=71302, round_index=1, attacker_team="blu")
+        second = dict(self.kill(70386, 31), event_tick=71302, demo_tick=70386, server_tick=71302, round_index=1, attacker_team="blu")
+        rounds = [{
+            "round_index": 1,
+            "live_start_tick": 1,
+            "live_start_event": "teamplay_round_active",
+            "round_active_tick": 1,
+            "setup_finished_tick": None,
+            "activation_trigger": {"event": "round_start", "tick": 0},
+            "ready_up": {},
+            "end_tick": 90000,
+            "end_reason": "teamplay_round_win",
+        }]
+        candidate = ANALYZER.build_candidates([first, second], rounds, {"analysis_scope": "all_players"})[0]
+        self.assertIn("multi_kill", candidate["tags"])
+        self.assertEqual(candidate["point_of_kill_ticks"], [70386, 70386])
+        self.assertEqual(candidate["point_of_kill_server_ticks"], [71302, 71302])
+
 
 if __name__ == "__main__":
     unittest.main()

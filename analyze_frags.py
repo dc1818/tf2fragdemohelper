@@ -244,7 +244,30 @@ def player_class_at(history: Dict[int, List[Tuple[int, str]]], user_id: int, tic
     return found
 
 
-def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]]) -> List[Dict[str, Any]]:
+def player_team_history(events: Iterable[Dict[str, Any]]) -> Dict[int, List[Tuple[int, Optional[str]]]]:
+    """Keep the team value associated with each player_team game event."""
+    history: Dict[int, List[Tuple[int, Optional[str]]]] = defaultdict(list)
+    for item in events:
+        if event_name(item) != "player_team":
+            continue
+        fields = event_fields(item)
+        user_id = as_int(fields.get("user_id", fields.get("userid")))
+        team = as_int(fields.get("team"))
+        if user_id:
+            history[user_id].append((item["tick"], READY_TEAM_NAMES.get(team)))
+    return history
+
+
+def player_team_at(history: Dict[int, List[Tuple[int, Optional[str]]]], user_id: int, tick: int) -> Optional[str]:
+    found: Optional[str] = None
+    for changed_tick, team in history.get(user_id, []):
+        if changed_tick > tick:
+            break
+        found = team
+    return found
+
+
+def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]]) -> List[Dict[str, Any]]:
     deaths: List[Dict[str, Any]] = []
     for item in events:
         if event_name(item) != "player_death":
@@ -266,6 +289,8 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
             "victim_user_id": victim,
             "attacker_class": player_class_at(classes, attacker, tick),
             "victim_class": player_class_at(classes, victim, tick),
+            "attacker_team": player_team_at(teams, attacker, tick),
+            "victim_team": player_team_at(teams, victim, tick),
             "weapon": weapon,
             "weapon_id": as_int(fields.get("weapon_id")),
             "weapon_def_index": as_int(fields.get("weapon_def_index")),
@@ -387,6 +412,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]])
                 "end_tick": min(round_data["end_tick"], last_tick + POST_ROLL_TICKS),
                 "attacker_user_id": attacker,
                 "attacker_class": group[0]["attacker_class"],
+                "attacker_team": group[0]["attacker_team"],
                 "overall_score": score,
                 "tags": tags,
                 "metrics": metrics,
@@ -417,7 +443,8 @@ def main() -> int:
     events = read_events(events_path)
     rounds = build_rounds(events)
     classes = class_history(events)
-    deaths = normalized_deaths(events, rounds, classes)
+    teams = player_team_history(events)
+    deaths = normalized_deaths(events, rounds, classes, teams)
     candidates = build_candidates(deaths, rounds)
     write_ndjson(export_directory / "frag_candidates.ndjson", candidates)
     summary = {

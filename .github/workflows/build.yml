@@ -1,0 +1,33 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check parser exporter
+        run: cargo check --manifest-path parser/Cargo.toml --bin export_all
+
+      - name: Test candidate analyzer
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Windows GUI
+        shell: pwsh
+        run: |
+          $compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $compiler)) {
+            $compiler = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          }
+          & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /out:TF2_STV_Parser_GUI.exe /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll gui\Program.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

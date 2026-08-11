@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use tf_demo_parser::demo::header::Header;
 use tf_demo_parser::demo::message::Message;
 use tf_demo_parser::demo::packet::Packet;
-use tf_demo_parser::demo::parser::{Analyser, DemoHandler, RawPacketStream};
+use tf_demo_parser::demo::parser::analyser::Analyser;
+use tf_demo_parser::demo::parser::{DemoHandler, RawPacketStream};
 use tf_demo_parser::Demo;
 
 fn write_game_events(

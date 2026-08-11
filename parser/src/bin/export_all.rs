@@ -8,12 +8,13 @@ use std::path::PathBuf;
 use tf_demo_parser::demo::header::Header;
 use tf_demo_parser::demo::message::Message;
 use tf_demo_parser::demo::packet::Packet;
-use tf_demo_parser::demo::parser::{DemoHandler, RawPacketStream};
+use tf_demo_parser::demo::parser::{Analyser, DemoHandler, RawPacketStream};
 use tf_demo_parser::Demo;
 
 fn write_game_events(
     packet: &Packet<'_>,
     packet_sequence: u64,
+    server_tick: Option<u32>,
     out: &mut BufWriter<File>,
 ) -> Result<(), MainError> {
     let messages = match packet {
@@ -27,6 +28,9 @@ fn write_game_events(
                 &mut *out,
                 &json!({
                     "tick": packet.tick(),
+                    "demo_tick": packet.tick(),
+                    "server_tick": server_tick,
+                    "tick_namespace": if server_tick.is_some() { "server" } else { "demo" },
                     "packet_sequence": packet_sequence,
                     "event_index_in_packet": event_index_in_packet,
                     "event_type": game_event.event_type.as_str(),
@@ -37,6 +41,17 @@ fn write_game_events(
         }
     }
     Ok(())
+}
+
+fn packet_server_tick(packet: &Packet<'_>) -> Option<u32> {
+    let messages = match packet {
+        Packet::Signon(message_packet) | Packet::Message(message_packet) => &message_packet.messages,
+        _ => return None,
+    };
+    messages.iter().rev().find_map(|message| match message {
+        Message::NetTick(net_tick) => Some(u32::from(net_tick.tick)),
+        _ => None,
+    })
 }
 
 fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::Value {
@@ -119,7 +134,9 @@ fn main() -> Result<(), MainError> {
     // DemoHandler::default() configures the parser to decode all supported
     // message types while maintaining send-table, baseline, string-table,
     // event-definition, and entity-class state for subsequent packets.
-    let mut handler = DemoHandler::default();
+    // POV demos may omit player_connect events. Keep the decoded userinfo
+    // roster so header.nick can still be resolved to a user ID.
+    let mut handler = DemoHandler::with_analyser(Analyser::new());
     handler.handle_header(&header);
 
     let mut packet_stream = RawPacketStream::new(stream);
@@ -139,6 +156,10 @@ fn main() -> Result<(), MainError> {
 
         let end_bit = packet_stream.pos();
         let tick = packet.tick();
+        let packet_server_tick = packet_server_tick(&packet).or_else(|| {
+            let current = u32::from(handler.server_tick);
+            if current == 0 { None } else { Some(current) }
+        });
         let packet_type = packet.packet_type().as_lowercase_str();
         if matches!(&packet, Packet::UserCmd(_)) {
             usercmd_packet_count += 1;
@@ -166,7 +187,7 @@ fn main() -> Result<(), MainError> {
         // A compact event stream avoids repeated scans through deeply nested raw
         // packets during highlight analysis. packets.ndjson stays authoritative
         // for later position, projectile, and airshot reconstruction.
-        write_game_events(&packet, packet_count, &mut events_out)?;
+        write_game_events(&packet, packet_count, packet_server_tick, &mut events_out)?;
 
         // Apply this packet to parser state so later delta-compressed packets,
         // baselines, event definitions, and string-table updates decode correctly.
@@ -178,6 +199,9 @@ fn main() -> Result<(), MainError> {
     packets_out.flush()?;
     index_out.flush()?;
     events_out.flush()?;
+    let match_state = handler.into_output();
+    let players_file = File::create(output_dir.join("players.json"))?;
+    serde_json::to_writer_pretty(BufWriter::new(players_file), &match_state.users)?;
     let manifest = json!({
         "format": "tf-demo-parser-decoded-packet-stream",
         "format_version": 1,
@@ -190,6 +214,7 @@ fn main() -> Result<(), MainError> {
             "packets": "packets.ndjson",
             "packet_index": "packet_index.ndjson",
             "events": "events.ndjson",
+            "players": "players.json",
             "frag_candidates": "frag_candidates.ndjson",
             "frag_summary": "frag_summary.json"
         },

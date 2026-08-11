@@ -528,7 +528,8 @@ namespace Tf2StvParserGui
             text.AppendLine();
             IList kills = List(candidate, "kills");
             text.AppendLine("Kill count: " + kills.Count);
-            text.AppendLine("Exact player_death ticks: " + JoinValues(List(candidate, "point_of_kill_ticks")));
+            text.AppendLine("Exact demo playback ticks: " + JoinValues(List(candidate, "point_of_kill_ticks")));
+            text.AppendLine("Server analysis ticks: " + JoinValues(List(candidate, "point_of_kill_server_ticks")));
             text.AppendLine("Clip window (includes lead-in/out): " + ClipTick(candidate, "clip_start_tick", "start_tick") + " to " + ClipTick(candidate, "clip_end_tick", "end_tick") + " ticks");
             AppendScoreBreakdown(text, List(candidate, "score_breakdown"));
             AppendBuildingEvidence(text, List(candidate, "building_destructions"));
@@ -541,8 +542,8 @@ namespace Tf2StvParserGui
                 IDictionary kill = kills[i] as IDictionary;
                 if (kill == null) continue;
                 text.AppendLine(
-                    "  " + (i + 1) + ". event tick " + EventTick(kill) +
-                    " (packet " + DisplayValue(kill, "packet_sequence") + ", event " + DisplayValue(kill, "event_index_in_packet") + ")" +
+                    "  " + (i + 1) + ". demo tick " + DisplayValue(kill, "tick") +
+                    " (server tick " + EventTick(kill) + ", packet " + DisplayValue(kill, "packet_sequence") + ", event " + DisplayValue(kill, "event_index_in_packet") + ")" +
                     " | #" + DisplayValue(kill, "attacker_user_id") + " " + DisplayValue(kill, "attacker_team") + " " + DisplayValue(kill, "attacker_class") +
                     " -> #" + DisplayValue(kill, "victim_user_id") + " " + DisplayValue(kill, "victim_team") + " " + DisplayValue(kill, "victim_class") +
                     " | " + DisplayValue(kill, "weapon") +

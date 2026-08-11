@@ -62,6 +62,18 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(context["analysis_scope"], "pov_player_only")
         self.assertEqual(context["pov_player_user_id"], 1)
 
+    def test_pov_scope_falls_back_to_userinfo_roster(self):
+        events = ANALYZER.read_events(ROOT / "tests" / "fixture_events.ndjson")
+        names = ANALYZER.player_name_history(events)
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            (directory / "header.json").write_text(json.dumps({"nick": "FocusFromRoster"}), encoding="utf-8")
+            (directory / "players.json").write_text(json.dumps({"7": {"user_id": 7, "name": "FocusFromRoster"}}), encoding="utf-8")
+            (directory / "manifest.json").write_text(json.dumps({"demo_capture": {"classification": "pov", "confidence": "medium", "evidence": ["dem_usercmd"]}}), encoding="utf-8")
+            context = ANALYZER.analysis_context(directory, names)
+        self.assertEqual(context["analysis_scope"], "pov_player_only")
+        self.assertEqual(context["pov_player_user_id"], 7)
+
     def test_multikill_window_is_measured_first_to_last(self):
         # Each adjacent gap is under four seconds, but all three kills do not
         # belong to one four-second sequence.
@@ -128,6 +140,21 @@ class RoundStateTests(unittest.TestCase):
         self.assertIn("building_to_kill_sequence", tags)
         self.assertEqual(metrics["linked_building_destructions"], 1)
         self.assertEqual([item["reason"] for item in breakdown if item["reason"] == "building_destruction_led_to_kills"], ["building_destruction_led_to_kills"])
+
+    def test_server_tick_is_authoritative_over_demo_packet_tick(self):
+        with tempfile.TemporaryDirectory() as temp:
+            events_path = Path(temp) / "events.ndjson"
+            events_path.write_text(json.dumps({
+                "tick": 105192,
+                "demo_tick": 105192,
+                "server_tick": 104745,
+                "event_type": "player_death",
+                "event": {"attacker": 1, "user_id": 2},
+            }) + "\n", encoding="utf-8")
+            events = ANALYZER.read_events(events_path)
+        self.assertEqual(events[0]["demo_tick"], 105192)
+        self.assertEqual(events[0]["server_tick"], 104745)
+        self.assertEqual(events[0]["tick"], 104745)
 
 
 if __name__ == "__main__":

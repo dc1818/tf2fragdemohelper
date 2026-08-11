@@ -22,6 +22,8 @@ SEQUENCE_GAP_TICKS = round(TICKS_PER_SECOND * 4.0)
 PRE_ROLL_TICKS = round(TICKS_PER_SECOND * 5.0)
 POST_ROLL_TICKS = round(TICKS_PER_SECOND * 3.0)
 OBJECTIVE_CONVERSION_TICKS = round(TICKS_PER_SECOND * 8.0)
+CAPTURE_DENIAL_TICKS = round(TICKS_PER_SECOND * 2.0)
+ROUND_CLINCH_TICKS = round(TICKS_PER_SECOND * 3.0)
 
 ROUND_END_EVENTS = {
     "teamplay_round_win", "teamplay_round_stalemate", "teamplay_game_over",
@@ -39,6 +41,7 @@ BUILDING_DESTRUCTION_EVENTS = {
 }
 OBJECTIVE_CAPTURE_EVENTS = {"teamplay_point_captured"}
 PAYLOAD_PROGRESS_EVENTS = {"payload_pushed"}
+CAPTURE_DENIAL_EVENTS = {"teamplay_capture_blocked"}
 READY_TEAM_NAMES = {2: "red", 3: "blu"}
 PROJECTILE_WEAPONS = {
     "rocketlauncher", "directhit", "blackbox", "liberty_launcher", "airstrike",
@@ -489,7 +492,7 @@ def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[D
     objectives: List[Dict[str, Any]] = []
     for item in events:
         name = event_name(item)
-        if name not in OBJECTIVE_CAPTURE_EVENTS and name not in PAYLOAD_PROGRESS_EVENTS:
+        if name not in OBJECTIVE_CAPTURE_EVENTS and name not in PAYLOAD_PROGRESS_EVENTS and name not in CAPTURE_DENIAL_EVENTS:
             continue
         tick = item["tick"]
         if round_for_tick(rounds, tick) is None:
@@ -505,7 +508,7 @@ def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[D
                 "point_name": as_text(fields.get("cp_name")),
                 "cappers": as_text(fields.get("cappers")),
             }
-        else:
+        elif name in PAYLOAD_PROGRESS_EVENTS:
             pusher = as_int(fields.get("pusher"))
             objective = {
                 "event_tick": tick,
@@ -514,6 +517,18 @@ def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[D
                 "team": team_id(player_team_at(teams, pusher, tick)),
                 "pusher_user_id": pusher,
                 "distance": as_int(fields.get("distance")),
+            }
+        else:
+            blocker = as_int(fields.get("blocker"))
+            objective = {
+                "event_tick": tick,
+                "event_type": name,
+                "kind": "capture_denial",
+                "team": team_id(player_team_at(teams, blocker, tick)),
+                "blocker_user_id": blocker,
+                "victim_user_id": as_int(fields.get("victim")),
+                "point": as_int(fields.get("cp")),
+                "point_name": as_text(fields.get("cp_name")),
             }
         objectives.append(objective)
         if debug:
@@ -549,6 +564,10 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             score += 18.0
             tags.add("medic_pick")
             breakdown.append({"reason": "medic_pick", "points": 18.0, "event_tick": kill["event_tick"]})
+        if kill["victim_class"] == "demoman":
+            score += 10.0
+            tags.add("demoman_pick")
+            breakdown.append({"reason": "demoman_pick", "points": 10.0, "event_tick": kill["event_tick"]})
         if kill["rocket_jump_victim"]:
             score += 10.0
             tags.add("rocket_jump_victim")
@@ -587,6 +606,15 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         score += 8.0
         tags.add("late_round")
         breakdown.append({"reason": "late_round", "points": 8.0})
+    attacker_team = team_id(kills[0].get("attacker_team"))
+    if (
+        attacker_team
+        and attacker_team == as_int(round_data.get("winning_team"))
+        and 0 <= round_data["end_tick"] - kills[-1]["event_tick"] <= ROUND_CLINCH_TICKS
+    ):
+        score += 12.0
+        tags.add("round_clinch")
+        breakdown.append({"reason": "team_won_immediately_after_sequence", "points": 12.0, "event_tick": round_data["end_tick"]})
     linked_buildings = [
         building for building in (building_destructions or [])
         if building["attacker_user_id"] == kills[0]["attacker_user_id"]
@@ -596,7 +624,6 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         score += 6.0
         tags.add("building_to_kill_sequence")
         breakdown.append({"reason": "building_destruction_led_to_kills", "points": 6.0, "count": len(linked_buildings), "event_tick": linked_buildings[-1]["event_tick"]})
-    attacker_team = team_id(kills[0].get("attacker_team"))
     objective_followups = [
         objective for objective in (objective_events or [])
         if 0 <= objective["event_tick"] - kills[-1]["event_tick"] <= OBJECTIVE_CONVERSION_TICKS
@@ -608,6 +635,15 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     # completed capture from the same short sequence.
     point_capture = next((item for item in objective_followups if item["kind"] == "point_capture"), None)
     payload_progress = next((item for item in objective_followups if item["kind"] == "payload_progress"), None)
+    capture_denial = next(
+        (
+            item for item in objective_followups
+            if item["kind"] == "capture_denial"
+            and item.get("blocker_user_id") == kills[0]["attacker_user_id"]
+            and item["event_tick"] - kills[-1]["event_tick"] <= CAPTURE_DENIAL_TICKS
+        ),
+        None,
+    )
     objective_score = 0.0
     objective_conversion_kind = ""
     if point_capture is not None:
@@ -616,6 +652,12 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         score += objective_score
         tags.add("objective_capture_followup")
         breakdown.append({"reason": "kill_sequence_led_to_point_capture", "points": objective_score, "event_tick": point_capture["event_tick"], "point": point_capture.get("point"), "point_name": point_capture.get("point_name")})
+    elif capture_denial is not None:
+        objective_score = 20.0
+        objective_conversion_kind = "capture_denial"
+        score += objective_score
+        tags.add("capture_denial_followup")
+        breakdown.append({"reason": "kill_sequence_blocked_capture", "points": objective_score, "event_tick": capture_denial["event_tick"], "point": capture_denial.get("point"), "point_name": capture_denial.get("point_name"), "victim_user_id": capture_denial.get("victim_user_id")})
     elif payload_progress is not None:
         objective_score = 16.0 if payload_progress.get("pusher_user_id") == kills[0]["attacker_user_id"] else 12.0
         objective_conversion_kind = "payload_progress"
@@ -631,6 +673,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "unique_weapons": sorted({kill["weapon"] for kill in kills if kill["weapon"]}),
         "projectile_kills": sum("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills),
         "medic_kills": sum(kill["victim_class"] == "medic" for kill in kills),
+        "demoman_kills": sum(kill["victim_class"] == "demoman" for kill in kills),
         "full_crit_kills": sum(kill["crit_type"] == 2 for kill in kills),
         "first_kill_tick": kills[0]["event_tick"],
         "last_kill_tick": kills[-1]["event_tick"],
@@ -640,6 +683,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "objective_followups": len(objective_followups),
         "point_capture_followups": sum(item["kind"] == "point_capture" for item in objective_followups),
         "payload_progress_followups": sum(item["kind"] == "payload_progress" for item in objective_followups),
+        "capture_denial_followups": sum(item["kind"] == "capture_denial" for item in objective_followups),
         "objective_followup_evidence": objective_followups,
         "objective_conversion_kind": objective_conversion_kind,
         "objective_score": objective_score,
@@ -738,7 +782,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                 "objective_followups": objective_followups,
                 "state_pass": {
                     "status": "pending",
-                    "next": ["airshot confirmation", "projectile flight", "health", "position", "objective proximity"],
+                    "next": ["airshot confirmation", "projectile flight", "health", "position", "objective proximity", "uber drop confirmation", "alive-player count"],
                 },
             })
             if debug:

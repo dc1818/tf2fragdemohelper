@@ -769,6 +769,7 @@ namespace Tf2StvParserGui
                     " | streak " + DisplayValue(kill, "kill_streak_total") +
                     " | crit " + DisplayValue(kill, "crit_type"));
             }
+            AppendStateEvidence(text, kills);
             details.Text = text.ToString();
             ScrollDetailsToBottom();
             details.SelectionLength = 0;
@@ -825,6 +826,40 @@ namespace Tf2StvParserGui
                 }
                 text.AppendLine("  tick " + DisplayValue(objective, "event_tick") + " | " + kind + " | team " + DisplayValue(objective, "team") + detail);
             }
+        }
+
+        private static void AppendStateEvidence(StringBuilder text, IList kills)
+        {
+            text.AppendLine();
+            text.AppendLine("Packet-state evidence");
+            bool found = false;
+            foreach (object item in kills)
+            {
+                IDictionary kill = item as IDictionary;
+                if (kill == null) continue;
+                IDictionary state = Map(kill, "state_evidence");
+                if (state == null || !BooleanValue(state, "state_available")) continue;
+                found = true;
+                text.AppendLine(
+                    "  kill tick " + EventTick(kill) +
+                    " | airborne " + DisplayValue(state, "victim_airborne") +
+                    " | confirmed airshot " + DisplayValue(state, "confirmed_airshot") +
+                    " | Uber drop " + DisplayValue(state, "confirmed_uber_drop") +
+                    " | alive " + DisplayValue(state, "friendly_alive_before") + "v" + DisplayValue(state, "enemy_alive_before"));
+                IDictionary projectile = Map(state, "projectile");
+                if (projectile != null)
+                {
+                    text.AppendLine(
+                        "    projectile #" + DisplayValue(projectile, "entity_id") +
+                        " " + DisplayValue(projectile, "projectile_type") +
+                        " | distance " + DisplayValue(projectile, "distance_to_victim") +
+                        " | " + DisplayValue(projectile, "impact_proximity") +
+                        " | flight " + DisplayValue(projectile, "flight_seconds") + "s" +
+                        " | path " + DisplayValue(projectile, "tracked_path_distance") +
+                        " | launcher " + DisplayValue(projectile, "launcher_handle"));
+                }
+            }
+            if (!found) text.AppendLine("  No reconstructed player/projectile state was available for these kills.");
         }
 
         private static void AppendScoreBreakdown(StringBuilder text, IList breakdown)
@@ -890,6 +925,13 @@ namespace Tf2StvParserGui
         {
             object value = Value(values, key);
             return value == null ? "" : Convert.ToString(value);
+        }
+
+        private static bool BooleanValue(IDictionary values, string key)
+        {
+            object value = Value(values, key);
+            try { return value != null && Convert.ToBoolean(value); }
+            catch (Exception) { return false; }
         }
 
         private static string DisplayValue(IDictionary values, string key)

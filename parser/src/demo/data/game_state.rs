@@ -71,6 +71,9 @@ impl Box {
 pub struct Player {
     pub entity: EntityId,
     pub position: Vector,
+    pub velocity: Vector,
+    pub flags: u32,
+    pub flags_known: bool,
     pub health: u16,
     pub max_health: u16,
     pub class: Class,

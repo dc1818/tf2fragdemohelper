@@ -232,6 +232,92 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(metrics["objective_conversion_kind"], "")
         self.assertNotIn("capture_denial_followup", tags)
 
+    def test_state_timeline_confirms_airshot_with_matching_projectile(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_path = Path(temp) / "state_samples.ndjson"
+            records = [
+                {
+                    "demo_tick": 190,
+                    "server_tick": 190,
+                    "players": [
+                        {"entity_id": 1, "user_id": 1, "team": "blue", "class": "soldier", "position": [0, 0, 0], "velocity": [0, 0, 0], "flags": 1, "on_ground": True, "health": 200, "life_state": "alive", "weapon_handles": [55, 0, 0]},
+                        {"entity_id": 2, "user_id": 2, "team": "red", "class": "soldier", "position": [100, 0, 100], "velocity": [0, 0, 250], "flags": 0, "on_ground": False, "health": 80, "life_state": "alive", "weapon_handles": [0, 0, 0]},
+                    ],
+                    "projectiles": [{"entity_id": 10, "team": "blue", "projectile_type": "rocket", "position": [100, 0, 100], "initial_velocity": [1100, 0, 0], "launcher_handle": 55, "critical": False}],
+                    "removed_projectiles": [],
+                },
+                {"demo_tick": 200, "server_tick": 200, "players": [], "projectiles": [], "removed_projectiles": [10]},
+            ]
+            state_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+            timeline = ANALYZER.read_state_timeline(state_path)
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2, "weapon": "rocketlauncher"}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        deaths = ANALYZER.normalized_deaths(events, rounds, {}, {}, {}, {"analysis_scope": "all_players"})
+        ANALYZER.enrich_state_evidence(deaths, events, timeline)
+        evidence = deaths[0]["state_evidence"]
+        self.assertTrue(evidence["victim_airborne"])
+        self.assertTrue(evidence["confirmed_airshot"])
+        self.assertEqual(evidence["projectile"]["entity_id"], 10)
+        score, tags, metrics, _ = ANALYZER.score_candidate(deaths, rounds[0])
+        self.assertEqual(score, 44.0)
+        self.assertIn("confirmed_airshot", tags)
+        self.assertIn("direct_airshot", tags)
+        self.assertEqual(metrics["confirmed_airshots"], 1)
+
+    def test_medic_death_and_charge_state_confirm_uber_drop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_path = Path(temp) / "state_samples.ndjson"
+            state_path.write_text(json.dumps({
+                "demo_tick": 190,
+                "server_tick": 190,
+                "players": [
+                    {"entity_id": 1, "user_id": 1, "team": "blue", "class": "scout", "position": [0, 0, 0], "flags": 1, "on_ground": True, "health": 125, "life_state": "alive", "weapon_handles": [11, 0, 0]},
+                    {"entity_id": 2, "user_id": 2, "team": "red", "class": "medic", "position": [50, 0, 0], "flags": 1, "on_ground": True, "health": 150, "life_state": "alive", "weapon_handles": [22, 0, 0], "medic_charge": 100, "medigun": "uber"},
+                ],
+                "projectiles": [],
+                "removed_projectiles": [],
+            }) + "\n", encoding="utf-8")
+            timeline = ANALYZER.read_state_timeline(state_path)
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "medic_death", "event": {"user_id": 2, "attacker": 1, "charged": True}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2, "weapon": "scattergun"}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        deaths = ANALYZER.normalized_deaths(events, rounds, {}, {}, {}, {"analysis_scope": "all_players"})
+        ANALYZER.enrich_state_evidence(deaths, events, timeline)
+        score, tags, metrics, _ = ANALYZER.score_candidate(deaths, rounds[0])
+        self.assertTrue(deaths[0]["state_evidence"]["confirmed_uber_drop"])
+        self.assertEqual(score, 48.0)
+        self.assertIn("uber_drop", tags)
+        self.assertEqual(metrics["confirmed_uber_drops"], 1)
+
+    def test_state_counts_rank_wipe_and_disadvantage_swing(self):
+        wipe = dict(self.kill(200, 2), state_evidence={
+            "enemy_alive_before": 1,
+            "friendly_alive_before": 4,
+            "enemy_state_roster": 6,
+        })
+        score, tags, _, _ = ANALYZER.score_candidate([wipe], {"end_tick": 1000})
+        self.assertEqual(score, 28.0)
+        self.assertIn("team_wipe", tags)
+        self.assertIn("last_enemy_alive", tags)
+
+        swing = [
+            dict(self.kill(200, 2), state_evidence={"enemy_alive_before": 5, "friendly_alive_before": 3, "enemy_state_roster": 6}),
+            self.kill(250, 3),
+        ]
+        score, tags, _, _ = ANALYZER.score_candidate(swing, {"end_tick": 1000})
+        self.assertEqual(score, 56.0)
+        self.assertIn("disadvantage_swing", tags)
+
     def test_server_tick_is_authoritative_over_demo_packet_tick(self):
         with tempfile.TemporaryDirectory() as temp:
             events_path = Path(temp) / "events.ndjson"

@@ -21,6 +21,13 @@ pub fn handle_player_entity(
         SendPropIdentifier::new("DT_BasePlayer", "m_iMaxHealth");
     const LIFE_STATE_PROP: SendPropIdentifier =
         SendPropIdentifier::new("DT_BasePlayer", "m_lifeState");
+    const FLAGS_PROP: SendPropIdentifier = SendPropIdentifier::new("DT_BasePlayer", "m_fFlags");
+    const VELOCITY_X: SendPropIdentifier =
+        SendPropIdentifier::new("DT_LocalPlayerExclusive", "m_vecVelocity[0]");
+    const VELOCITY_Y: SendPropIdentifier =
+        SendPropIdentifier::new("DT_LocalPlayerExclusive", "m_vecVelocity[1]");
+    const VELOCITY_Z: SendPropIdentifier =
+        SendPropIdentifier::new("DT_LocalPlayerExclusive", "m_vecVelocity[2]");
 
     const LOCAL_ORIGIN: SendPropIdentifier =
         SendPropIdentifier::new("DT_TFLocalPlayerExclusive", "m_vecOrigin");
@@ -81,6 +88,13 @@ pub fn handle_player_entity(
             LIFE_STATE_PROP => {
                 player.state = PlayerState::new(i64::try_from(&prop.value).unwrap_or_default())
             }
+            FLAGS_PROP => {
+                player.flags = i64::try_from(&prop.value).unwrap_or_default() as u32;
+                player.flags_known = true;
+            }
+            VELOCITY_X => player.velocity.x = f32::try_from(&prop.value).unwrap_or_default(),
+            VELOCITY_Y => player.velocity.y = f32::try_from(&prop.value).unwrap_or_default(),
+            VELOCITY_Z => player.velocity.z = f32::try_from(&prop.value).unwrap_or_default(),
             LOCAL_ORIGIN | NON_LOCAL_ORIGIN => {
                 let pos_xy = VectorXY::try_from(&prop.value).unwrap_or_default();
                 player.position.x = pos_xy.x;

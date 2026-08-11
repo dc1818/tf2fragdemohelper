@@ -11,24 +11,26 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Writes a compact, named game-event stream for deaths, damage, round transitions, class changes, objectives, and other TF2 events.
 - Excludes setup, waiting, and post-round deaths from highlight candidates.
 - Groups a player's rapid kills into one clip candidate instead of treating each kill as unrelated.
-- Ranks live-round candidates using multi-kills, rapid sequences, projectile kills, key picks, killstreaks, round-clinching timing, objective conversions, and random-crit penalties.
+- Reconstructs delta-compressed player and projectile state while parsing, then ranks live-round candidates using confirmed airshots, Über drops, wipes, disadvantage swings, multi-kills, key picks, objective conversions, and random-crit penalties.
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
 - Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
 - The candidate browser can launch the original demo in TF2 at a selectable lead-in before the first event; double-click a candidate or use **Open selected in TF2**.
 - Streams candidate-debug decisions into the embedded parser terminal, including rejected deaths, POV filtering, grouping windows, building events, and score outcomes.
 
-## Planned analysis passes
+## Packet-state analysis
 
-The initial scorer uses authoritative game events only. It deliberately does not label ordinary projectile kills as airshots.
+The exporter applies Source entity baselines and deltas in sequence and writes only changed reconstructed values to `state_samples.ndjson`. The scorer carries those values forward and joins them to exact `player_death` ticks.
 
-The next packet-state pass will reconstruct player and projectile state from `packets.ndjson` to add:
+The state-backed pass currently adds:
 
-- confirmed airshots and double-airshots;
-- projectile flight time, range, and direct-versus-splash confidence;
-- target vertical/lateral motion and airtime;
-- player health, conditions, weapon state, and local outnumbering;
-- Medic charge drops, objective proximity, wipes, and advantage swings;
-- class-specific scoring for pipes, directs, reflects, headshots, gardens, trickstabs, crossbow shots, and more.
+- confirmed airshots only when the victim is off the ground and a matching projectile type, owner weapon handle, removal time, and impact proximity are present;
+- direct-proximity, long-flight, and multiple-airshot bonuses based on the reconstructed projectile path;
+- confirmed Über drops using `medic_death`, reconstructed charge, and recent deploy events;
+- last-player kills/team wipes from reconstructed alive counts, with a minimum four-player state roster to avoid treating every duel as a wipe;
+- sequences that erase a two-player-or-greater disadvantage;
+- reconstructed health, position, velocity, ground flags, class/team, weapon handles, and projectile paths retained as evidence.
+
+Class-specific direct-versus-splash confidence, reflects, headshot chains, gardens, and trickstabs remain future refinements because they need additional weapon-specific state rules.
 
 ## Build and run on Windows
 
@@ -50,6 +52,7 @@ Each run creates a timestamped folder beside the selected output location.
 | `packets.ndjson` | Complete decoded top-level packet stream; retained as the source for future state reconstruction. |
 | `packet_index.ndjson` | Packet sequence, demo tick, type, and original bit range. |
 | `events.ndjson` | Compact decoded game-event records for analysis. |
+| `state_samples.ndjson` | Delta-compressed reconstructed player/projectile state with demo and server ticks. |
 | `frag_candidates.ndjson` | Ranked live-round clip candidates, their tick ranges, tags, kills, and scoring evidence. |
 | `frag_summary.json` | Candidate counts, live-round counts, and analysis limitations. |
 | `manifest.json` | Export format and file inventory. |
@@ -80,6 +83,14 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Capture block by the fragging player within two seconds | +20 |
 | Payload progress within eight seconds after the final kill | +12 |
 | Payload progress pushed by the attacker | +16 |
+| Confirmed airshot | +20 |
+| Direct-proximity confirmed airshot | +6 |
+| Confirmed airshot with at least 0.5 seconds of flight | +5 |
+| Two or more confirmed airshots in one sequence | +15 |
+| Airborne projectile kill without a matched projectile | +8 |
+| Confirmed Über drop, in addition to the Medic pick | +20 |
+| Sequence finishes the remaining enemy players | +18 |
+| Sequence erases a two-player-or-greater disadvantage | +16 |
 | Each random full-crit kill | -12 |
 
 The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
@@ -91,6 +102,8 @@ Objective follow-ups are kept as raw event evidence on the candidate. A `teampla
 Every kill records its exact original `player_death` event tick in `event_tick` and `point_of_kill_ticks`. Candidate `point_of_kill_ticks` and clip boundaries use the demo/playback tick you can seek to in TF2; `point_of_kill_server_ticks` and `event_tick` preserve the authoritative server tick used for analysis. The exporter preserves both namespaces because they are not interchangeable. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. Two same-tick deaths are still a valid multikill when they have different victims and event indexes. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player when the header nickname matches a decoded player event or the parser's `players.json` userinfo roster; the roster fallback handles POV demos that omit usable `player_connect` events. If neither source resolves the nickname, the result is marked and candidates are not silently labeled POV-only.
 
 After an export completes, use **View candidates** in the GUI. The parser log remains visible in the embedded terminal and can be used to trace every accepted/rejected event. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo. The GUI invokes `analyze_frags.py --debug` automatically.
+
+The selected-candidate view also shows packet-state evidence for each kill: airborne status, projectile match and distance, Über-drop confirmation, and the reconstructed alive-player counts. Older exports without `state_samples.ndjson` remain compatible and simply skip state-backed tags and points.
 
 The candidate viewer reads the original `.dem` path from `manifest.json`. Set **Seconds before first event** (8 seconds by default), then double-click a candidate or press **Open selected in TF2**. The first use asks for `tf.exe`; TF2 is launched with the demo playback tick calculated from the candidate's first event. This uses demo/playback ticks, not the separate server-analysis tick.
 
@@ -107,6 +120,8 @@ Build_Parser_Only.bat   Builds export_all without the GUI
 ## Validation
 
 `tests/fixture_events.ndjson` is a small controlled event stream used to verify that the analyzer keeps a live-round multi-kill and excludes ready-up, countdown, pre-round, and post-round deaths. Run `python -m unittest tests/test_round_state.py` from the project root to verify the round-state rules.
+
+Pull requests also check the Rust `export_all` binary, run the complete Python test suite, and compile the Windows Forms GUI on a Windows runner.
 
 ## Upstream parser
 

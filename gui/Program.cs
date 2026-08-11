@@ -350,6 +350,24 @@ namespace Tf2StvParserGui
         private string demoPath;
         private string tf2Executable;
 
+        private static Button GreenButton(string text, int width)
+        {
+            Button button = new Button();
+            button.Text = text;
+            button.Width = width;
+            button.Height = 32;
+            button.FlatStyle = FlatStyle.Flat;
+            button.BackColor = Color.FromArgb(44, 130, 82);
+            button.ForeColor = Color.White;
+            button.FlatAppearance.BorderColor = Color.FromArgb(64, 160, 103);
+            return button;
+        }
+
+        private static string Quote(string value)
+        {
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
+        }
+
         public CandidateViewerForm(string path)
         {
             candidatesPath = path;

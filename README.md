@@ -13,6 +13,7 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Groups a player's rapid kills into one clip candidate instead of treating each kill as unrelated.
 - Ranks live-round candidates using multi-kills, rapid sequences, projectile kills, Medic picks, killstreaks, late-round timing, and random-crit penalties.
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
+- Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
 
 ## Planned analysis passes
 
@@ -58,6 +59,8 @@ The current scorer creates candidates only inside closed live-round intervals. T
 Candidates are grouped by attacker within the same round when consecutive kills are no more than four seconds apart. Every candidate includes a five-second lead-in and three-second outro, clipped to the active round.
 
 The score is intentionally explainable. `frag_candidates.ndjson` records the tags and raw metrics that produced it, including the kill count, duration, weapons, projectile kills, Medic kills, and full-crit count.
+
+After an export completes, use **View candidates** in the GUI. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo.
 
 ## Project structure
 

@@ -344,7 +344,11 @@ namespace Tf2StvParserGui
         private readonly Label summary = new Label();
         private readonly TextBox filterBox = new TextBox();
         private readonly NumericUpDown minimumScore = new NumericUpDown();
+        private readonly NumericUpDown leadInSeconds = new NumericUpDown();
+        private readonly Button launchButton = GreenButton("Open selected in TF2", 165);
         private readonly List<CandidateRecord> records = new List<CandidateRecord>();
+        private string demoPath;
+        private string tf2Executable;
 
         public CandidateViewerForm(string path)
         {
@@ -404,6 +408,21 @@ namespace Tf2StvParserGui
             hint.ForeColor = Color.Gray;
             hint.Margin = new Padding(12, 9, 2, 2);
             filters.Controls.Add(hint);
+            Label leadLabel = new Label();
+            leadLabel.Text = "Seconds before first event";
+            leadLabel.AutoSize = true;
+            leadLabel.Margin = new Padding(14, 9, 4, 2);
+            filters.Controls.Add(leadLabel);
+            leadInSeconds.Width = 58;
+            leadInSeconds.Minimum = 0;
+            leadInSeconds.Maximum = 60;
+            leadInSeconds.Value = 8;
+            leadInSeconds.Increment = 1;
+            leadInSeconds.Margin = new Padding(0, 5, 10, 2);
+            filters.Controls.Add(leadInSeconds);
+            launchButton.Margin = new Padding(0, 4, 2, 2);
+            launchButton.Click += delegate { LaunchSelectedCandidate(); };
+            filters.Controls.Add(launchButton);
             layout.Controls.Add(filters, 0, 0);
 
             SplitContainer split = new SplitContainer();
@@ -439,6 +458,7 @@ namespace Tf2StvParserGui
             AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 430);
             grid.SelectionChanged += ShowSelectedCandidate;
+            grid.CellDoubleClick += delegate { LaunchSelectedCandidate(); };
             split.Panel1.Controls.Add(grid);
 
             details.Dock = DockStyle.Fill;
@@ -482,7 +502,21 @@ namespace Tf2StvParserGui
                 Close();
                 return;
             }
+            LoadDemoPath(serializer);
             ApplyFilter();
+        }
+
+        private void LoadDemoPath(JavaScriptSerializer serializer)
+        {
+            string manifestPath = Path.Combine(Path.GetDirectoryName(candidatesPath), "manifest.json");
+            if (!File.Exists(manifestPath)) return;
+            try
+            {
+                IDictionary manifest = serializer.DeserializeObject(File.ReadAllText(manifestPath)) as IDictionary;
+                string source = TextValue(manifest, "source_demo");
+                if (!String.IsNullOrEmpty(source) && File.Exists(source)) demoPath = source;
+            }
+            catch { demoPath = null; }
         }
 
         private void ApplyFilter()
@@ -514,6 +548,56 @@ namespace Tf2StvParserGui
             summary.Text = visible + " of " + records.Count + " ranked candidates. Kill-event ticks are exact; clip boundaries include lead-in and follow-through.";
             if (grid.Rows.Count > 0) grid.Rows[0].Selected = true;
             else details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
+        }
+
+        private void LaunchSelectedCandidate()
+        {
+            if (grid.SelectedRows.Count == 0) return;
+            IDictionary candidate = grid.SelectedRows[0].Tag as IDictionary;
+            if (candidate == null) return;
+            if (String.IsNullOrEmpty(demoPath) || !File.Exists(demoPath))
+            {
+                MessageBox.Show(this, "The original demo path was not found in the export manifest. Reopen the export folder or choose the demo again.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (String.IsNullOrEmpty(tf2Executable) || !File.Exists(tf2Executable))
+            {
+                using (OpenFileDialog dialog = new OpenFileDialog())
+                {
+                    dialog.Title = "Select Team Fortress 2 executable";
+                    dialog.Filter = "Team Fortress 2 (tf.exe)|tf.exe|Executable (*.exe)|*.exe";
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                    tf2Executable = dialog.FileName;
+                }
+            }
+            IList ticks = List(candidate, "point_of_kill_ticks");
+            if (ticks.Count == 0) return;
+            int firstTick;
+            try { firstTick = Convert.ToInt32(ticks[0]); }
+            catch { MessageBox.Show(this, "This candidate has no usable demo playback tick.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            int leadTicks = (int)Math.Round((double)leadInSeconds.Value * 66.6666667);
+            int targetTick = Math.Max(0, firstTick - leadTicks);
+            string arguments = "-game tf +playdemo " + Quote(demoPath) + " +demo_gototick " + targetTick;
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = tf2Executable,
+                    Arguments = arguments,
+                    UseShellExecute = true,
+                    WorkingDirectory = Path.GetDirectoryName(tf2Executable)
+                });
+                AppendLaunchNote(candidate, targetTick, firstTick);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Could not launch TF2:\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void AppendLaunchNote(IDictionary candidate, int targetTick, int firstTick)
+        {
+            details.AppendText("\r\nTF2 launch requested: demo tick " + targetTick + " (" + leadInSeconds.Value + " seconds before first event at " + firstTick + ").\r\n");
         }
 
         private void ShowSelectedCandidate(object sender, EventArgs e)

@@ -60,6 +60,8 @@ Candidates are grouped by attacker within the same round when consecutive kills 
 
 The score is intentionally explainable. `frag_candidates.ndjson` records the tags and raw metrics that produced it, including the kill count, duration, weapons, projectile kills, Medic kills, and full-crit count.
 
+Every kill records its original `player_death` event tick. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player only when the header nickname matches exactly one decoded player-name event; otherwise the all-player result is retained and marked in `demo_context`.
+
 After an export completes, use **View candidates** in the GUI. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo.
 
 ## Project structure

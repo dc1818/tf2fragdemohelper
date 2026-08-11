@@ -11,18 +11,24 @@ use tf_demo_parser::demo::packet::Packet;
 use tf_demo_parser::demo::parser::{DemoHandler, RawPacketStream};
 use tf_demo_parser::Demo;
 
-fn write_game_events(packet: &Packet<'_>, out: &mut BufWriter<File>) -> Result<(), MainError> {
+fn write_game_events(
+    packet: &Packet<'_>,
+    packet_sequence: u64,
+    out: &mut BufWriter<File>,
+) -> Result<(), MainError> {
     let messages = match packet {
         Packet::Signon(message_packet) | Packet::Message(message_packet) => &message_packet.messages,
         _ => return Ok(()),
     };
 
-    for message in messages {
+    for (event_index_in_packet, message) in messages.iter().enumerate() {
         if let Message::GameEvent(game_event) = message {
             serde_json::to_writer(
                 &mut *out,
                 &json!({
                     "tick": packet.tick(),
+                    "packet_sequence": packet_sequence,
+                    "event_index_in_packet": event_index_in_packet,
                     "event_type": game_event.event_type.as_str(),
                     "event": &game_event.event,
                 }),
@@ -31,6 +37,36 @@ fn write_game_events(packet: &Packet<'_>, out: &mut BufWriter<File>) -> Result<(
         }
     }
     Ok(())
+}
+
+fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::Value {
+    let nick = header.nick.trim();
+    let normalized_nick = nick.to_ascii_lowercase();
+    if normalized_nick.contains("sourcetv") || normalized_nick.contains("source tv") {
+        json!({
+            "classification": "stv",
+            "confidence": "high",
+            "evidence": ["Demo header nickname identifies a SourceTV recorder."],
+            "header_nick": nick,
+            "usercmd_packet_count": usercmd_packet_count,
+        })
+    } else if usercmd_packet_count > 0 {
+        json!({
+            "classification": "pov",
+            "confidence": "medium",
+            "evidence": ["Demo contains dem_usercmd packets, which record a client player's input."],
+            "header_nick": nick,
+            "usercmd_packet_count": usercmd_packet_count,
+        })
+    } else {
+        json!({
+            "classification": "unknown",
+            "confidence": "low",
+            "evidence": ["Header is not explicitly SourceTV and no dem_usercmd packets were found."],
+            "header_nick": nick,
+            "usercmd_packet_count": usercmd_packet_count,
+        })
+    }
 }
 
 fn usage(program: &str) {
@@ -91,6 +127,7 @@ fn main() -> Result<(), MainError> {
     let mut index_out = BufWriter::new(File::create(output_dir.join("packet_index.ndjson"))?);
     let mut events_out = BufWriter::new(File::create(output_dir.join("events.ndjson"))?);
     let mut packet_count: u64 = 0;
+    let mut usercmd_packet_count: u64 = 0;
 
     loop {
         // RawPacketStream positions are bit positions in the original demo stream.
@@ -103,6 +140,9 @@ fn main() -> Result<(), MainError> {
         let end_bit = packet_stream.pos();
         let tick = packet.tick();
         let packet_type = packet.packet_type().as_lowercase_str();
+        if matches!(&packet, Packet::UserCmd(_)) {
+            usercmd_packet_count += 1;
+        }
 
         // Write the complete decoded packet as one independent JSON line.
         // This streams to disk and does not keep the full match in memory.
@@ -126,7 +166,7 @@ fn main() -> Result<(), MainError> {
         // A compact event stream avoids repeated scans through deeply nested raw
         // packets during highlight analysis. packets.ndjson stays authoritative
         // for later position, projectile, and airshot reconstruction.
-        write_game_events(&packet, &mut events_out)?;
+        write_game_events(&packet, packet_count, &mut events_out)?;
 
         // Apply this packet to parser state so later delta-compressed packets,
         // baselines, event definitions, and string-table updates decode correctly.
@@ -143,6 +183,7 @@ fn main() -> Result<(), MainError> {
         "format_version": 1,
         "source_demo": input_path.to_string_lossy(),
         "packet_count": packet_count,
+        "demo_capture": capture_metadata(&header, usercmd_packet_count),
         "parser_reported_incomplete": packet_stream.incomplete,
         "files": {
             "header": "header.json",

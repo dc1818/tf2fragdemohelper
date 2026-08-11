@@ -1,7 +1,8 @@
 @echo off
 setlocal EnableExtensions
 title Build TF2 STV Parser GUI
-call "%~dp0Build_Parser_Only.bat"
+echo Building parser...
+call "%~dp0Build_Parser_Only.bat" --quiet
 if errorlevel 1 goto :fail
 set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"

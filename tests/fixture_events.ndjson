@@ -10,6 +10,9 @@
 {"tick":120,"event_type":"player_class","event":{"type":"PlayerClass","user_id":1,"class":"demoman"}}
 {"tick":121,"event_type":"player_class","event":{"type":"PlayerClass","user_id":2,"class":"scout"}}
 {"tick":122,"event_type":"player_class","event":{"type":"PlayerClass","user_id":3,"class":"medic"}}
+{"tick":120,"packet_sequence":10,"event_index_in_packet":1,"event_type":"player_connect","event":{"type":"PlayerConnect","user_id":1,"name":"RecordedPlayer"}}
+{"tick":121,"packet_sequence":11,"event_index_in_packet":1,"event_type":"player_connect","event":{"type":"PlayerConnect","user_id":2,"name":"VictimScout"}}
+{"tick":122,"packet_sequence":12,"event_index_in_packet":1,"event_type":"player_connect","event":{"type":"PlayerConnect","user_id":3,"name":"VictimMedic"}}
 {"tick":123,"event_type":"player_team","event":{"type":"PlayerTeam","user_id":1,"team":3}}
 {"tick":124,"event_type":"player_team","event":{"type":"PlayerTeam","user_id":2,"team":2}}
 {"tick":125,"event_type":"player_team","event":{"type":"PlayerTeam","user_id":3,"team":2}}

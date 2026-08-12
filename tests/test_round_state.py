@@ -359,7 +359,10 @@ class RoundStateTests(unittest.TestCase):
 
         ANALYZER.enrich_state_evidence(
             [kill],
-            [{"tick": 220, "event_type": "player_chargedeployed", "event": {"user_id": 4}}],
+            [
+                {"tick": 215, "event_type": "player_hurt", "event": {"attacker": 1, "user_id": 4}},
+                {"tick": 220, "event_type": "player_chargedeployed", "event": {"user_id": 4, "target_id": 2}},
+            ],
             timeline,
             rounds=rounds,
         )
@@ -368,6 +371,51 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(force[0]["medic_user_id"], 4)
         self.assertEqual(force[0]["medic_team"], "red")
         self.assertEqual(force[0]["forced_by_team"], "blu")
+        self.assertEqual(force[0]["target_user_id"], 2)
+        self.assertEqual(force[0]["pressure_event_ticks"], [215])
+
+    def test_medic_force_requires_candidate_pressure_on_enemy_medic_or_target(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.players[1].append((100, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
+        timeline.players[2].append((100, {"team": "red", "class": "engineer", "life_state": "alive", "health": 125}))
+        timeline.players[3].append((100, {"team": "red", "class": "medic", "life_state": "alive", "health": 150, "medic_charge": 100}))
+        timeline.players[4].append((100, {"team": "red", "class": "soldier", "life_state": "alive", "health": 200}))
+        kill = dict(self.kill(200, 2), attacker_team="blu", victim_team="red")
+        rounds = [{"round_index": 1, "live_start_tick": 100, "end_tick": 1000}]
+
+        ANALYZER.enrich_state_evidence(
+            [kill],
+            [{"tick": 220, "event_type": "player_chargedeployed", "event": {"user_id": 3, "target_id": 4}}],
+            timeline,
+            rounds=rounds,
+            teams={3: [(100, "red")]},
+        )
+        self.assertEqual(kill["state_evidence"]["enemy_medic_force_followups"], [])
+
+    def test_pov_medic_force_uses_recorder_team_at_deployment_tick(self):
+        timeline = ANALYZER.StateTimeline()
+        # The candidate's original kill data says BLU, but the recorder is
+        # RED when the Medic deploys. A RED Medic is therefore friendly in
+        # this POV context and cannot be a force.
+        timeline.players[1].append((100, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
+        timeline.players[2].append((100, {"team": "red", "class": "engineer", "life_state": "alive", "health": 125}))
+        timeline.players[3].append((100, {"team": "red", "class": "medic", "life_state": "alive", "health": 150, "medic_charge": 100}))
+        timeline.players[9].append((100, {"team": "red", "class": "demoman", "life_state": "alive", "health": 175}))
+        kill = dict(self.kill(200, 2), attacker_team="blu", victim_team="red")
+        rounds = [{"round_index": 1, "live_start_tick": 100, "end_tick": 1000}]
+
+        ANALYZER.enrich_state_evidence(
+            [kill],
+            [
+                {"tick": 215, "event_type": "player_hurt", "event": {"attacker": 1, "user_id": 3}},
+                {"tick": 220, "event_type": "player_chargedeployed", "event": {"user_id": 3, "target_id": 2}},
+            ],
+            timeline,
+            rounds=rounds,
+            teams={3: [(100, "red")], 9: [(100, "red")]},
+            context={"analysis_scope": "pov_player_only", "pov_player_user_id": 9},
+        )
+        self.assertEqual(kill["state_evidence"]["enemy_medic_force_followups"], [])
 
     def test_medic_force_rejects_conflicting_stale_state_team(self):
         timeline = ANALYZER.StateTimeline()

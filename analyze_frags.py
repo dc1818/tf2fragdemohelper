@@ -31,6 +31,7 @@ DUPLICATE_DEATH_TICKS = round(TICKS_PER_SECOND * 2.0)
 SACK_MIN_FRIENDLY_LOSSES = 2
 UBER_ADVANTAGE_CHARGE_GAP = 25
 MEDIC_FORCE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 4.0)
+MEDIC_FORCE_PRESSURE_TICKS = round(TICKS_PER_SECOND * 2.0)
 PLAYER_SWING_MIN_WINDOW_TICKS = round(TICKS_PER_SECOND * 4.0)
 
 ROUND_END_EVENTS = {
@@ -366,19 +367,34 @@ def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_
     return best[1] if best is not None else None
 
 
-def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, Any]], timeline: StateTimeline, debug: bool = False, rounds: Optional[List[Dict[str, Any]]] = None, teams: Optional[Dict[int, List[Tuple[int, Optional[str]]]]]=None) -> None:
+def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, Any]], timeline: StateTimeline, debug: bool = False, rounds: Optional[List[Dict[str, Any]]] = None, teams: Optional[Dict[int, List[Tuple[int, Optional[str]]]]] = None, context: Optional[Dict[str, Any]] = None) -> None:
     # Keep the original deployment event with its actor. A force must be
     # attributed to the Medic who deployed, not merely to an Uber-like state
     # seen on the POV player's team.
     deploys: Dict[int, List[Dict[str, int]]] = defaultdict(list)
+    hurt_events: List[Dict[str, int]] = []
     charged_deaths = set()
     friendly_loss_events: List[Tuple[int, int, str, int]] = []
+    team_history = teams or {}
+    pov_user_id = as_int((context or {}).get("pov_player_user_id")) if (context or {}).get("analysis_scope") == "pov_player_only" else 0
     for event in events:
         fields = event_fields(event)
         if event_name(event) == "player_chargedeployed":
             medic_user_id = as_int(fields.get("user_id", fields.get("userid")))
             if medic_user_id:
-                deploys[medic_user_id].append({"event_tick": event["tick"]})
+                deploys[medic_user_id].append({
+                    "event_tick": event["tick"],
+                    "target_user_id": as_int(fields.get("target_id", fields.get("targetid"))),
+                })
+        elif event_name(event) == "player_hurt":
+            attacker = as_int(fields.get("attacker"))
+            victim = as_int(fields.get("user_id", fields.get("userid")))
+            if attacker and victim and attacker != victim:
+                hurt_events.append({
+                    "event_tick": event["tick"],
+                    "attacker_user_id": attacker,
+                    "victim_user_id": victim,
+                })
         elif event_name(event) == "medic_death" and as_bool(fields.get("charged"), False):
             charged_deaths.add((event["tick"], as_int(fields.get("user_id", fields.get("userid")))))
         elif event_name(event) == "player_death":
@@ -462,7 +478,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
                         print("[candidate-debug] reject medic_force tick={} medic={} reason=no_active_medic_state".format(deploy_tick, medic_user_id))
                     continue
                 medic_team = canonical_team(medic_state.get("team"))
-                event_team = canonical_team(player_team_at(teams or {}, medic_user_id, deploy_tick))
+                event_team = canonical_team(player_team_at(team_history, medic_user_id, deploy_tick))
                 if medic_team not in {"red", "blu"} or as_text(medic_state.get("class")).lower() != "medic":
                     if debug:
                         print("[candidate-debug] reject medic_force tick={} medic={} team={} class={} reason=unresolved_or_not_medic".format(deploy_tick, medic_user_id, medic_team or "unknown", as_text(medic_state.get("class")) or "unknown"))
@@ -476,22 +492,45 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
                         print("[candidate-debug] reject medic_force tick={} medic={} state_team={} event_team={} reason=team_state_disagreement".format(deploy_tick, medic_user_id, medic_team, event_team))
                     continue
                 resolved_medic_team = event_team or medic_team
-                # The fragging player (the POV recorder for POV demos) is the
-                # reference team. A friendly Medic deployment is useful
-                # context, but never evidence that this sequence forced Uber.
-                if resolved_medic_team == attacker_team:
+                # STV candidates use the fragger's team at the deploy tick.
+                # POV candidates use the recorder's team at that same tick;
+                # the historical kill team can be stale or precede a team
+                # transition.
+                reference_user_id = pov_user_id or attacker
+                reference_team = resolved_team_at(timeline, team_history, reference_user_id, deploy_tick)
+                if reference_team is None:
                     if debug:
-                        print("[candidate-debug] reject medic_force tick={} medic={} team={} attacker_team={} reason=friendly_medic_deployment".format(deploy_tick, medic_user_id, resolved_medic_team, attacker_team))
+                        print("[candidate-debug] reject medic_force tick={} medic={} reference_player={} reason=unresolved_reference_team".format(deploy_tick, medic_user_id, reference_user_id))
                     continue
-                if resolved_medic_team != victim_team:
+                if resolved_medic_team == reference_team:
                     if debug:
-                        print("[candidate-debug] reject medic_force tick={} medic={} team={} victim_team={} reason=not_enemy_team".format(deploy_tick, medic_user_id, resolved_medic_team, victim_team))
+                        print("[candidate-debug] reject medic_force tick={} medic={} team={} reference_team={} reference_player={} reason=friendly_medic_deployment".format(deploy_tick, medic_user_id, resolved_medic_team, reference_team, reference_user_id))
+                    continue
+                # A force is a response to pressure, not simply an Uber that
+                # happened later in the fight. Require the candidate attacker
+                # to have damaged either the enemy Medic or the target named
+                # by this deployment immediately beforehand. This deliberately
+                # avoids crediting a POV player's unrelated Engineer pick for
+                # their own team's or an independent enemy Uber.
+                target_user_id = deploy.get("target_user_id", 0)
+                pressure_events = [
+                    hurt for hurt in hurt_events
+                    if hurt["attacker_user_id"] == attacker
+                    and hurt["victim_user_id"] in {medic_user_id, target_user_id}
+                    and 0 <= deploy_tick - hurt["event_tick"] <= MEDIC_FORCE_PRESSURE_TICKS
+                ]
+                if not pressure_events:
+                    if debug:
+                        print("[candidate-debug] reject medic_force tick={} medic={} target={} attacker={} reason=no_direct_candidate_pressure".format(deploy_tick, medic_user_id, target_user_id or "unknown", attacker))
                     continue
                 force_followups.append({
                     "event_tick": deploy_tick,
                     "medic_user_id": medic_user_id,
                     "medic_team": resolved_medic_team,
-                    "forced_by_team": attacker_team,
+                    "forced_by_team": reference_team,
+                    "reference_player_user_id": reference_user_id,
+                    "target_user_id": target_user_id or None,
+                    "pressure_event_ticks": [hurt["event_tick"] for hurt in pressure_events],
                     "charge_before_sequence": enemy_medic_charge,
                     "seconds_after_kill": round((deploy_tick - tick) / TICKS_PER_SECOND, 3),
                 })
@@ -679,6 +718,17 @@ def player_team_at(history: Dict[int, List[Tuple[int, Optional[str]]]], user_id:
             break
         found = team
     return found
+
+
+def resolved_team_at(timeline: StateTimeline, teams: Dict[int, List[Tuple[int, Optional[str]]]], user_id: int, tick: int) -> Optional[str]:
+    """Resolve a player's team at one tick without trusting a stale source."""
+    state = timeline.player_at(user_id, max(0, tick - 1), require_alive=True)
+    state_team = canonical_team(state.get("team")) if state is not None else ""
+    event_team = canonical_team(player_team_at(teams, user_id, tick))
+    if state_team in {"red", "blu"} and event_team in {"red", "blu"} and state_team != event_team:
+        return None
+    resolved = event_team or state_team
+    return resolved if resolved in {"red", "blu"} else None
 
 
 def player_name_history(events: Iterable[Dict[str, Any]]) -> Dict[int, List[Tuple[int, str]]]:
@@ -1353,7 +1403,7 @@ def main() -> int:
         for round_data in rounds:
             print("[candidate-debug] live round #{} start={} ({}) end={} ({})".format(round_data["round_index"], round_data["live_start_tick"], round_data["live_start_event"], round_data["end_tick"], round_data["end_reason"]))
     deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug)
-    enrich_state_evidence(deaths, events, state_timeline, arguments.debug, rounds, teams)
+    enrich_state_evidence(deaths, events, state_timeline, arguments.debug, rounds, teams, context)
     building_destructions = normalized_building_destructions(events, rounds, context, arguments.debug)
     objective_events = normalized_objective_events(events, rounds, teams, arguments.debug)
     candidates = build_candidates(deaths, rounds, context, building_destructions, objective_events, arguments.debug)

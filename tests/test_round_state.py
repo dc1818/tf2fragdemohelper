@@ -269,6 +269,45 @@ class RoundStateTests(unittest.TestCase):
         self.assertIn("direct_airshot", tags)
         self.assertEqual(metrics["confirmed_airshots"], 1)
 
+    def test_grounded_pipe_cannot_confirm_an_airshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_path = Path(temp) / "state_samples.ndjson"
+            records = [
+                {
+                    "demo_tick": 180, "server_tick": 180,
+                    "players": [
+                        {"entity_id": 1, "user_id": 1, "team": "blue", "class": "demoman", "position": [0, 0, 0], "flags": 1, "on_ground": True, "health": 175, "life_state": "alive", "weapon_handles": [55, 0, 0]},
+                        {"entity_id": 2, "user_id": 2, "team": "red", "class": "soldier", "position": [100, 0, 80], "velocity": [0, 0, 250], "flags": 0, "on_ground": False, "health": 80, "life_state": "alive", "weapon_handles": [0, 0, 0]},
+                    ],
+                    "projectiles": [{"entity_id": 10, "team": "blue", "projectile_type": "pipe", "position": [100, 0, 0], "initial_velocity": [1200, 0, 200], "launcher_handle": 55, "critical": False}],
+                    "removed_projectiles": [],
+                },
+                {
+                    "demo_tick": 195, "server_tick": 195, "players": [],
+                    "projectiles": [{"entity_id": 10, "team": "blue", "projectile_type": "pipe", "position": [100, 0, 0], "initial_velocity": [1200, 0, 200], "launcher_handle": 55, "critical": False}],
+                    "removed_projectiles": [],
+                },
+                {"demo_tick": 200, "server_tick": 200, "players": [], "projectiles": [], "removed_projectiles": [10]},
+            ]
+            state_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+            timeline = ANALYZER.read_state_timeline(state_path)
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2, "weapon": "iron_bomber"}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        deaths = ANALYZER.normalized_deaths(events, rounds, {}, {}, {}, {"analysis_scope": "all_players"})
+        ANALYZER.enrich_state_evidence(deaths, events, timeline)
+        evidence = deaths[0]["state_evidence"]
+        self.assertTrue(evidence["victim_airborne"])
+        self.assertFalse(evidence["confirmed_airshot"])
+        self.assertEqual(evidence["projectile"]["flight_state"], "grounded_or_stationary")
+        score, tags, metrics, _ = ANALYZER.score_candidate(deaths, rounds[0])
+        self.assertNotIn("confirmed_airshot", tags)
+        self.assertEqual(metrics["confirmed_airshots"], 0)
+
     def test_medic_death_and_charge_state_confirm_uber_drop(self):
         with tempfile.TemporaryDirectory() as temp:
             state_path = Path(temp) / "state_samples.ndjson"

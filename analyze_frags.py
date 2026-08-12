@@ -317,6 +317,39 @@ def projectile_type_matches_weapon(projectile_type: str, weapon: str) -> bool:
     return False
 
 
+def pipe_flight_state(history: List[Tuple[int, Dict[str, Any]]], impact_tick: int) -> str:
+    """Classify pipe movement near impact without pretending a floor trap flew.
+
+    Pipe entities do not expose a reliable per-tick velocity in the exported
+    state, so this uses their reconstructed positions. A pipe that has not
+    moved for several ticks, or that is moving flat along one Z level, is a
+    grounded trap/roller rather than an airshot projectile.
+    """
+    recent = [item for item in history if impact_tick - round(TICKS_PER_SECOND * 0.35) <= item[0] <= impact_tick + 3]
+    if not recent:
+        return "insufficient_motion"
+    last_tick, last_state = recent[-1]
+    if impact_tick - last_tick > 4:
+        return "grounded_or_stationary"
+    if len(recent) < 2:
+        return "insufficient_motion"
+    z_values = [vector3(state.get("position"))[2] for _, state in recent]
+    planar_distance = 0.0
+    vertical_distance = 0.0
+    for previous, current in zip(recent, recent[1:]):
+        previous_position = vector3(previous[1].get("position"))
+        current_position = vector3(current[1].get("position"))
+        planar_distance += math.hypot(current_position[0] - previous_position[0], current_position[1] - previous_position[1])
+        vertical_distance += abs(current_position[2] - previous_position[2])
+    # A pipe travelling over ground can have horizontal movement, but no
+    # meaningful vertical movement. Require a visible arc/bounce component.
+    if vertical_distance < 6.0 and max(z_values) - min(z_values) < 6.0:
+        return "grounded_or_stationary"
+    if planar_distance < 2.0 and vertical_distance < 6.0:
+        return "grounded_or_stationary"
+    return "in_flight"
+
+
 def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_state: Optional[Dict[str, Any]], victim_state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if attacker_state is None or victim_state is None:
         return None
@@ -349,9 +382,11 @@ def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_
             path_distance += math.sqrt(sum((current_position[index] - previous_position[index]) ** 2 for index in range(3)))
         launch_tick = usable_history[0][0] if usable_history else projectile_tick
         impact_tick = min((removed_tick for removed_tick in removals if removed_tick >= launch_tick), default=tick)
+        projectile_type = as_text(projectile.get("projectile_type"))
+        flight_state = pipe_flight_state(usable_history, tick) if projectile_type == "pipe" else "in_flight"
         evidence = {
             "entity_id": entity_id,
-            "projectile_type": as_text(projectile.get("projectile_type")),
+            "projectile_type": projectile_type,
             "launcher_handle": as_int(projectile.get("launcher_handle")),
             "last_state_tick": projectile_tick,
             "nearest_removal_tick_distance": removal_distance if removal_distance < 999999 else None,
@@ -361,6 +396,8 @@ def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_
             "flight_ticks": max(0, impact_tick - launch_tick),
             "flight_seconds": round(max(0, impact_tick - launch_tick) / TICKS_PER_SECOND, 3),
             "tracked_path_distance": round(path_distance, 2),
+            "flight_state": flight_state,
+            "airshot_eligible": flight_state == "in_flight",
         }
         if best is None or distance < best[0]:
             best = distance, evidence
@@ -539,7 +576,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         evidence = {
             "state_available": attacker_state is not None and victim_state is not None,
             "victim_airborne": airborne,
-            "confirmed_airshot": projectile_evidence is not None,
+            "confirmed_airshot": bool(projectile_evidence and projectile_evidence.get("airshot_eligible")),
             "projectile": projectile_evidence,
             "medic_charge_before_death": medic_charge if kill.get("victim_class") == "medic" else None,
             "uber_deployed_recently": deployed_recently if kill.get("victim_class") == "medic" else None,

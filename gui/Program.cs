@@ -948,6 +948,9 @@ namespace Tf2StvParserGui
                         "    Medic force | enemy Medic #" + DisplayValue(force, "medic_user_id") +
                         " (" + DisplayValue(force, "medic_team") + " vs " + DisplayValue(force, "forced_by_team") + ")" +
                         " deployed at tick " + DisplayValue(force, "event_tick") +
+                        " | reference player #" + DisplayValue(force, "reference_player_user_id") +
+                        " | target #" + DisplayValue(force, "target_user_id") +
+                        " | pressure ticks " + JoinValues(Value(force, "pressure_event_ticks")) +
                         " | charge before sequence " + DisplayValue(force, "charge_before_sequence") + "%");
                 }
                 string respawnSeconds = TextValue(state, "victim_respawn_seconds");

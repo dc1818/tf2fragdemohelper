@@ -935,6 +935,19 @@ namespace Tf2StvParserGui
                         " | enemy Uber advantage " + DisplayValue(state, "enemy_uber_advantage_before") +
                         " | Medic charge " + DisplayValue(state, "friendly_medic_charge_before") + "% vs " + DisplayValue(state, "enemy_medic_charge_before") + "%");
                 }
+                IList forceFollowups = List(state, "enemy_medic_force_followups");
+                foreach (object forceItem in forceFollowups)
+                {
+                    IDictionary force = forceItem as IDictionary;
+                    if (force == null) continue;
+                    text.AppendLine(
+                        "    Medic force | enemy Medic #" + DisplayValue(force, "medic_user_id") +
+                        " deployed at tick " + DisplayValue(force, "event_tick") +
+                        " | charge before sequence " + DisplayValue(force, "charge_before_sequence") + "%");
+                }
+                string respawnSeconds = TextValue(state, "victim_respawn_seconds");
+                if (!String.IsNullOrEmpty(respawnSeconds))
+                    text.AppendLine("    victim respawn observed in " + respawnSeconds + "s at tick " + DisplayValue(state, "victim_next_respawn_tick"));
                 IDictionary projectile = Map(state, "projectile");
                 if (projectile != null)
                 {

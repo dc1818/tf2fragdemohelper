@@ -964,6 +964,7 @@ namespace Tf2StvParserGui
                         " " + DisplayValue(projectile, "projectile_type") +
                         " | distance " + DisplayValue(projectile, "distance_to_victim") +
                         " | " + DisplayValue(projectile, "impact_proximity") +
+                        " | flight state " + DisplayValue(projectile, "flight_state") +
                         " | flight " + DisplayValue(projectile, "flight_seconds") + "s" +
                         " | path " + DisplayValue(projectile, "tracked_path_distance") +
                         " | launcher " + DisplayValue(projectile, "launcher_handle"));

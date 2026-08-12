@@ -336,6 +336,58 @@ class RoundStateTests(unittest.TestCase):
         self.assertTrue(metrics["medic_force"])
         self.assertIn("enemy_medic_forced_uber_after_sequence", [item["reason"] for item in breakdown])
 
+    def test_medic_force_requires_an_enemy_medic_deployment(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.players[1].append((100, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
+        timeline.players[2].append((100, {"team": "red", "class": "engineer", "life_state": "alive", "health": 125}))
+        # This is the POV player's Medic. Its deployment is context only and
+        # must never label the POV player's kill as a Medic force.
+        timeline.players[3].append((100, {"team": "blu", "class": "medic", "life_state": "alive", "health": 150, "medic_charge": 100}))
+        # The actual enemy Medic is present too, making team attribution
+        # unambiguous for the regression check.
+        timeline.players[4].append((100, {"team": "red", "class": "medic", "life_state": "alive", "health": 150, "medic_charge": 100}))
+        kill = dict(self.kill(200, 2), attacker_team="blu", victim_team="red")
+        rounds = [{"round_index": 1, "live_start_tick": 100, "end_tick": 1000}]
+
+        ANALYZER.enrich_state_evidence(
+            [kill],
+            [{"tick": 220, "event_type": "player_chargedeployed", "event": {"user_id": 3}}],
+            timeline,
+            rounds=rounds,
+        )
+        self.assertEqual(kill["state_evidence"]["enemy_medic_force_followups"], [])
+
+        ANALYZER.enrich_state_evidence(
+            [kill],
+            [{"tick": 220, "event_type": "player_chargedeployed", "event": {"user_id": 4}}],
+            timeline,
+            rounds=rounds,
+        )
+        force = kill["state_evidence"]["enemy_medic_force_followups"]
+        self.assertEqual(len(force), 1)
+        self.assertEqual(force[0]["medic_user_id"], 4)
+        self.assertEqual(force[0]["medic_team"], "red")
+        self.assertEqual(force[0]["forced_by_team"], "blu")
+
+    def test_medic_force_rejects_conflicting_stale_state_team(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.players[1].append((100, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
+        timeline.players[2].append((100, {"team": "red", "class": "engineer", "life_state": "alive", "health": 125}))
+        # The state snapshot is stale and still says RED, but the game-event
+        # team history resolves this Medic as BLU. Do not create a force tag.
+        timeline.players[3].append((100, {"team": "red", "class": "medic", "life_state": "alive", "health": 150, "medic_charge": 100}))
+        kill = dict(self.kill(200, 2), attacker_team="blu", victim_team="red")
+        rounds = [{"round_index": 1, "live_start_tick": 100, "end_tick": 1000}]
+
+        ANALYZER.enrich_state_evidence(
+            [kill],
+            [{"tick": 220, "event_type": "player_chargedeployed", "event": {"user_id": 3}}],
+            timeline,
+            rounds=rounds,
+            teams={3: [(100, "blu")]},
+        )
+        self.assertEqual(kill["state_evidence"]["enemy_medic_force_followups"], [])
+
     def test_sack_uber_recovery_requires_verified_advantage_and_medic_pick(self):
         with tempfile.TemporaryDirectory() as temp:
             state_path = Path(temp) / "state_samples.ndjson"

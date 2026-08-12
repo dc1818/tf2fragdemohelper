@@ -299,7 +299,7 @@ class RoundStateTests(unittest.TestCase):
         self.assertIn("uber_drop", tags)
         self.assertEqual(metrics["confirmed_uber_drops"], 1)
 
-    def test_state_counts_rank_wipe_and_disadvantage_swing(self):
+    def test_state_counts_rank_wipe_and_player_count_swing(self):
         wipe = dict(self.kill(200, 2), state_evidence={
             "enemy_alive_before": 1,
             "friendly_alive_before": 4,
@@ -316,7 +316,25 @@ class RoundStateTests(unittest.TestCase):
         ]
         score, tags, _, _ = ANALYZER.score_candidate(swing, {"end_tick": 1000})
         self.assertEqual(score, 56.0)
-        self.assertIn("disadvantage_swing", tags)
+        self.assertIn("player_count_swing", tags)
+
+    def test_medic_force_replaces_player_count_swing_when_deployment_follows(self):
+        kills = [
+            dict(self.kill(200, 2), state_evidence={
+                "enemy_alive_before": 5,
+                "friendly_alive_before": 3,
+                "enemy_state_roster": 6,
+                "victim_next_respawn_tick": 700,
+                "enemy_medic_force_followups": [{"event_tick": 280, "medic_user_id": 7, "charge_before_sequence": 100}],
+            }),
+            dict(self.kill(250, 3), state_evidence={"victim_next_respawn_tick": 720}),
+        ]
+        score, tags, metrics, breakdown = ANALYZER.score_candidate(kills, {"end_tick": 1000})
+        self.assertEqual(score, 56.0)
+        self.assertIn("medic_force", tags)
+        self.assertNotIn("player_count_swing", tags)
+        self.assertTrue(metrics["medic_force"])
+        self.assertIn("enemy_medic_forced_uber_after_sequence", [item["reason"] for item in breakdown])
 
     def test_sack_uber_recovery_requires_verified_advantage_and_medic_pick(self):
         with tempfile.TemporaryDirectory() as temp:

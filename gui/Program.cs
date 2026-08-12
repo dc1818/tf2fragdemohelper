@@ -35,6 +35,8 @@ namespace Tf2StvParserGui
         private readonly Button candidatesButton = GreenButton("View candidates", 130);
         private readonly ProgressBar progress = new ProgressBar();
         private readonly Label status = new Label();
+        private TableLayoutPanel parserLayout;
+        private CandidateViewerForm candidateViewer;
         private Process activeProcess;
         private bool busy;
         private string lastExport;
@@ -79,48 +81,48 @@ namespace Tf2StvParserGui
 
         private void BuildPage()
         {
-            TableLayoutPanel layout = new TableLayoutPanel();
-            layout.Dock = DockStyle.Fill;
-            layout.Padding = new Padding(20);
-            layout.ColumnCount = 3;
-            layout.RowCount = 7;
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
-            Controls.Add(layout);
+            parserLayout = new TableLayoutPanel();
+            parserLayout.Dock = DockStyle.Fill;
+            parserLayout.Padding = new Padding(20);
+            parserLayout.ColumnCount = 3;
+            parserLayout.RowCount = 7;
+            parserLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
+            parserLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            parserLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            Controls.Add(parserLayout);
 
-            layout.Controls.Add(Label("STV demo"), 0, 0);
+            parserLayout.Controls.Add(Label("STV demo"), 0, 0);
             demoBox.Dock = DockStyle.Fill;
             demoBox.TextChanged += delegate { SuggestOutput(); };
-            layout.Controls.Add(demoBox, 1, 0);
+            parserLayout.Controls.Add(demoBox, 1, 0);
             Button browseDemo = GreenButton("Browse demo", 145);
             browseDemo.Click += BrowseDemo;
-            layout.Controls.Add(browseDemo, 2, 0);
+            parserLayout.Controls.Add(browseDemo, 2, 0);
 
-            layout.Controls.Add(Label("Export location"), 0, 1);
+            parserLayout.Controls.Add(Label("Export location"), 0, 1);
             outputBox.Dock = DockStyle.Fill;
             outputBox.TextChanged += delegate { openButton.Enabled = Directory.Exists(outputBox.Text); };
-            layout.Controls.Add(outputBox, 1, 1);
+            parserLayout.Controls.Add(outputBox, 1, 1);
             Button browseOutput = GreenButton("Select location", 145);
             browseOutput.Click += BrowseOutput;
-            layout.Controls.Add(browseOutput, 2, 1);
+            parserLayout.Controls.Add(browseOutput, 2, 1);
 
             Label note = Label("Exports decoded data and ranks live-round frag candidates. The first analysis pass finds multi-kills, projectile kills, Medic picks, killstreaks, and random-crit flags. Airshot confirmation follows in the packet-state pass.");
             note.MaximumSize = new Size(850, 0);
             note.ForeColor = Color.Silver;
-            layout.SetColumnSpan(note, 3);
-            layout.Controls.Add(note, 0, 2);
+            parserLayout.SetColumnSpan(note, 3);
+            parserLayout.Controls.Add(note, 0, 2);
 
             Label logTitle = Label("Parser log");
-            layout.SetColumnSpan(logTitle, 3);
-            layout.Controls.Add(logTitle, 0, 3);
+            parserLayout.SetColumnSpan(logTitle, 3);
+            parserLayout.Controls.Add(logTitle, 0, 3);
             log.Dock = DockStyle.Fill;
             log.Multiline = true;
             log.ReadOnly = true;
@@ -129,8 +131,8 @@ namespace Tf2StvParserGui
             log.BackColor = Color.FromArgb(17, 18, 20);
             log.ForeColor = Color.FromArgb(218, 224, 230);
             log.Font = new Font("Consolas", 9F);
-            layout.SetColumnSpan(log, 3);
-            layout.Controls.Add(log, 0, 4);
+            parserLayout.SetColumnSpan(log, 3);
+            parserLayout.Controls.Add(log, 0, 4);
 
             FlowLayoutPanel actions = new FlowLayoutPanel();
             actions.Dock = DockStyle.Fill;
@@ -145,12 +147,12 @@ namespace Tf2StvParserGui
             actions.Controls.Add(cancelButton);
             actions.Controls.Add(openButton);
             actions.Controls.Add(candidatesButton);
-            layout.SetColumnSpan(actions, 3);
-            layout.Controls.Add(actions, 0, 5);
+            parserLayout.SetColumnSpan(actions, 3);
+            parserLayout.Controls.Add(actions, 0, 5);
 
             status.Dock = DockStyle.Fill;
-            layout.SetColumnSpan(status, 3);
-            layout.Controls.Add(status, 0, 6);
+            parserLayout.SetColumnSpan(status, 3);
+            parserLayout.Controls.Add(status, 0, 6);
             progress.Dock = DockStyle.Bottom;
             progress.Height = 14;
             progress.Style = ProgressBarStyle.Continuous;
@@ -313,8 +315,28 @@ namespace Tf2StvParserGui
                 MessageBox.Show(this, "frag_candidates.ndjson was not found in the latest export.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            CandidateViewerForm viewer = new CandidateViewerForm(path);
-            viewer.Show(this);
+            if (candidateViewer != null) return;
+            candidateViewer = new CandidateViewerForm(path);
+            candidateViewer.BackRequested += ReturnToParser;
+            candidateViewer.TopLevel = false;
+            candidateViewer.FormBorderStyle = FormBorderStyle.None;
+            candidateViewer.Dock = DockStyle.Fill;
+            parserLayout.Visible = false;
+            Controls.Add(candidateViewer);
+            candidateViewer.BringToFront();
+            candidateViewer.Show();
+        }
+
+        private void ReturnToParser(object sender, EventArgs e)
+        {
+            if (candidateViewer == null) return;
+            CandidateViewerForm viewer = candidateViewer;
+            candidateViewer = null;
+            Controls.Remove(viewer);
+            viewer.Dispose();
+            parserLayout.Visible = true;
+            parserLayout.BringToFront();
+            progress.BringToFront();
         }
 
         private void OnDragEnter(object sender, DragEventArgs e)
@@ -351,9 +373,12 @@ namespace Tf2StvParserGui
         private readonly NumericUpDown minimumScore = new NumericUpDown();
         private readonly NumericUpDown leadInSeconds = new NumericUpDown();
         private readonly Button launchButton = GreenButton("Open selected in TF2", 165);
+        private readonly Button backButton = GreenButton("Back to parser", 120);
         private readonly List<CandidateRecord> records = new List<CandidateRecord>();
         private string demoPath;
         private string tf2Executable;
+
+        public event EventHandler BackRequested;
 
         private static Button GreenButton(string text, int width)
         {
@@ -404,10 +429,22 @@ namespace Tf2StvParserGui
             filters.RowCount = 2;
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            FlowLayoutPanel heading = new FlowLayoutPanel();
+            heading.Dock = DockStyle.Fill;
+            heading.FlowDirection = FlowDirection.LeftToRight;
+            heading.WrapContents = false;
+            backButton.Margin = new Padding(0, 1, 12, 0);
+            backButton.Click += delegate
+            {
+                EventHandler handler = BackRequested;
+                if (handler != null) handler(this, EventArgs.Empty);
+            };
+            heading.Controls.Add(backButton);
             summary.AutoSize = true;
-            summary.Margin = new Padding(3, 5, 3, 0);
+            summary.Margin = new Padding(3, 8, 3, 0);
             summary.ForeColor = Color.Silver;
-            filters.Controls.Add(summary);
+            heading.Controls.Add(summary);
+            filters.Controls.Add(heading);
 
             FlowLayoutPanel filterControls = new FlowLayoutPanel();
             filterControls.Dock = DockStyle.Fill;

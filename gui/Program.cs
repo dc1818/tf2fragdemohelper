@@ -413,15 +413,16 @@ namespace Tf2StvParserGui
             layout.Padding = new Padding(14);
             layout.ColumnCount = 1;
             layout.RowCount = 2;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(layout);
 
             TableLayoutPanel filters = new TableLayoutPanel();
             filters.Dock = DockStyle.Fill;
             filters.ColumnCount = 1;
-            filters.RowCount = 2;
+            filters.RowCount = 3;
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             FlowLayoutPanel heading = new FlowLayoutPanel();
             heading.Dock = DockStyle.Fill;
@@ -463,22 +464,29 @@ namespace Tf2StvParserGui
             minimumScore.Margin = new Padding(0, 5, 2, 2);
             minimumScore.ValueChanged += delegate { ApplyFilter(); };
             filterControls.Controls.Add(minimumScore);
+
+            filters.Controls.Add(filterControls, 0, 1);
+
+            FlowLayoutPanel playbackControls = new FlowLayoutPanel();
+            playbackControls.Dock = DockStyle.Fill;
+            playbackControls.FlowDirection = FlowDirection.LeftToRight;
+            playbackControls.WrapContents = false;
             Label leadLabel = new Label();
             leadLabel.Text = "Seconds before first event";
             leadLabel.AutoSize = true;
             leadLabel.Margin = new Padding(14, 9, 4, 2);
-            filterControls.Controls.Add(leadLabel);
+            playbackControls.Controls.Add(leadLabel);
             leadInSeconds.Width = 58;
             leadInSeconds.Minimum = 0;
             leadInSeconds.Maximum = 60;
             leadInSeconds.Value = 8;
             leadInSeconds.Increment = 1;
             leadInSeconds.Margin = new Padding(0, 5, 10, 2);
-            filterControls.Controls.Add(leadInSeconds);
+            playbackControls.Controls.Add(leadInSeconds);
             launchButton.Margin = new Padding(0, 3, 2, 2);
             launchButton.Click += delegate { LaunchSelectedCandidate(); };
-            filterControls.Controls.Add(launchButton);
-            filters.Controls.Add(filterControls, 0, 1);
+            playbackControls.Controls.Add(launchButton);
+            filters.Controls.Add(playbackControls, 0, 2);
             layout.Controls.Add(filters, 0, 0);
 
             SplitContainer split = new SplitContainer();
@@ -571,8 +579,37 @@ namespace Tf2StvParserGui
                 IDictionary manifest = serializer.DeserializeObject(File.ReadAllText(manifestPath)) as IDictionary;
                 string source = TextValue(manifest, "source_demo");
                 if (!String.IsNullOrEmpty(source) && File.Exists(source)) demoPath = source;
+                FindTf2ExecutableNearDemo();
             }
             catch { demoPath = null; }
+        }
+
+        private void FindTf2ExecutableNearDemo()
+        {
+            if (String.IsNullOrEmpty(demoPath) || !File.Exists(demoPath)) return;
+            DirectoryInfo directory = new FileInfo(demoPath).Directory;
+            DirectoryInfo tfDirectory = null;
+            for (int depth = 0; directory != null && depth < 8; depth++, directory = directory.Parent)
+            {
+                if (String.Equals(directory.Name, "tf", StringComparison.OrdinalIgnoreCase))
+                {
+                    tfDirectory = directory;
+                    break;
+                }
+            }
+            if (tfDirectory == null || tfDirectory.Parent == null) return;
+            string demosRoot = Path.GetFullPath(Path.Combine(tfDirectory.FullName, "demos")).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string demoDirectory = Path.GetFullPath(Path.GetDirectoryName(demoPath)).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!demoDirectory.StartsWith(demosRoot, StringComparison.OrdinalIgnoreCase)) return;
+            foreach (string executableName in new string[] { "tf_win64.exe", "tf.exe" })
+            {
+                string candidate = Path.Combine(tfDirectory.Parent.FullName, executableName);
+                if (File.Exists(candidate))
+                {
+                    tf2Executable = candidate;
+                    return;
+                }
+            }
         }
 
         private void ApplyFilter()
@@ -620,7 +657,7 @@ namespace Tf2StvParserGui
             {
                 using (OpenFileDialog dialog = new OpenFileDialog())
                 {
-                    dialog.Title = "Select Team Fortress 2 executable";
+                    dialog.Title = "Select Team Fortress 2 executable (tf_win64.exe preferred)";
                     dialog.Filter = "Team Fortress 2 (tf.exe or tf_win64.exe)|tf.exe;tf_win64.exe|Executable (*.exe)|*.exe";
                     if (dialog.ShowDialog(this) != DialogResult.OK) return;
                     tf2Executable = dialog.FileName;
@@ -811,6 +848,15 @@ namespace Tf2StvParserGui
             details.SelectionStart = details.TextLength;
             details.SelectionLength = 0;
             details.ScrollToCaret();
+            if (details.IsHandleCreated)
+            {
+                details.BeginInvoke(new MethodInvoker(delegate
+                {
+                    details.SelectionStart = details.TextLength;
+                    details.SelectionLength = 0;
+                    details.ScrollToCaret();
+                }));
+            }
         }
 
         private static void AppendBuildingEvidence(StringBuilder text, IList buildings)

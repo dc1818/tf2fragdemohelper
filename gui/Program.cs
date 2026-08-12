@@ -46,8 +46,11 @@ namespace Tf2StvParserGui
             root = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
             Text = "TF2 STV Parser";
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(900, 560);
-            Size = new Size(1050, 700);
+            // The integrated candidate browser has a wide grid and a
+            // dedicated Back button. Keep the shared window large enough for
+            // those controls at normal Windows scaling.
+            MinimumSize = new Size(1200, 680);
+            Size = new Size(1280, 780);
             Font = new Font("Segoe UI", 9F);
             BackColor = Color.FromArgb(30, 32, 36);
             ForeColor = Color.Gainsboro;
@@ -367,7 +370,7 @@ namespace Tf2StvParserGui
         private readonly NumericUpDown minimumScore = new NumericUpDown();
         private readonly NumericUpDown leadInSeconds = new NumericUpDown();
         private readonly Button launchButton = GreenButton("Open selected in TF2", 165);
-        private readonly Button backButton = GreenButton("Back to parser", 120);
+        private readonly Button backButton = GreenButton("Back to parser", 165);
         private readonly List<CandidateRecord> records = new List<CandidateRecord>();
         private string demoPath;
         private string tf2Executable;
@@ -397,8 +400,8 @@ namespace Tf2StvParserGui
             candidatesPath = path;
             Text = "TF2 Frag Candidates";
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(1050, 620);
-            Size = new Size(1350, 820);
+            MinimumSize = new Size(1200, 680);
+            Size = new Size(1280, 780);
             Font = new Font("Segoe UI", 9F);
             BackColor = Color.FromArgb(30, 32, 36);
             ForeColor = Color.Gainsboro;

@@ -27,7 +27,8 @@ The state-backed pass currently adds:
 - direct-proximity, long-flight, and multiple-airshot bonuses based on the reconstructed projectile path;
 - confirmed Über drops using `medic_death`, reconstructed charge, and recent deploy events;
 - last-player kills/team wipes from reconstructed alive counts, with a minimum four-player state roster to avoid treating every duel as a wipe;
-- sequences that erase a two-player-or-greater disadvantage;
+- player-count swings only when a sequence erases a two-player-or-greater alive-player deficit and the reconstructed respawn timing leaves at least four seconds before the first killed enemy returns; pending friendly respawns are retained as evidence too;
+- Medic forces from an actual enemy `player_chargedeployed` event shortly after the kill sequence, so a force is not confused with a Medic pick or a player-count swing;
 - sack-Über recovery only when two distinct friendly deaths occurred in the preceding ten seconds, the enemy has a confirmed Über advantage (at least 75% charge and 25 percentage points ahead, or no alive friendly Medic), and the sequence either erases the live player deficit or kills the enemy Medic; a Medic equalizer is labeled separately;
 - reconstructed health, position, velocity, ground flags, class/team, weapon handles, and projectile paths retained as evidence.
 
@@ -91,7 +92,8 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Airborne projectile kill without a matched projectile | +8 |
 | Confirmed Über drop, in addition to the Medic pick | +20 |
 | Sequence finishes the remaining enemy players | +18 |
-| Sequence erases a two-player-or-greater disadvantage | +16 |
+| Player-count swing with a four-second-or-longer respawn window | +16 |
+| Enemy Medic forced to deploy after the sequence | +16 |
 | Qualified sack-Über recovery | +16 |
 | Enemy-Medic pick that equalizes that Über advantage | +12 |
 | Each random full-crit kill | -12 |
@@ -106,7 +108,7 @@ Every kill records its exact original `player_death` event tick in `event_tick` 
 
 After an export completes, use **View candidates** in the GUI. The candidate browser replaces the parser screen in the same window; use **Back to parser** to return to the selected demo, export controls, and embedded terminal. The parser log remains available after returning and can be used to trace every accepted/rejected event. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo. The GUI invokes `analyze_frags.py --debug` automatically.
 
-The selected-candidate view also shows packet-state evidence for each kill: airborne status, projectile match and distance, Über-drop confirmation, reconstructed alive-player counts, recent friendly deaths, player deficit, and both Medic charge values when available. Older exports without `state_samples.ndjson` remain compatible and simply skip state-backed tags and points.
+The selected-candidate view also shows packet-state evidence for each kill: airborne status, projectile match and distance, Über-drop confirmation, reconstructed alive-player counts, recent friendly deaths, player deficit, both Medic charge values, actual Medic deploy follow-ups, and observed respawn ticks when available. Older exports without `state_samples.ndjson` remain compatible and simply skip state-backed tags and points.
 
 The candidate viewer reads the original `.dem` path from `manifest.json`. Set **Seconds before first event** (8 seconds by default), then double-click a candidate or press **Open selected in TF2**. When the demo is in TF2's normal `tf/demos` folder (or one of its subfolders), the viewer walks up to the Team Fortress 2 folder and uses `tf_win64.exe` first, then `tf.exe`. Otherwise, the first launch asks you to choose the executable. TF2 is launched with the demo playback tick calculated from the candidate's first event. This uses demo/playback ticks, not the separate server-analysis tick.
 

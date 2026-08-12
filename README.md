@@ -11,7 +11,7 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Writes a compact, named game-event stream for deaths, damage, round transitions, class changes, objectives, and other TF2 events.
 - Excludes setup, waiting, and post-round deaths from highlight candidates.
 - Groups a player's rapid kills into one clip candidate instead of treating each kill as unrelated.
-- Reconstructs delta-compressed player and projectile state while parsing, then ranks live-round candidates using confirmed airshots, Über drops, wipes, disadvantage swings, post-sack recoveries, multi-kills, key picks, objective conversions, and random-crit penalties.
+- Reconstructs delta-compressed player and projectile state while parsing, then ranks live-round candidates using confirmed airshots, Über drops, wipes, disadvantage swings, sack-Über equalizers, multi-kills, key picks, objective conversions, and random-crit penalties.
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
 - Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
 - The candidate browser can launch the original demo in TF2 at a selectable lead-in before the first event; double-click a candidate or use **Open selected in TF2**.
@@ -28,7 +28,7 @@ The state-backed pass currently adds:
 - confirmed Über drops using `medic_death`, reconstructed charge, and recent deploy events;
 - last-player kills/team wipes from reconstructed alive counts, with a minimum four-player state roster to avoid treating every duel as a wipe;
 - sequences that erase a two-player-or-greater disadvantage;
-- post-sack recovery sequences: two distinct friendly deaths in the preceding ten seconds, a real two-player-or-greater live deficit, and either a multi-kill answer or an enemy-Medic pick; an additional tag applies only when the enemy has a confirmed charge advantage (at least 75% charge and 25 percentage points ahead, or no alive friendly Medic);
+- sack-Über recovery only when two distinct friendly deaths occurred in the preceding ten seconds, the enemy has a confirmed Über advantage (at least 75% charge and 25 percentage points ahead, or no alive friendly Medic), and the sequence either erases the live player deficit or kills the enemy Medic; a Medic equalizer is labeled separately;
 - reconstructed health, position, velocity, ground flags, class/team, weapon handles, and projectile paths retained as evidence.
 
 Class-specific direct-versus-splash confidence, reflects, headshot chains, gardens, and trickstabs remain future refinements because they need additional weapon-specific state rules.
@@ -92,9 +92,8 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Confirmed Über drop, in addition to the Medic pick | +20 |
 | Sequence finishes the remaining enemy players | +18 |
 | Sequence erases a two-player-or-greater disadvantage | +16 |
-| Qualified post-sack recovery | +12 |
-| Qualified recovery while enemy has a confirmed Über advantage | +10 |
-| Enemy-Medic pick that denies that Über advantage | +10 |
+| Qualified sack-Über recovery | +16 |
+| Enemy-Medic pick that equalizes that Über advantage | +12 |
 | Each random full-crit kill | -12 |
 
 The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
@@ -109,7 +108,7 @@ After an export completes, use **View candidates** in the GUI. The candidate bro
 
 The selected-candidate view also shows packet-state evidence for each kill: airborne status, projectile match and distance, Über-drop confirmation, reconstructed alive-player counts, recent friendly deaths, player deficit, and both Medic charge values when available. Older exports without `state_samples.ndjson` remain compatible and simply skip state-backed tags and points.
 
-The candidate viewer reads the original `.dem` path from `manifest.json`. Set **Seconds before first event** (8 seconds by default), then double-click a candidate or press **Open selected in TF2**. The first use asks for `tf.exe`; TF2 is launched with the demo playback tick calculated from the candidate's first event. This uses demo/playback ticks, not the separate server-analysis tick.
+The candidate viewer reads the original `.dem` path from `manifest.json`. Set **Seconds before first event** (8 seconds by default), then double-click a candidate or press **Open selected in TF2**. When the demo is in TF2's normal `tf/demos` folder (or one of its subfolders), the viewer walks up to the Team Fortress 2 folder and uses `tf_win64.exe` first, then `tf.exe`. Otherwise, the first launch asks you to choose the executable. TF2 is launched with the demo playback tick calculated from the candidate's first event. This uses demo/playback ticks, not the separate server-analysis tick.
 
 ## Project structure
 

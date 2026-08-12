@@ -318,7 +318,7 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(score, 56.0)
         self.assertIn("disadvantage_swing", tags)
 
-    def test_post_sack_uber_recovery_requires_losses_deficit_and_medic_pick(self):
+    def test_sack_uber_recovery_requires_verified_advantage_and_medic_pick(self):
         with tempfile.TemporaryDirectory() as temp:
             state_path = Path(temp) / "state_samples.ndjson"
             state_path.write_text("\n".join(json.dumps(record) for record in [
@@ -360,29 +360,44 @@ class RoundStateTests(unittest.TestCase):
         ANALYZER.enrich_state_evidence(deaths, events, timeline, rounds=rounds)
         response = [death for death in deaths if death["attacker_user_id"] == 1]
         score, tags, metrics, breakdown = ANALYZER.score_candidate(response, rounds[0])
-        self.assertTrue(metrics["post_sack_recovery"])
-        self.assertTrue(metrics["post_sack_medic_equalizer"])
-        self.assertIn("post_sack_recovery", tags)
-        self.assertIn("post_sack_uber_disadvantage", tags)
-        self.assertIn("post_sack_medic_equalizer", tags)
-        self.assertEqual(score, 126.0)
+        self.assertTrue(metrics["sack_uber_recovery"])
+        self.assertTrue(metrics["sack_uber_medic_equalizer"])
+        self.assertIn("sack_uber_recovery", tags)
+        self.assertIn("sack_uber_medic_equalizer", tags)
+        self.assertEqual(score, 122.0)
         self.assertEqual(
-            {"post_sack_recovery", "recovery_while_enemy_has_uber_advantage", "post_sack_enemy_medic_pick"},
-            {item["reason"] for item in breakdown if item["reason"].startswith("post_sack") or item["reason"].startswith("recovery_")},
+            {"sack_uber_recovery_after_losses", "sack_uber_medic_equalizer"},
+            {item["reason"] for item in breakdown if item["reason"].startswith("sack_uber")},
         )
 
-    def test_post_sack_score_does_not_apply_to_one_loss_or_without_a_deficit(self):
+    def test_sack_uber_score_does_not_apply_without_verified_uber_advantage(self):
         kills = [
             dict(self.kill(200, 2), victim_class="medic", state_evidence={
-                "recent_friendly_death_count": 1,
+                "recent_friendly_death_count": 2,
                 "player_disadvantage_before": 2,
-                "enemy_uber_advantage_before": True,
+                "enemy_uber_advantage_before": False,
             }),
             self.kill(220, 3),
         ]
         _, tags, metrics, _ = ANALYZER.score_candidate(kills, {"end_tick": 1000})
-        self.assertFalse(metrics["post_sack_recovery"])
-        self.assertNotIn("post_sack_recovery", tags)
+        self.assertFalse(metrics["sack_uber_recovery"])
+        self.assertNotIn("sack_uber_recovery", tags)
+
+    def test_duplicate_victim_death_cannot_create_a_multikill(self):
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2, "weapon": "iron_bomber"}},
+            {"tick": 235, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2, "weapon": "tf_projectile_pipe_remote"}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        deaths = ANALYZER.normalized_deaths(events, rounds, {}, {}, {}, {"analysis_scope": "all_players"})
+        self.assertEqual(len(deaths), 1)
+        score, tags, metrics, _ = ANALYZER.score_candidate(deaths, rounds[0])
+        self.assertEqual(metrics["unique_victims"], 1)
+        self.assertNotIn("multi_kill", tags)
+        self.assertEqual(score, 18.0)
 
     def test_server_tick_is_authoritative_over_demo_packet_tick(self):
         with tempfile.TemporaryDirectory() as temp:

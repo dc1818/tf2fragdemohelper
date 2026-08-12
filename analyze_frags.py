@@ -27,8 +27,8 @@ OBJECTIVE_CONVERSION_TICKS = round(TICKS_PER_SECOND * 8.0)
 CAPTURE_DENIAL_TICKS = round(TICKS_PER_SECOND * 2.0)
 ROUND_CLINCH_TICKS = round(TICKS_PER_SECOND * 3.0)
 SACK_RECOVERY_TICKS = round(TICKS_PER_SECOND * 10.0)
+DUPLICATE_DEATH_TICKS = round(TICKS_PER_SECOND * 2.0)
 SACK_MIN_FRIENDLY_LOSSES = 2
-SACK_MIN_PLAYER_DEFICIT = 2
 UBER_ADVANTAGE_CHARGE_GAP = 25
 
 ROUND_END_EVENTS = {
@@ -680,6 +680,7 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
 def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any], debug: bool = False) -> List[Dict[str, Any]]:
     deaths: List[Dict[str, Any]] = []
     pov_user_id = context.get("pov_player_user_id") if context.get("analysis_scope") == "pov_player_only" else None
+    last_death_by_victim: Dict[int, int] = {}
     for item in events:
         if event_name(item) != "player_death":
             continue
@@ -704,6 +705,12 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
             if debug:
                 print("[candidate-debug] reject player_death tick={} attacker={} reason=not_pov_attacker".format(tick, attacker))
             continue
+        previous_death_tick = last_death_by_victim.get(victim)
+        if previous_death_tick is not None and 0 <= tick - previous_death_tick <= DUPLICATE_DEATH_TICKS:
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} victim={} reason=duplicate_victim_death previous_tick={}".format(tick, attacker, victim, previous_death_tick))
+            continue
+        last_death_by_victim[victim] = tick
         weapon = as_text(fields.get("weapon")).lower()
         deaths.append({
             # `tick` stays for compatibility. `event_tick` identifies the
@@ -897,16 +904,17 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             score -= 12.0
             tags.add("random_full_crit")
             breakdown.append({"reason": "random_full_crit", "points": -12.0, "event_tick": kill["event_tick"]})
-    if len(kills) > 1:
-        multi_points = 18.0 * (len(kills) - 1)
+    unique_kill_count = len({kill["victim_user_id"] for kill in kills})
+    if unique_kill_count > 1:
+        multi_points = 18.0 * (unique_kill_count - 1)
         score += multi_points
         tags.add("multi_kill")
-        breakdown.append({"reason": "additional_kills", "points": multi_points, "count": len(kills) - 1})
-    if len(kills) >= 3:
+        breakdown.append({"reason": "additional_kills", "points": multi_points, "count": unique_kill_count - 1})
+    if unique_kill_count >= 3:
         score += 15.0
         tags.add("three_kill")
         breakdown.append({"reason": "three_kill", "points": 15.0})
-    if len(kills) >= 4:
+    if unique_kill_count >= 4:
         score += 25.0
         tags.add("four_kill_plus")
         breakdown.append({"reason": "four_kill_plus", "points": 25.0})
@@ -927,54 +935,45 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             tags.add("last_enemy_alive")
         breakdown.append({"reason": "sequence_finished_enemy_team", "points": 18.0, "enemy_alive_before": enemy_alive_before})
     enemy_alive_after = max(0, enemy_alive_before - unique_group_victims)
-    if friendly_alive_before > 0 and enemy_alive_before >= friendly_alive_before + 2 and enemy_alive_after <= friendly_alive_before:
+    erased_player_disadvantage = friendly_alive_before > 0 and enemy_alive_before >= friendly_alive_before + 2 and enemy_alive_after <= friendly_alive_before
+    if erased_player_disadvantage:
         score += 16.0
         tags.add("disadvantage_swing")
         breakdown.append({"reason": "sequence_erased_player_disadvantage", "points": 16.0, "friendly_alive_before": friendly_alive_before, "enemy_alive_before": enemy_alive_before, "enemy_alive_after": enemy_alive_after})
     recent_friendly_deaths = as_int(first_state.get("recent_friendly_death_count"))
-    player_disadvantage = as_int(first_state.get("player_disadvantage_before"))
     enemy_uber_advantage = bool(first_state.get("enemy_uber_advantage_before"))
     contains_medic_pick = any(kill.get("victim_class") == "medic" for kill in kills)
-    # A sack recovery is intentionally narrower than a generic comeback. It
-    # requires two distinct recent friendly deaths, an actual two-player live
-    # deficit, and either a multi-kill response or an enemy-Medic pick. That
-    # keeps a normal exchange from being mislabeled as an important recovery.
-    sack_recovery = (
+    # A sack tag represents an Uber equalization play, not a generic pick
+    # after teammates died. It needs a verified enemy Uber advantage plus a
+    # meaningful recovery of the player deficit or an enemy-Medic kill.
+    sack_uber_recovery = (
         recent_friendly_deaths >= SACK_MIN_FRIENDLY_LOSSES
-        and player_disadvantage >= SACK_MIN_PLAYER_DEFICIT
-        and (len(kills) >= 2 or contains_medic_pick)
+        and enemy_uber_advantage
+        and (erased_player_disadvantage or contains_medic_pick)
     )
-    if sack_recovery:
-        score += 12.0
-        tags.add("post_sack_recovery")
+    if sack_uber_recovery:
+        score += 16.0
+        tags.add("sack_uber_recovery")
         breakdown.append({
-            "reason": "post_sack_recovery",
-            "points": 12.0,
+            "reason": "sack_uber_recovery_after_losses",
+            "points": 16.0,
             "recent_friendly_deaths": recent_friendly_deaths,
-            "player_disadvantage_before": player_disadvantage,
+            "player_disadvantage_before": first_state.get("player_disadvantage_before"),
             "window_seconds": first_state.get("sack_recovery_window_seconds"),
             "death_ticks": first_state.get("recent_friendly_death_ticks", []),
+            "friendly_medic_charge": first_state.get("friendly_medic_charge_before"),
+            "enemy_medic_charge": first_state.get("enemy_medic_charge_before"),
         })
-        if enemy_uber_advantage:
-            score += 10.0
-            tags.add("post_sack_uber_disadvantage")
+        if contains_medic_pick:
+            score += 12.0
+            tags.add("sack_uber_medic_equalizer")
             breakdown.append({
-                "reason": "recovery_while_enemy_has_uber_advantage",
-                "points": 10.0,
-                "friendly_medic_charge": first_state.get("friendly_medic_charge_before"),
-                "enemy_medic_charge": first_state.get("enemy_medic_charge_before"),
-            })
-        if contains_medic_pick and enemy_uber_advantage:
-            score += 10.0
-            tags.add("post_sack_medic_equalizer")
-            breakdown.append({
-                "reason": "post_sack_enemy_medic_pick",
-                "points": 10.0,
-                "enemy_uber_advantage_before": enemy_uber_advantage,
+                "reason": "sack_uber_medic_equalizer",
+                "points": 12.0,
             })
     duration_ticks = max(0, kills[-1]["event_tick"] - kills[0]["event_tick"])
     duration_seconds = duration_ticks / TICKS_PER_SECOND
-    if len(kills) >= 2 and duration_seconds <= 2.0:
+    if unique_kill_count >= 2 and duration_seconds <= 2.0:
         score += 12.0
         tags.add("rapid_sequence")
         breakdown.append({"reason": "rapid_sequence", "points": 12.0})
@@ -1048,6 +1047,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     raw_score = round(score, 2)
     metrics = {
         "kills": len(kills),
+        "unique_victims": unique_kill_count,
         "duration_seconds": round(duration_seconds, 3),
         "unique_weapons": sorted({kill["weapon"] for kill in kills if kill["weapon"]}),
         "projectile_kills": sum("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills),
@@ -1062,10 +1062,10 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "enemy_alive_before": enemy_alive_before,
         "enemy_alive_after_sequence": enemy_alive_after,
         "recent_friendly_deaths_before": recent_friendly_deaths,
-        "player_disadvantage_before": player_disadvantage,
+        "player_disadvantage_before": as_int(first_state.get("player_disadvantage_before")),
         "enemy_uber_advantage_before": enemy_uber_advantage,
-        "post_sack_recovery": sack_recovery,
-        "post_sack_medic_equalizer": sack_recovery and contains_medic_pick and enemy_uber_advantage,
+        "sack_uber_recovery": sack_uber_recovery,
+        "sack_uber_medic_equalizer": sack_uber_recovery and contains_medic_pick,
         "first_kill_tick": kills[0]["event_tick"],
         "last_kill_tick": kills[-1]["event_tick"],
         "score_before_floor": raw_score,
@@ -1177,8 +1177,8 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                     "confirmed_uber_drops": metrics.get("confirmed_uber_drops", 0),
                     "enemy_alive_before": metrics.get("enemy_alive_before", 0),
                     "enemy_alive_after_sequence": metrics.get("enemy_alive_after_sequence", 0),
-                    "post_sack_recovery": metrics.get("post_sack_recovery", False),
-                    "post_sack_medic_equalizer": metrics.get("post_sack_medic_equalizer", False),
+                    "sack_uber_recovery": metrics.get("sack_uber_recovery", False),
+                    "sack_uber_medic_equalizer": metrics.get("sack_uber_medic_equalizer", False),
                 },
             })
             if debug:

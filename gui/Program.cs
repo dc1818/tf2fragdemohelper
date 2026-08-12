@@ -946,6 +946,7 @@ namespace Tf2StvParserGui
                     if (force == null) continue;
                     text.AppendLine(
                         "    Medic force | enemy Medic #" + DisplayValue(force, "medic_user_id") +
+                        " (" + DisplayValue(force, "medic_team") + " vs " + DisplayValue(force, "forced_by_team") + ")" +
                         " deployed at tick " + DisplayValue(force, "event_tick") +
                         " | charge before sequence " + DisplayValue(force, "charge_before_sequence") + "%");
                 }

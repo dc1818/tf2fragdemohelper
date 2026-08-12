@@ -374,6 +374,7 @@ namespace Tf2StvParserGui
         private readonly List<CandidateRecord> records = new List<CandidateRecord>();
         private string demoPath;
         private string tf2Executable;
+        private bool detailsScrollPending;
 
         public event EventHandler BackRequested;
 
@@ -431,15 +432,8 @@ namespace Tf2StvParserGui
             heading.Dock = DockStyle.Fill;
             heading.FlowDirection = FlowDirection.LeftToRight;
             heading.WrapContents = false;
-            backButton.Margin = new Padding(0, 1, 12, 0);
-            backButton.Click += delegate
-            {
-                EventHandler handler = BackRequested;
-                if (handler != null) handler(this, EventArgs.Empty);
-            };
-            heading.Controls.Add(backButton);
             summary.AutoSize = true;
-            summary.Margin = new Padding(3, 8, 3, 0);
+            summary.Margin = new Padding(3, 5, 3, 0);
             summary.ForeColor = Color.Silver;
             heading.Controls.Add(summary);
             filters.Controls.Add(heading);
@@ -467,6 +461,13 @@ namespace Tf2StvParserGui
             minimumScore.Margin = new Padding(0, 5, 2, 2);
             minimumScore.ValueChanged += delegate { ApplyFilter(); };
             filterControls.Controls.Add(minimumScore);
+            backButton.Margin = new Padding(16, 3, 2, 2);
+            backButton.Click += delegate
+            {
+                EventHandler handler = BackRequested;
+                if (handler != null) handler(this, EventArgs.Empty);
+            };
+            filterControls.Controls.Add(backButton);
 
             filters.Controls.Add(filterControls, 0, 1);
 
@@ -536,6 +537,7 @@ namespace Tf2StvParserGui
             details.BackColor = Color.FromArgb(17, 18, 20);
             details.ForeColor = Color.FromArgb(218, 224, 230);
             details.Font = new Font("Consolas", 10F);
+            details.TextChanged += delegate { ScrollDetailsToBottom(); };
             split.Panel2.Controls.Add(details);
         }
 
@@ -848,18 +850,20 @@ namespace Tf2StvParserGui
 
         private void ScrollDetailsToBottom()
         {
+            if (details.IsDisposed) return;
             details.SelectionStart = details.TextLength;
             details.SelectionLength = 0;
             details.ScrollToCaret();
-            if (details.IsHandleCreated)
+            if (!details.IsHandleCreated || detailsScrollPending) return;
+            detailsScrollPending = true;
+            details.BeginInvoke(new MethodInvoker(delegate
             {
-                details.BeginInvoke(new MethodInvoker(delegate
-                {
-                    details.SelectionStart = details.TextLength;
-                    details.SelectionLength = 0;
-                    details.ScrollToCaret();
-                }));
-            }
+                detailsScrollPending = false;
+                if (details.IsDisposed) return;
+                details.SelectionStart = details.TextLength;
+                details.SelectionLength = 0;
+                details.ScrollToCaret();
+            }));
         }
 
         private static void AppendBuildingEvidence(StringBuilder text, IList buildings)

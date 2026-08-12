@@ -100,7 +100,6 @@ namespace Tf2StvParserGui
 
             parserLayout.Controls.Add(Label("STV demo"), 0, 0);
             demoBox.Dock = DockStyle.Fill;
-            demoBox.TextChanged += delegate { SuggestOutput(); };
             parserLayout.Controls.Add(demoBox, 1, 0);
             Button browseDemo = GreenButton("Browse demo", 145);
             browseDemo.Click += BrowseDemo;
@@ -293,11 +292,6 @@ namespace Tf2StvParserGui
                 if (Directory.Exists(outputBox.Text)) dialog.SelectedPath = outputBox.Text;
                 if (dialog.ShowDialog(this) == DialogResult.OK) outputBox.Text = dialog.SelectedPath;
             }
-        }
-
-        private void SuggestOutput()
-        {
-            if (File.Exists(demoBox.Text)) outputBox.Text = Path.GetDirectoryName(demoBox.Text);
         }
 
         private void OpenExport(object sender, EventArgs e)

@@ -318,6 +318,72 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(score, 56.0)
         self.assertIn("disadvantage_swing", tags)
 
+    def test_post_sack_uber_recovery_requires_losses_deficit_and_medic_pick(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_path = Path(temp) / "state_samples.ndjson"
+            state_path.write_text("\n".join(json.dumps(record) for record in [
+                {
+                    "demo_tick": 140,
+                    "server_tick": 140,
+                    "players": [
+                        {"entity_id": 1, "user_id": 1, "team": "blue", "class": "scout", "health": 125, "life_state": "alive"},
+                        {"entity_id": 3, "user_id": 3, "team": "blue", "class": "soldier", "health": 200, "life_state": "alive"},
+                        {"entity_id": 4, "user_id": 4, "team": "blue", "class": "demoman", "health": 175, "life_state": "alive"},
+                        {"entity_id": 2, "user_id": 2, "team": "red", "class": "medic", "health": 150, "life_state": "alive", "medic_charge": 100},
+                        {"entity_id": 5, "user_id": 5, "team": "red", "class": "soldier", "health": 200, "life_state": "alive"},
+                        {"entity_id": 6, "user_id": 6, "team": "red", "class": "scout", "health": 125, "life_state": "alive"},
+                    ],
+                    "projectiles": [], "removed_projectiles": [],
+                },
+                {
+                    "demo_tick": 170,
+                    "server_tick": 170,
+                    "players": [
+                        {"entity_id": 3, "user_id": 3, "team": "blue", "class": "soldier", "health": 0, "life_state": "dead"},
+                        {"entity_id": 4, "user_id": 4, "team": "blue", "class": "demoman", "health": 0, "life_state": "dead"},
+                    ],
+                    "projectiles": [], "removed_projectiles": [],
+                },
+            ]) + "\n", encoding="utf-8")
+            timeline = ANALYZER.read_state_timeline(state_path)
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 150, "event_type": "player_death", "event": {"attacker": 5, "user_id": 3}},
+            {"tick": 160, "event_type": "player_death", "event": {"attacker": 5, "user_id": 4}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2, "weapon": "scattergun"}},
+            {"tick": 220, "event_type": "player_death", "event": {"attacker": 1, "user_id": 5, "weapon": "scattergun"}},
+            {"tick": 1000, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        deaths = ANALYZER.normalized_deaths(events, rounds, {}, {}, {}, {"analysis_scope": "all_players"})
+        ANALYZER.enrich_state_evidence(deaths, events, timeline, rounds=rounds)
+        response = [death for death in deaths if death["attacker_user_id"] == 1]
+        score, tags, metrics, breakdown = ANALYZER.score_candidate(response, rounds[0])
+        self.assertTrue(metrics["post_sack_recovery"])
+        self.assertTrue(metrics["post_sack_medic_equalizer"])
+        self.assertIn("post_sack_recovery", tags)
+        self.assertIn("post_sack_uber_disadvantage", tags)
+        self.assertIn("post_sack_medic_equalizer", tags)
+        self.assertEqual(score, 126.0)
+        self.assertEqual(
+            {"post_sack_recovery", "recovery_while_enemy_has_uber_advantage", "post_sack_enemy_medic_pick"},
+            {item["reason"] for item in breakdown if item["reason"].startswith("post_sack") or item["reason"].startswith("recovery_")},
+        )
+
+    def test_post_sack_score_does_not_apply_to_one_loss_or_without_a_deficit(self):
+        kills = [
+            dict(self.kill(200, 2), victim_class="medic", state_evidence={
+                "recent_friendly_death_count": 1,
+                "player_disadvantage_before": 2,
+                "enemy_uber_advantage_before": True,
+            }),
+            self.kill(220, 3),
+        ]
+        _, tags, metrics, _ = ANALYZER.score_candidate(kills, {"end_tick": 1000})
+        self.assertFalse(metrics["post_sack_recovery"])
+        self.assertNotIn("post_sack_recovery", tags)
+
     def test_server_tick_is_authoritative_over_demo_packet_tick(self):
         with tempfile.TemporaryDirectory() as temp:
             events_path = Path(temp) / "events.ndjson"

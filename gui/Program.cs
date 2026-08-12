@@ -846,6 +846,15 @@ namespace Tf2StvParserGui
                     " | confirmed airshot " + DisplayValue(state, "confirmed_airshot") +
                     " | Uber drop " + DisplayValue(state, "confirmed_uber_drop") +
                     " | alive " + DisplayValue(state, "friendly_alive_before") + "v" + DisplayValue(state, "enemy_alive_before"));
+                int recentFriendlyDeaths = IntValue(state, "recent_friendly_death_count");
+                if (recentFriendlyDeaths > 0 || BooleanValue(state, "enemy_uber_advantage_before"))
+                {
+                    text.AppendLine(
+                        "    sack context | " + recentFriendlyDeaths + " recent friendly deaths in " + DisplayValue(state, "sack_recovery_window_seconds") + "s" +
+                        " | player deficit " + DisplayValue(state, "player_disadvantage_before") +
+                        " | enemy Uber advantage " + DisplayValue(state, "enemy_uber_advantage_before") +
+                        " | Medic charge " + DisplayValue(state, "friendly_medic_charge_before") + "% vs " + DisplayValue(state, "enemy_medic_charge_before") + "%");
+                }
                 IDictionary projectile = Map(state, "projectile");
                 if (projectile != null)
                 {
@@ -932,6 +941,13 @@ namespace Tf2StvParserGui
             object value = Value(values, key);
             try { return value != null && Convert.ToBoolean(value); }
             catch (Exception) { return false; }
+        }
+
+        private static int IntValue(IDictionary values, string key)
+        {
+            object value = Value(values, key);
+            try { return value == null ? 0 : Convert.ToInt32(value); }
+            catch (Exception) { return 0; }
         }
 
         private static string DisplayValue(IDictionary values, string key)

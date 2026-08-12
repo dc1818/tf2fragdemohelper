@@ -26,6 +26,10 @@ POST_ROLL_TICKS = round(TICKS_PER_SECOND * 3.0)
 OBJECTIVE_CONVERSION_TICKS = round(TICKS_PER_SECOND * 8.0)
 CAPTURE_DENIAL_TICKS = round(TICKS_PER_SECOND * 2.0)
 ROUND_CLINCH_TICKS = round(TICKS_PER_SECOND * 3.0)
+SACK_RECOVERY_TICKS = round(TICKS_PER_SECOND * 10.0)
+SACK_MIN_FRIENDLY_LOSSES = 2
+SACK_MIN_PLAYER_DEFICIT = 2
+UBER_ADVANTAGE_CHARGE_GAP = 25
 
 ROUND_END_EVENTS = {
     "teamplay_round_win", "teamplay_round_stalemate", "teamplay_game_over",
@@ -100,6 +104,12 @@ def as_bool(value: Any, default: bool = True) -> bool:
         if normalized in {"false", "0", "no"}:
             return False
     return default
+
+
+def canonical_team(value: Any) -> str:
+    """Return the stable spelling used by event and state evidence."""
+    team = as_text(value).lower()
+    return "blu" if team in {"blue", "blu"} else team
 
 
 def event_fields(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -180,14 +190,33 @@ class StateTimeline:
             state = self._at(history, tick)
             if state is None:
                 continue
-            team = as_text(state.get("team")).lower()
+            team = canonical_team(state.get("team"))
             if team not in {"red", "blue", "blu"}:
                 continue
-            team = "blu" if team in {"blue", "blu"} else "red"
             roster[team] += 1
             if as_text(state.get("life_state")).lower() == "alive" and as_int(state.get("health")) > 0:
                 alive[team] += 1
         return dict(alive), dict(roster)
+
+    def medic_charge_at(self, team: str, tick: int) -> Optional[int]:
+        """Return the highest alive Medic charge for a team, if state knows it.
+
+        We deliberately require an alive Medic. A stale 100% charge left on a
+        dead entity is not an Uber advantage and must not create a sack tag.
+        """
+        charges = []
+        for history in self.players.values():
+            state = self._at(history, tick, require_alive=True)
+            if state is None:
+                continue
+            if canonical_team(state.get("team")) != canonical_team(team):
+                continue
+            if as_text(state.get("class")).lower() != "medic":
+                continue
+            charge = state.get("medic_charge")
+            if charge is not None:
+                charges.append(as_int(charge))
+        return max(charges) if charges else None
 
 
 def read_state_timeline(path: Path, debug: bool = False) -> StateTimeline:
@@ -310,15 +339,31 @@ def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_
     return best[1] if best is not None else None
 
 
-def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, Any]], timeline: StateTimeline, debug: bool = False) -> None:
+def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, Any]], timeline: StateTimeline, debug: bool = False, rounds: Optional[List[Dict[str, Any]]] = None) -> None:
     deploys: Dict[int, List[int]] = defaultdict(list)
     charged_deaths = set()
+    friendly_loss_events: List[Tuple[int, int, str, int]] = []
     for event in events:
         fields = event_fields(event)
         if event_name(event) == "player_chargedeployed":
             deploys[as_int(fields.get("user_id", fields.get("userid")))].append(event["tick"])
         elif event_name(event) == "medic_death" and as_bool(fields.get("charged"), False):
             charged_deaths.add((event["tick"], as_int(fields.get("user_id", fields.get("userid")))))
+        elif event_name(event) == "player_death":
+            tick = event["tick"]
+            round_data = round_for_tick(rounds, tick) if rounds is not None else None
+            if rounds is not None and round_data is None:
+                continue
+            victim = as_int(fields.get("user_id", fields.get("userid")))
+            attacker = as_int(fields.get("attacker"))
+            # A recovery should follow an enemy's successful sacrifice, not a
+            # killbind, world death, or an unrelated respawn transition.
+            if not victim or not attacker or attacker == victim:
+                continue
+            victim_state = timeline.player_at(victim, max(0, tick - 1), require_alive=True)
+            victim_team = canonical_team(victim_state.get("team")) if victim_state is not None else ""
+            if victim_team in {"red", "blu"}:
+                friendly_loss_events.append((tick, victim, victim_team, as_int(round_data.get("round_index")) if round_data else 0))
 
     for kill in deaths:
         tick = kill["event_tick"]
@@ -348,8 +393,24 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         # server tick for pre-frag alive counts so the victim is not already
         # removed from the situation we are measuring.
         alive_counts, roster_counts = timeline.team_counts_at(max(0, tick - 1))
-        attacker_team = as_text(kill.get("attacker_team")).lower()
-        victim_team = as_text(kill.get("victim_team")).lower()
+        attacker_team = canonical_team(kill.get("attacker_team"))
+        victim_team = canonical_team(kill.get("victim_team"))
+        current_round_index = as_int(kill.get("round_index"))
+        recent_losses = [
+            (loss_tick, loss_user_id)
+            for loss_tick, loss_user_id, loss_team, loss_round_index in friendly_loss_events
+            if loss_team == attacker_team
+            and (rounds is None or loss_round_index == current_round_index)
+            and 0 < tick - loss_tick <= SACK_RECOVERY_TICKS
+        ]
+        # A teammate can die twice in a long enough window. Count distinct
+        # players so the label really means at least two teammates were lost.
+        recent_loss_users = sorted({loss_user_id for _, loss_user_id in recent_losses})
+        friendly_medic_charge = timeline.medic_charge_at(attacker_team, max(0, tick - 1))
+        enemy_medic_charge = timeline.medic_charge_at(victim_team, max(0, tick - 1))
+        enemy_uber_advantage = enemy_medic_charge is not None and enemy_medic_charge >= 75 and (
+            friendly_medic_charge is None or enemy_medic_charge - friendly_medic_charge >= UBER_ADVANTAGE_CHARGE_GAP
+        )
         evidence = {
             "state_available": attacker_state is not None and victim_state is not None,
             "victim_airborne": airborne,
@@ -362,10 +423,18 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
             "enemy_alive_before": alive_counts.get(victim_team, 0),
             "friendly_state_roster": roster_counts.get(attacker_team, 0),
             "enemy_state_roster": roster_counts.get(victim_team, 0),
+            "recent_friendly_death_ticks": [loss_tick for loss_tick, _ in recent_losses],
+            "recent_friendly_death_user_ids": recent_loss_users,
+            "recent_friendly_death_count": len(recent_loss_users),
+            "sack_recovery_window_seconds": round(SACK_RECOVERY_TICKS / TICKS_PER_SECOND, 2),
+            "player_disadvantage_before": max(0, alive_counts.get(victim_team, 0) - alive_counts.get(attacker_team, 0)),
+            "friendly_medic_charge_before": friendly_medic_charge,
+            "enemy_medic_charge_before": enemy_medic_charge,
+            "enemy_uber_advantage_before": enemy_uber_advantage,
         }
         kill["state_evidence"] = evidence
         if debug:
-            print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} uber_drop={} alive={}:{}".format(tick, attacker, victim, airborne, bool(projectile_evidence), uber_drop, evidence["friendly_alive_before"], evidence["enemy_alive_before"]))
+            print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} uber_drop={} alive={}:{} recent_friendly_deaths={} uber_disadvantage={}".format(tick, attacker, victim, airborne, bool(projectile_evidence), uber_drop, evidence["friendly_alive_before"], evidence["enemy_alive_before"], evidence["recent_friendly_death_count"], enemy_uber_advantage))
 
 
 def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -862,6 +931,47 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         score += 16.0
         tags.add("disadvantage_swing")
         breakdown.append({"reason": "sequence_erased_player_disadvantage", "points": 16.0, "friendly_alive_before": friendly_alive_before, "enemy_alive_before": enemy_alive_before, "enemy_alive_after": enemy_alive_after})
+    recent_friendly_deaths = as_int(first_state.get("recent_friendly_death_count"))
+    player_disadvantage = as_int(first_state.get("player_disadvantage_before"))
+    enemy_uber_advantage = bool(first_state.get("enemy_uber_advantage_before"))
+    contains_medic_pick = any(kill.get("victim_class") == "medic" for kill in kills)
+    # A sack recovery is intentionally narrower than a generic comeback. It
+    # requires two distinct recent friendly deaths, an actual two-player live
+    # deficit, and either a multi-kill response or an enemy-Medic pick. That
+    # keeps a normal exchange from being mislabeled as an important recovery.
+    sack_recovery = (
+        recent_friendly_deaths >= SACK_MIN_FRIENDLY_LOSSES
+        and player_disadvantage >= SACK_MIN_PLAYER_DEFICIT
+        and (len(kills) >= 2 or contains_medic_pick)
+    )
+    if sack_recovery:
+        score += 12.0
+        tags.add("post_sack_recovery")
+        breakdown.append({
+            "reason": "post_sack_recovery",
+            "points": 12.0,
+            "recent_friendly_deaths": recent_friendly_deaths,
+            "player_disadvantage_before": player_disadvantage,
+            "window_seconds": first_state.get("sack_recovery_window_seconds"),
+            "death_ticks": first_state.get("recent_friendly_death_ticks", []),
+        })
+        if enemy_uber_advantage:
+            score += 10.0
+            tags.add("post_sack_uber_disadvantage")
+            breakdown.append({
+                "reason": "recovery_while_enemy_has_uber_advantage",
+                "points": 10.0,
+                "friendly_medic_charge": first_state.get("friendly_medic_charge_before"),
+                "enemy_medic_charge": first_state.get("enemy_medic_charge_before"),
+            })
+        if contains_medic_pick and enemy_uber_advantage:
+            score += 10.0
+            tags.add("post_sack_medic_equalizer")
+            breakdown.append({
+                "reason": "post_sack_enemy_medic_pick",
+                "points": 10.0,
+                "enemy_uber_advantage_before": enemy_uber_advantage,
+            })
     duration_ticks = max(0, kills[-1]["event_tick"] - kills[0]["event_tick"])
     duration_seconds = duration_ticks / TICKS_PER_SECOND
     if len(kills) >= 2 and duration_seconds <= 2.0:
@@ -951,6 +1061,11 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "friendly_alive_before": friendly_alive_before,
         "enemy_alive_before": enemy_alive_before,
         "enemy_alive_after_sequence": enemy_alive_after,
+        "recent_friendly_deaths_before": recent_friendly_deaths,
+        "player_disadvantage_before": player_disadvantage,
+        "enemy_uber_advantage_before": enemy_uber_advantage,
+        "post_sack_recovery": sack_recovery,
+        "post_sack_medic_equalizer": sack_recovery and contains_medic_pick and enemy_uber_advantage,
         "first_kill_tick": kills[0]["event_tick"],
         "last_kill_tick": kills[-1]["event_tick"],
         "score_before_floor": raw_score,
@@ -1062,6 +1177,8 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
                     "confirmed_uber_drops": metrics.get("confirmed_uber_drops", 0),
                     "enemy_alive_before": metrics.get("enemy_alive_before", 0),
                     "enemy_alive_after_sequence": metrics.get("enemy_alive_after_sequence", 0),
+                    "post_sack_recovery": metrics.get("post_sack_recovery", False),
+                    "post_sack_medic_equalizer": metrics.get("post_sack_medic_equalizer", False),
                 },
             })
             if debug:
@@ -1097,7 +1214,7 @@ def main() -> int:
         for round_data in rounds:
             print("[candidate-debug] live round #{} start={} ({}) end={} ({})".format(round_data["round_index"], round_data["live_start_tick"], round_data["live_start_event"], round_data["end_tick"], round_data["end_reason"]))
     deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug)
-    enrich_state_evidence(deaths, events, state_timeline, arguments.debug)
+    enrich_state_evidence(deaths, events, state_timeline, arguments.debug, rounds)
     building_destructions = normalized_building_destructions(events, rounds, context, arguments.debug)
     objective_events = normalized_objective_events(events, rounds, teams, arguments.debug)
     candidates = build_candidates(deaths, rounds, context, building_destructions, objective_events, arguments.debug)

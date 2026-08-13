@@ -587,6 +587,9 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         friendly_respawn_ticks = timeline.respawn_ticks_for_dead_team(attacker_team, tick)
         evidence = {
             "state_available": attacker_state is not None and victim_state is not None,
+            "attacker_airborne": bool(attacker_state is not None and attacker_state.get("on_ground") is False),
+            "attacker_vertical_velocity": vector3(attacker_state.get("velocity"))[2] if attacker_state is not None else 0.0,
+            "attacker_scoped": bool(attacker_state is not None and attacker_state.get("scoped")),
             "victim_airborne": airborne,
             "confirmed_airshot": bool(projectile_evidence and projectile_evidence.get("airshot_eligible")),
             "projectile": projectile_evidence,
@@ -1057,6 +1060,11 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     for kill in kills:
         tags.update(weapon_tags(kill["weapon"]))
         state_evidence = kill.get("state_evidence", {})
+        drop_shot = (kill.get("attacker_class") == "sniper" and kill["weapon"] in {"sniperrifle", "sniperrifle_classic", "sniperrifle_decap"} and bool(state_evidence.get("attacker_scoped")) and bool(state_evidence.get("attacker_airborne")) and float(state_evidence.get("attacker_vertical_velocity", 0)) < -20)
+        if drop_shot:
+            score += 18.0
+            tags.add("sniper_dropshot")
+            breakdown.append({"reason": "confirmed_sniper_dropshot", "points": 18.0, "event_tick": kill["event_tick"]})
         taunt_name = taunt_kill_name(kill)
         if taunt_name:
             score += 25.0

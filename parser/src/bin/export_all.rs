@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use tf_demo_parser::demo::header::Header;
 use tf_demo_parser::demo::message::Message;
 use tf_demo_parser::demo::packet::Packet;
-use tf_demo_parser::demo::data::game_state::{GameState, Player, PlayerClassData, Projectile};
+use tf_demo_parser::demo::data::game_state::{GameState, Player, PlayerClassData, PlayerCondition, Projectile};
 use tf_demo_parser::demo::parser::gamestateanalyser::GameStateAnalyser;
 use tf_demo_parser::demo::parser::{DemoHandler, RawPacketStream};
 use tf_demo_parser::Demo;
@@ -26,6 +26,7 @@ struct PlayerStateSample {
     velocity: [f32; 3],
     flags: Option<u32>,
     on_ground: Option<bool>,
+    scoped: bool,
     health: u16,
     max_health: u16,
     life_state: String,
@@ -53,6 +54,7 @@ impl PlayerStateSample {
             velocity: player.velocity.into(),
             flags: player.flags_known.then_some(player.flags),
             on_ground: player.flags_known.then_some(player.flags & 1 != 0),
+            scoped: player.has_condition(PlayerCondition::Zoomed),
             health: player.health,
             max_health: player.max_health,
             life_state: format!("{:?}", player.state).to_ascii_lowercase(),

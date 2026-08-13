@@ -31,6 +31,7 @@ The state-backed pass currently adds:
 - Medic forces from an actual enemy `player_chargedeployed` event shortly after the kill sequence, so a force is not confused with a Medic pick or a player-count swing;
 - sack-Über recovery only when two distinct friendly deaths occurred in the preceding ten seconds, the enemy has a confirmed Über advantage (at least 75% charge and 25 percentage points ahead, or no alive friendly Medic), and the sequence either erases the live player deficit or kills the enemy Medic; a Medic equalizer is labeled separately;
 - reconstructed health, position, velocity, ground flags, class/team, weapon handles, and projectile paths retained as evidence.
+- Demoknight shield bashes from authoritative custom-kill 23, plus melee kills within 0.85 seconds of reconstructed shield-charge condition 17; the two outcomes are tagged separately.
 
 Class-specific direct-versus-splash confidence, reflects, headshot chains, gardens, and trickstabs remain future refinements because they need additional weapon-specific state rules.
 
@@ -71,6 +72,8 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 |---|---:|
 | Candidate base | +10 |
 | Confirmed taunt kill | +25 |
+| Confirmed Demoknight shield-bash kill | +22 |
+| Shield charge followed by a melee kill | +16 |
 | Each kill after the first | +18 |
 | Three-kill sequence | +15 |
 | Four-or-more-kill sequence | +25 |

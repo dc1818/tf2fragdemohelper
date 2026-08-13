@@ -96,6 +96,26 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual([item["reason"] for item in multi_breakdown].count("additional_kills"), 1)
         self.assertEqual(sum(item["points"] for item in single_breakdown), single_metrics["score_before_floor"])
 
+    def test_taunt_kill_is_an_independently_ranked_candidate(self):
+        taunt = dict(self.kill(100, 2, "fists"), custom_kill=9)
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([taunt], {"end_tick": 1000})
+
+        self.assertEqual(score, 35.0)
+        self.assertIn("taunt_kill", tags)
+        self.assertEqual(metrics["taunt_kills"], 1)
+        self.assertEqual(
+            [item for item in breakdown if item["reason"] == "confirmed_taunt_kill"],
+            [{"reason": "confirmed_taunt_kill", "points": 25.0, "event_tick": 100, "custom_kill": 9, "taunt": "high_noon"}],
+        )
+
+    def test_non_taunt_custom_kill_does_not_get_taunt_bonus(self):
+        backstab = dict(self.kill(100, 2, "knife"), custom_kill=2)
+        score, tags, metrics, _ = ANALYZER.score_candidate([backstab], {"end_tick": 1000})
+
+        self.assertEqual(score, 10.0)
+        self.assertNotIn("taunt_kill", tags)
+        self.assertEqual(metrics["taunt_kills"], 0)
+
     def test_candidate_exposes_exact_kill_ticks_separately_from_clip_padding(self):
         kills = [dict(self.kill(1000, 2), round_index=1, attacker_team="blu")]
         rounds = [{

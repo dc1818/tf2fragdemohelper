@@ -930,6 +930,13 @@ namespace Tf2StvParserGui
                     " | confirmed airshot " + DisplayValue(state, "confirmed_airshot") +
                     " | Uber drop " + DisplayValue(state, "confirmed_uber_drop") +
                     " | alive " + DisplayValue(state, "friendly_alive_before") + "v" + DisplayValue(state, "enemy_alive_before"));
+                if (BooleanValue(state, "attacker_shield_charging") || Value(state, "attacker_recent_shield_charge_tick") != null)
+                {
+                    text.AppendLine(
+                        "    Demoknight charge | active " + DisplayValue(state, "attacker_shield_charging") +
+                        " | recent charge tick " + DisplayValue(state, "attacker_recent_shield_charge_tick") +
+                        " | seconds since charge " + DisplayValue(state, "attacker_seconds_since_shield_charge"));
+                }
                 int recentFriendlyDeaths = IntValue(state, "recent_friendly_death_count");
                 if (recentFriendlyDeaths > 0 || BooleanValue(state, "enemy_uber_advantage_before"))
                 {

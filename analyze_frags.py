@@ -33,6 +33,8 @@ UBER_ADVANTAGE_CHARGE_GAP = 25
 MEDIC_FORCE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 4.0)
 MEDIC_FORCE_PRESSURE_TICKS = round(TICKS_PER_SECOND * 2.0)
 PLAYER_SWING_MIN_WINDOW_TICKS = round(TICKS_PER_SECOND * 4.0)
+CHARGE_MELEE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 0.85)
+SHIELD_BASH_CUSTOM_KILL = 23
 
 ROUND_END_EVENTS = {
     "teamplay_round_win", "teamplay_round_stalemate", "teamplay_game_over",
@@ -72,17 +74,23 @@ SPECIAL_WEAPON_TAGS = {
     "eternal_reward": "eternal_reward",
     "tribalkukri": "tribalman's_shiv",
 }
+DEMOMAN_MELEE_WEAPONS = {
+    "bottle", "sword", "eyelander", "headtaker", "golfclub",
+    "scotsmans_skullcutter", "skullcutter", "paintrain", "pain_train",
+    "ullapool_caber", "battleaxe", "claidheamh_mor", "half_zatoichi",
+    "katana", "persian_persuader", "fryingpan", "golden_fryingpan",
+    "saxxy", "conscientious_objector", "freedom_staff", "ham_shank",
+    "memory_maker", "necro_smasher", "crossing_guard", "prinny_machete",
+}
 # `player_death.custom_kill` is the authoritative killfeed classification. Do
 # not infer taunts from the equipped weapon: several taunt kills keep the
 # weapon's ordinary name in the event. These are the legacy taunt kill values
 # plus the dedicated taunt-attack values emitted by newer taunts.
 TAUNT_CUSTOM_KILL_NAMES = {
     7: "hadouken", 9: "high_noon", 10: "grand_slam", 13: "fencing",
-    15: "arrow_stab", 22: "grenade_taunt", 23: "barbarian_swing",
-    28: "uberslice", 36: "gas_blast", 37: "hadouken", 38: "high_noon",
-    39: "grand_slam", 40: "fencing", 41: "arrow_stab", 42: "grenade_taunt",
-    43: "barbarian_swing", 44: "uberslice", 45: "engineer_guitar_smash",
-    46: "engineer_arm_impale", 47: "armageddon", 48: "flare_gun_execution",
+    15: "arrow_stab", 21: "grenade_taunt", 24: "barbarian_swing",
+    29: "uberslice", 33: "engineer_guitar_smash", 38: "engineer_arm_impale",
+    52: "armageddon", 60: "allclass_guitar_riff", 80: "gas_blast",
 }
 
 
@@ -197,6 +205,17 @@ class StateTimeline:
 
     def player_at(self, user_id: int, tick: int, require_alive: bool = False) -> Optional[Dict[str, Any]]:
         return self._at(self.players.get(user_id, []), tick, require_alive)
+
+    def last_player_flag_tick(self, user_id: int, tick: int, field: str, window_ticks: int) -> Optional[int]:
+        """Find recent positive reconstructed state for a short causal window."""
+        for state_tick, state in reversed(self.players.get(user_id, [])):
+            if state_tick > tick:
+                continue
+            if tick - state_tick > window_ticks:
+                break
+            if bool(state.get(field)):
+                return state_tick
+        return None
 
     def team_counts_at(self, tick: int) -> Tuple[Dict[str, int], Dict[str, int]]:
         alive: Dict[str, int] = defaultdict(int)
@@ -585,11 +604,18 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
                 })
         victim_respawn_tick = timeline.next_alive_tick(victim, tick)
         friendly_respawn_ticks = timeline.respawn_ticks_for_dead_team(attacker_team, tick)
+        shield_charge_active = bool(attacker_state is not None and attacker_state.get("shield_charging"))
+        recent_shield_charge_tick = tick if shield_charge_active else timeline.last_player_flag_tick(
+            attacker, tick, "shield_charging", CHARGE_MELEE_FOLLOWUP_TICKS
+        )
         evidence = {
             "state_available": attacker_state is not None and victim_state is not None,
             "attacker_airborne": bool(attacker_state is not None and attacker_state.get("on_ground") is False),
             "attacker_vertical_velocity": vector3(attacker_state.get("velocity"))[2] if attacker_state is not None else 0.0,
             "attacker_scoped": bool(attacker_state is not None and attacker_state.get("scoped")),
+            "attacker_shield_charging": shield_charge_active,
+            "attacker_recent_shield_charge_tick": recent_shield_charge_tick,
+            "attacker_seconds_since_shield_charge": round((tick - recent_shield_charge_tick) / TICKS_PER_SECOND, 3) if recent_shield_charge_tick is not None else None,
             "victim_airborne": airborne,
             "confirmed_airshot": bool(projectile_evidence and projectile_evidence.get("airshot_eligible")),
             "projectile": projectile_evidence,
@@ -1060,11 +1086,36 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     for kill in kills:
         tags.update(weapon_tags(kill["weapon"]))
         state_evidence = kill.get("state_evidence", {})
-        drop_shot = (kill.get("attacker_class") == "sniper" and kill["weapon"] in {"sniperrifle", "sniperrifle_classic", "sniperrifle_decap"} and bool(state_evidence.get("attacker_scoped")) and bool(state_evidence.get("attacker_airborne")) and float(state_evidence.get("attacker_vertical_velocity", 0)) < -20)
+        drop_shot = (kill.get("attacker_class") == "sniper" and kill["weapon"] in {"sniperrifle", "sniperrifle_classic", "sniperrifle_decap"}
+                     and bool(state_evidence.get("attacker_scoped"))
+                     and bool(state_evidence.get("attacker_airborne"))
+                     and float(state_evidence.get("attacker_vertical_velocity", 0)) < -20)
         if drop_shot:
             score += 18.0
             tags.add("sniper_dropshot")
-            breakdown.append({"reason": "confirmed_sniper_dropshot", "points": 18.0, "event_tick": kill["event_tick"]})
+            breakdown.append({"reason":"confirmed_sniper_dropshot","points":18.0,"event_tick":kill["event_tick"]})
+        shield_bash = as_int(kill.get("custom_kill")) == SHIELD_BASH_CUSTOM_KILL
+        charge_melee = (
+            not shield_bash
+            and kill.get("attacker_class") == "demoman"
+            and kill.get("weapon") in DEMOMAN_MELEE_WEAPONS
+            and state_evidence.get("attacker_recent_shield_charge_tick") is not None
+        )
+        if shield_bash:
+            score += 22.0
+            tags.update({"demoknight", "shield_bash_kill"})
+            breakdown.append({"reason": "confirmed_shield_bash_kill", "points": 22.0, "event_tick": kill["event_tick"], "custom_kill": SHIELD_BASH_CUSTOM_KILL})
+        elif charge_melee:
+            score += 16.0
+            tags.update({"demoknight", "charge_melee_kill"})
+            breakdown.append({
+                "reason": "shield_charge_followed_by_melee_kill",
+                "points": 16.0,
+                "event_tick": kill["event_tick"],
+                "weapon": kill["weapon"],
+                "charge_tick": state_evidence.get("attacker_recent_shield_charge_tick"),
+                "seconds_since_charge": state_evidence.get("attacker_seconds_since_shield_charge"),
+            })
         taunt_name = taunt_kill_name(kill)
         if taunt_name:
             score += 25.0
@@ -1113,7 +1164,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             score += 5.0
             tags.add("streak_10_plus")
             breakdown.append({"reason": "streak_10_plus", "points": 5.0, "event_tick": kill["event_tick"]})
-        if kill["crit_type"] == 2:
+        if kill["crit_type"] == 2 and not charge_melee:
             score -= 12.0
             tags.add("random_full_crit")
             breakdown.append({"reason": "random_full_crit", "points": -12.0, "event_tick": kill["event_tick"]})
@@ -1307,6 +1358,14 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "unique_weapons": sorted({kill["weapon"] for kill in kills if kill["weapon"]}),
         "projectile_kills": sum("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills),
         "taunt_kills": sum(bool(taunt_kill_name(kill)) for kill in kills),
+        "shield_bash_kills": sum(as_int(kill.get("custom_kill")) == SHIELD_BASH_CUSTOM_KILL for kill in kills),
+        "charge_melee_kills": sum(
+            as_int(kill.get("custom_kill")) != SHIELD_BASH_CUSTOM_KILL
+            and kill.get("attacker_class") == "demoman"
+            and kill.get("weapon") in DEMOMAN_MELEE_WEAPONS
+            and kill.get("state_evidence", {}).get("attacker_recent_shield_charge_tick") is not None
+            for kill in kills
+        ),
         "medic_kills": sum(kill["victim_class"] == "medic" for kill in kills),
         "demoman_kills": sum(kill["victim_class"] == "demoman" for kill in kills),
         "full_crit_kills": sum(kill["crit_type"] == 2 for kill in kills),

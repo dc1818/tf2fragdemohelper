@@ -174,12 +174,12 @@ impl Player {
     }
 
     pub fn conditions(&self) -> impl Iterator<Item = PlayerCondition> + '_ {
-        (1..=(PlayerCondition::MAX as u8)).filter_map(|cond_int| {
+        (0..=(PlayerCondition::MAX as u8)).filter_map(|cond_int| {
             let byte = cond_int / 8;
             let bit = cond_int.rem(8);
             let cond_byte = *self.conditions.get(byte as usize)?;
-            if (cond_byte >> bit as usize) == 1 {
-                PlayerCondition::try_from(cond_byte).ok()
+            if (cond_byte & (1 << bit)) != 0 {
+                PlayerCondition::try_from(cond_int).ok()
             } else {
                 None
             }
@@ -195,7 +195,26 @@ impl Player {
             .get(byte as usize)
             .copied()
             .unwrap_or_default();
-        cond_byte >> bit as usize == 1
+        (cond_byte & (1 << bit)) != 0
+    }
+}
+
+#[cfg(test)]
+mod condition_tests {
+    use super::*;
+
+    #[test]
+    fn condition_bits_support_multiple_conditions_in_one_byte() {
+        let mut player = Player::default();
+        player.conditions[0] = (1 << PlayerCondition::Zoomed as u8)
+            | (1 << PlayerCondition::Taunting as u8);
+        player.conditions[2] = 1 << ((PlayerCondition::ShieldCharge as u8) % 8);
+
+        assert!(player.has_condition(PlayerCondition::Zoomed));
+        assert!(player.has_condition(PlayerCondition::ShieldCharge));
+        let conditions: Vec<_> = player.conditions().collect();
+        assert!(conditions.contains(&PlayerCondition::Zoomed));
+        assert!(conditions.contains(&PlayerCondition::ShieldCharge));
     }
 }
 

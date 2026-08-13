@@ -82,6 +82,19 @@ DEMOMAN_MELEE_WEAPONS = {
     "saxxy", "conscientious_objector", "freedom_staff", "ham_shank",
     "memory_maker", "necro_smasher", "crossing_guard", "prinny_machete",
 }
+MELEE_WEAPONS = DEMOMAN_MELEE_WEAPONS | {
+    "bat", "bat_wood", "sandman", "wrap_assassin", "atomizer", "fan_o_war",
+    "holy_mackerel", "boston_basher", "three_rune_blade", "sun_on_a_stick",
+    "candy_cane", "fish", "fists", "gloves", "holiday_punch", "kgb",
+    "warrior_spirit", "eviction_notice", "fireaxe", "back_scratcher", "powerjack",
+    "homewrecker", "maul", "neon_annihilator", "thirddegree", "volcano_fragment",
+    "axtinguisher", "postal_pummeler", "shovel", "equalizer", "escape_plan",
+    "market_gardener", "disciplinary_action", "wrench", "gunslinger",
+    "southern_hospitality", "jag", "eureka_effect", "bonesaw", "ubersaw",
+    "vita_saw", "amputator", "solemn_vow", "knife", "kunai", "eternal_reward",
+    "wanga_prick", "big_earner", "spy_cicle", "black_rose", "sharp_dresser",
+    "tribalkukri", "shahanshah", "bushwacka", "kukri",
+}
 # `player_death.custom_kill` is the authoritative killfeed classification. Do
 # not infer taunts from the equipped weapon: several taunt kills keep the
 # weapon's ordinary name in the event. These are the legacy taunt kill values
@@ -1070,6 +1083,8 @@ def weapon_tags(weapon: str) -> List[str]:
         tags.append("crossbow")
     if weapon in SPECIAL_WEAPON_TAGS:
         tags.append(SPECIAL_WEAPON_TAGS[weapon])
+    if weapon in MELEE_WEAPONS:
+        tags.append("melee_kill")
     return tags
 
 
@@ -1117,6 +1132,18 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
                 "seconds_since_charge": state_evidence.get("attacker_seconds_since_shield_charge"),
             })
         taunt_name = taunt_kill_name(kill)
+        ordinary_melee = (
+            kill.get("weapon") in MELEE_WEAPONS
+            and not taunt_name
+            and not shield_bash
+            and not charge_melee
+        )
+        if not ordinary_melee:
+            tags.discard("melee_kill")
+        if ordinary_melee:
+            score += 15.0
+            tags.add("melee_kill")
+            breakdown.append({"reason": "player_melee_kill", "points": 15.0, "event_tick": kill["event_tick"], "weapon": kill["weapon"]})
         if taunt_name:
             score += 25.0
             tags.add("taunt_kill")
@@ -1357,6 +1384,12 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "duration_seconds": round(duration_seconds, 3),
         "unique_weapons": sorted({kill["weapon"] for kill in kills if kill["weapon"]}),
         "projectile_kills": sum("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills),
+        "melee_kills": sum(
+            kill.get("weapon") in MELEE_WEAPONS
+            and not taunt_kill_name(kill)
+            and as_int(kill.get("custom_kill")) != SHIELD_BASH_CUSTOM_KILL
+            for kill in kills
+        ),
         "taunt_kills": sum(bool(taunt_kill_name(kill)) for kill in kills),
         "shield_bash_kills": sum(as_int(kill.get("custom_kill")) == SHIELD_BASH_CUSTOM_KILL for kill in kills),
         "charge_melee_kills": sum(

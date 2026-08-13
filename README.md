@@ -71,6 +71,7 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Signal | Score |
 |---|---:|
 | Candidate base | +10 |
+| Ordinary player melee kill | +15 |
 | Confirmed taunt kill | +25 |
 | Confirmed Demoknight shield-bash kill | +22 |
 | Shield charge followed by a melee kill | +16 |

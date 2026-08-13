@@ -112,9 +112,30 @@ class RoundStateTests(unittest.TestCase):
         backstab = dict(self.kill(100, 2, "knife"), custom_kill=2)
         score, tags, metrics, _ = ANALYZER.score_candidate([backstab], {"end_tick": 1000})
 
-        self.assertEqual(score, 10.0)
+        self.assertEqual(score, 25.0)
         self.assertNotIn("taunt_kill", tags)
         self.assertEqual(metrics["taunt_kills"], 0)
+
+    def test_ordinary_melee_kill_is_a_standalone_candidate_signal(self):
+        melee = dict(self.kill(100, 2, "market_gardener"), custom_kill=0)
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([melee], {"end_tick": 1000})
+
+        self.assertEqual(score, 25.0)
+        self.assertIn("melee_kill", tags)
+        self.assertIn("market_garden", tags)
+        self.assertEqual(metrics["melee_kills"], 1)
+        self.assertIn("player_melee_kill", {item["reason"] for item in breakdown})
+
+    def test_taunt_and_shield_bash_do_not_receive_ordinary_melee_points(self):
+        taunt = dict(self.kill(100, 2, "fists"), custom_kill=9)
+        bash = dict(self.kill(200, 3, "demoshield"), attacker_class="demoman", custom_kill=23)
+
+        _, taunt_tags, taunt_metrics, _ = ANALYZER.score_candidate([taunt], {"end_tick": 1000})
+        _, bash_tags, bash_metrics, _ = ANALYZER.score_candidate([bash], {"end_tick": 1000})
+        self.assertNotIn("melee_kill", taunt_tags)
+        self.assertEqual(taunt_metrics["melee_kills"], 0)
+        self.assertNotIn("melee_kill", bash_tags)
+        self.assertEqual(bash_metrics["melee_kills"], 0)
 
     def test_shield_bash_uses_authoritative_custom_kill(self):
         bash = dict(self.kill(100, 2, "demoshield"), attacker_class="demoman", custom_kill=23)

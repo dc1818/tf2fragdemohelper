@@ -70,6 +70,7 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Signal | Score |
 |---|---:|
 | Candidate base | +10 |
+| Confirmed taunt kill | +25 |
 | Each kill after the first | +18 |
 | Three-kill sequence | +15 |
 | Four-or-more-kill sequence | +25 |
@@ -98,7 +99,7 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Enemy-Medic pick that equalizes that Über advantage | +12 |
 | Each random full-crit kill | -12 |
 
-The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
+Taunt kills use the authoritative `player_death.custom_kill` value, not a weapon-name guess. A confirmed taunt kill is tagged `taunt_kill`, records its named taunt and custom-kill value in `score_breakdown`, and is strong enough to remain a standalone candidate. The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
 
 Building/object destruction events are not kills and do not create important standalone candidates. A destruction can add a small contextual bonus only when the same attacker produces a real player-kill sequence within two seconds. In a resolved POV demo, the recorded player's own deaths are rejected, and a death where that player appears only as an assister is never counted as a POV kill.
 

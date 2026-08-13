@@ -72,6 +72,18 @@ SPECIAL_WEAPON_TAGS = {
     "eternal_reward": "eternal_reward",
     "tribalkukri": "tribalman's_shiv",
 }
+# `player_death.custom_kill` is the authoritative killfeed classification. Do
+# not infer taunts from the equipped weapon: several taunt kills keep the
+# weapon's ordinary name in the event. These are the legacy taunt kill values
+# plus the dedicated taunt-attack values emitted by newer taunts.
+TAUNT_CUSTOM_KILL_NAMES = {
+    7: "hadouken", 9: "high_noon", 10: "grand_slam", 13: "fencing",
+    15: "arrow_stab", 22: "grenade_taunt", 23: "barbarian_swing",
+    28: "uberslice", 36: "gas_blast", 37: "hadouken", 38: "high_noon",
+    39: "grand_slam", 40: "fencing", 41: "arrow_stab", 42: "grenade_taunt",
+    43: "barbarian_swing", 44: "uberslice", 45: "engineer_guitar_smash",
+    46: "engineer_arm_impale", 47: "armageddon", 48: "flare_gun_execution",
+}
 
 
 def scalar(value: Any) -> Any:
@@ -1032,6 +1044,11 @@ def weapon_tags(weapon: str) -> List[str]:
     return tags
 
 
+def taunt_kill_name(kill: Dict[str, Any]) -> Optional[str]:
+    """Return the confirmed taunt type from TF2's custom-kill field."""
+    return TAUNT_CUSTOM_KILL_NAMES.get(as_int(kill.get("custom_kill")))
+
+
 def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None, objective_events: Optional[List[Dict[str, Any]]] = None) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
     """Score one sequence and expose every contribution for auditing."""
     tags = set()
@@ -1040,6 +1057,17 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     for kill in kills:
         tags.update(weapon_tags(kill["weapon"]))
         state_evidence = kill.get("state_evidence", {})
+        taunt_name = taunt_kill_name(kill)
+        if taunt_name:
+            score += 25.0
+            tags.add("taunt_kill")
+            breakdown.append({
+                "reason": "confirmed_taunt_kill",
+                "points": 25.0,
+                "event_tick": kill["event_tick"],
+                "custom_kill": as_int(kill.get("custom_kill")),
+                "taunt": taunt_name,
+            })
         if kill["victim_class"] == "medic":
             score += 18.0
             tags.add("medic_pick")
@@ -1270,6 +1298,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "duration_seconds": round(duration_seconds, 3),
         "unique_weapons": sorted({kill["weapon"] for kill in kills if kill["weapon"]}),
         "projectile_kills": sum("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills),
+        "taunt_kills": sum(bool(taunt_kill_name(kill)) for kill in kills),
         "medic_kills": sum(kill["victim_class"] == "medic" for kill in kills),
         "demoman_kills": sum(kill["victim_class"] == "demoman" for kill in kills),
         "full_crit_kills": sum(kill["crit_type"] == 2 for kill in kills),

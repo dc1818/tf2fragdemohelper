@@ -137,6 +137,31 @@ class RoundStateTests(unittest.TestCase):
         self.assertNotIn("melee_kill", bash_tags)
         self.assertEqual(bash_metrics["melee_kills"], 0)
 
+    def test_kritzkrieg_kill_replaces_random_crit_penalty(self):
+        kritz = dict(self.kill(200, 2, "rocketlauncher"), crit_type=2, state_evidence={
+            "confirmed_kritzkrieg_boost": True,
+            "kritzkrieg_deployments": [{"medic_user_id": 7, "event_tick": 100, "seconds_before_kill": 1.5}],
+        })
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([kritz], {"end_tick": 1000})
+
+        self.assertEqual(score, 26.0)
+        self.assertIn("kritzkrieg_kill", tags)
+        self.assertNotIn("random_full_crit", tags)
+        self.assertEqual(metrics["kritzkrieg_kills"], 1)
+        self.assertIn("confirmed_kritzkrieg_boosted_kill", {item["reason"] for item in breakdown})
+
+    def test_kritzkrieg_requires_targeted_deployment_and_active_crit_boost(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.players[1] = [(200, {"user_id": 1, "team": "blu", "class": "soldier", "health": 200, "life_state": "alive", "kritz_boosted": True})]
+        timeline.players[2] = [(200, {"user_id": 2, "team": "red", "class": "soldier", "health": 200, "life_state": "alive"})]
+        timeline.players[7] = [(99, {"user_id": 7, "team": "blu", "class": "medic", "health": 150, "life_state": "alive", "medigun": "kritzkrieg"})]
+        kill = dict(self.kill(200, 2, "rocketlauncher"), attacker_team="blu", victim_team="red", crit_type=2)
+        events = [{"tick": 100, "event_type": "player_chargedeployed", "event": {"userid": 7, "targetid": 1}}]
+
+        ANALYZER.enrich_state_evidence([kill], events, timeline)
+        self.assertTrue(kill["state_evidence"]["confirmed_kritzkrieg_boost"])
+        self.assertEqual(kill["state_evidence"]["kritzkrieg_deployments"][0]["medic_user_id"], 7)
+
     def test_shield_bash_uses_authoritative_custom_kill(self):
         bash = dict(self.kill(100, 2, "demoshield"), attacker_class="demoman", custom_kill=23)
         score, tags, metrics, breakdown = ANALYZER.score_candidate([bash], {"end_tick": 1000})

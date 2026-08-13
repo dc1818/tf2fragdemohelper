@@ -937,6 +937,11 @@ namespace Tf2StvParserGui
                         " | recent charge tick " + DisplayValue(state, "attacker_recent_shield_charge_tick") +
                         " | seconds since charge " + DisplayValue(state, "attacker_seconds_since_shield_charge"));
                 }
+                if (BooleanValue(state, "confirmed_kritzkrieg_boost"))
+                {
+                    text.AppendLine("    Kritzkrieg boost | active " + DisplayValue(state, "attacker_kritz_boosted") +
+                        " | deployments " + JoinValues(Value(state, "kritzkrieg_deployments")));
+                }
                 int recentFriendlyDeaths = IntValue(state, "recent_friendly_death_count");
                 if (recentFriendlyDeaths > 0 || BooleanValue(state, "enemy_uber_advantage_before"))
                 {

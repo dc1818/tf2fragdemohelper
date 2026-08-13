@@ -32,6 +32,7 @@ SACK_MIN_FRIENDLY_LOSSES = 2
 UBER_ADVANTAGE_CHARGE_GAP = 25
 MEDIC_FORCE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 4.0)
 MEDIC_FORCE_PRESSURE_TICKS = round(TICKS_PER_SECOND * 2.0)
+KRITZKRIEG_DURATION_TICKS = round(TICKS_PER_SECOND * 8.0)
 PLAYER_SWING_MIN_WINDOW_TICKS = round(TICKS_PER_SECOND * 4.0)
 CHARGE_MELEE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 0.85)
 SHIELD_BASH_CUSTOM_KILL = 23
@@ -452,7 +453,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
     # Keep the original deployment event with its actor. A force must be
     # attributed to the Medic who deployed, not merely to an Uber-like state
     # seen on the POV player's team.
-    deploys: Dict[int, List[Dict[str, int]]] = defaultdict(list)
+    deploys: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     hurt_events: List[Dict[str, int]] = []
     charged_deaths = set()
     friendly_loss_events: List[Tuple[int, int, str, int]] = []
@@ -621,11 +622,35 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         recent_shield_charge_tick = tick if shield_charge_active else timeline.last_player_flag_tick(
             attacker, tick, "shield_charging", CHARGE_MELEE_FOLLOWUP_TICKS
         )
+        kritz_deployments = []
+        if attacker_state is not None and bool(attacker_state.get("kritz_boosted")):
+            for medic_user_id, deploy_events in deploys.items():
+                for deploy in deploy_events:
+                    deploy_tick = as_int(deploy.get("event_tick"))
+                    if not (0 <= tick - deploy_tick <= KRITZKRIEG_DURATION_TICKS):
+                        continue
+                    if as_int(deploy.get("target_user_id")) != attacker:
+                        continue
+                    medic_state = timeline.player_at(medic_user_id, max(0, deploy_tick - 1), require_alive=True)
+                    if medic_state is None or as_text(medic_state.get("class")).lower() != "medic":
+                        continue
+                    if as_text(medic_state.get("medigun")).lower() != "kritzkrieg":
+                        continue
+                    if canonical_team(medic_state.get("team")) != canonical_team(attacker_state.get("team")):
+                        continue
+                    kritz_deployments.append({
+                        "medic_user_id": medic_user_id,
+                        "event_tick": deploy_tick,
+                        "seconds_before_kill": round((tick - deploy_tick) / TICKS_PER_SECOND, 3),
+                    })
         evidence = {
             "state_available": attacker_state is not None and victim_state is not None,
             "attacker_airborne": bool(attacker_state is not None and attacker_state.get("on_ground") is False),
             "attacker_vertical_velocity": vector3(attacker_state.get("velocity"))[2] if attacker_state is not None else 0.0,
             "attacker_scoped": bool(attacker_state is not None and attacker_state.get("scoped")),
+            "attacker_kritz_boosted": bool(attacker_state is not None and attacker_state.get("kritz_boosted")),
+            "kritzkrieg_deployments": kritz_deployments,
+            "confirmed_kritzkrieg_boost": bool(kritz_deployments),
             "attacker_shield_charging": shield_charge_active,
             "attacker_recent_shield_charge_tick": recent_shield_charge_tick,
             "attacker_seconds_since_shield_charge": round((tick - recent_shield_charge_tick) / TICKS_PER_SECOND, 3) if recent_shield_charge_tick is not None else None,
@@ -654,7 +679,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         }
         kill["state_evidence"] = evidence
         if debug:
-            print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} uber_drop={} alive={}:{} recent_friendly_deaths={} uber_disadvantage={} force_followups={} victim_respawn={}".format(tick, attacker, victim, airborne, bool(projectile_evidence), uber_drop, evidence["friendly_alive_before"], evidence["enemy_alive_before"], evidence["recent_friendly_death_count"], enemy_uber_advantage, len(force_followups), victim_respawn_tick or "unknown"))
+            print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} uber_drop={} kritz_boost={} alive={}:{} recent_friendly_deaths={} uber_disadvantage={} force_followups={} victim_respawn={}".format(tick, attacker, victim, airborne, bool(projectile_evidence), uber_drop, bool(kritz_deployments), evidence["friendly_alive_before"], evidence["enemy_alive_before"], evidence["recent_friendly_death_count"], enemy_uber_advantage, len(force_followups), victim_respawn_tick or "unknown"))
 
 
 def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1101,6 +1126,11 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     for kill in kills:
         tags.update(weapon_tags(kill["weapon"]))
         state_evidence = kill.get("state_evidence", {})
+        kritzkrieg_kill = bool(state_evidence.get("confirmed_kritzkrieg_boost")) and as_int(kill.get("crit_type")) > 0
+        if kritzkrieg_kill:
+            score += 8.0
+            tags.add("kritzkrieg_kill")
+            breakdown.append({"reason": "confirmed_kritzkrieg_boosted_kill", "points": 8.0, "event_tick": kill["event_tick"], "deployments": state_evidence.get("kritzkrieg_deployments", [])})
         drop_shot = (kill.get("attacker_class") == "sniper" and kill["weapon"] in {"sniperrifle", "sniperrifle_classic", "sniperrifle_decap"}
                      and bool(state_evidence.get("attacker_scoped"))
                      and bool(state_evidence.get("attacker_airborne"))
@@ -1191,7 +1221,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             score += 5.0
             tags.add("streak_10_plus")
             breakdown.append({"reason": "streak_10_plus", "points": 5.0, "event_tick": kill["event_tick"]})
-        if kill["crit_type"] == 2 and not charge_melee:
+        if kill["crit_type"] == 2 and not charge_melee and not kritzkrieg_kill:
             score -= 12.0
             tags.add("random_full_crit")
             breakdown.append({"reason": "random_full_crit", "points": -12.0, "event_tick": kill["event_tick"]})
@@ -1402,6 +1432,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "medic_kills": sum(kill["victim_class"] == "medic" for kill in kills),
         "demoman_kills": sum(kill["victim_class"] == "demoman" for kill in kills),
         "full_crit_kills": sum(kill["crit_type"] == 2 for kill in kills),
+        "kritzkrieg_kills": sum(bool(kill.get("state_evidence", {}).get("confirmed_kritzkrieg_boost")) and as_int(kill.get("crit_type")) > 0 for kill in kills),
         "confirmed_airshots": confirmed_airshot_count,
         "direct_airshots": sum((kill.get("state_evidence", {}).get("projectile") or {}).get("impact_proximity") == "direct" for kill in kills),
         "airborne_projectile_kills": sum(bool(kill.get("state_evidence", {}).get("victim_airborne")) and kill["weapon"] in AIRSHOT_PROJECTILE_WEAPONS for kill in kills),

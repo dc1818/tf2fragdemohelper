@@ -116,6 +116,53 @@ class RoundStateTests(unittest.TestCase):
         self.assertNotIn("taunt_kill", tags)
         self.assertEqual(metrics["taunt_kills"], 0)
 
+    def test_shield_bash_uses_authoritative_custom_kill(self):
+        bash = dict(self.kill(100, 2, "demoshield"), attacker_class="demoman", custom_kill=23)
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([bash], {"end_tick": 1000})
+
+        self.assertEqual(score, 32.0)
+        self.assertIn("demoknight", tags)
+        self.assertIn("shield_bash_kill", tags)
+        self.assertEqual(metrics["shield_bash_kills"], 1)
+        self.assertIn("confirmed_shield_bash_kill", {item["reason"] for item in breakdown})
+
+    def test_recent_shield_charge_confirms_melee_kill_without_random_crit_penalty(self):
+        charge_melee = dict(
+            self.kill(200, 2, "eyelander"),
+            attacker_class="demoman",
+            custom_kill=0,
+            crit_type=2,
+            state_evidence={
+                "attacker_recent_shield_charge_tick": 180,
+                "attacker_seconds_since_shield_charge": 0.3,
+            },
+        )
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([charge_melee], {"end_tick": 1000})
+
+        self.assertEqual(score, 26.0)
+        self.assertIn("charge_melee_kill", tags)
+        self.assertNotIn("random_full_crit", tags)
+        self.assertEqual(metrics["charge_melee_kills"], 1)
+        self.assertIn("shield_charge_followed_by_melee_kill", {item["reason"] for item in breakdown})
+
+    def test_state_timeline_retains_recent_ended_shield_charge(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.players[1] = [
+            (150, {"user_id": 1, "team": "blu", "class": "demoman", "health": 175, "life_state": "alive", "shield_charging": True}),
+            (190, {"user_id": 1, "team": "blu", "class": "demoman", "health": 175, "life_state": "alive", "shield_charging": False}),
+        ]
+        timeline.players[2] = [
+            (190, {"user_id": 2, "team": "red", "class": "soldier", "health": 200, "life_state": "alive"}),
+        ]
+        kill = dict(self.kill(200, 2, "eyelander"), attacker_class="demoman", attacker_team="blu", victim_team="red")
+
+        ANALYZER.enrich_state_evidence([kill], [], timeline)
+
+        evidence = kill["state_evidence"]
+        self.assertFalse(evidence["attacker_shield_charging"])
+        self.assertEqual(evidence["attacker_recent_shield_charge_tick"], 150)
+        self.assertEqual(evidence["attacker_seconds_since_shield_charge"], 0.75)
+
     def test_candidate_exposes_exact_kill_ticks_separately_from_clip_padding(self):
         kills = [dict(self.kill(1000, 2), round_index=1, attacker_team="blu")]
         rounds = [{

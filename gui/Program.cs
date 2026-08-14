@@ -28,6 +28,7 @@ namespace Tf2StvParserGui
         private readonly string root;
         private readonly TextBox demoBox = new TextBox();
         private readonly TextBox outputBox = new TextBox();
+        private readonly TextBox schemaBox = new TextBox();
         private readonly TextBox log = new TextBox();
         private readonly Button parseButton = GreenButton("Parse STV demo", 150);
         private readonly Button cancelButton = GreenButton("Cancel", 90);
@@ -88,10 +89,11 @@ namespace Tf2StvParserGui
             parserLayout.Dock = DockStyle.Fill;
             parserLayout.Padding = new Padding(20);
             parserLayout.ColumnCount = 3;
-            parserLayout.RowCount = 7;
-            parserLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 125));
+            parserLayout.RowCount = 8;
+            parserLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
             parserLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             parserLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 155));
+            parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
@@ -116,15 +118,22 @@ namespace Tf2StvParserGui
             browseOutput.Click += BrowseOutput;
             parserLayout.Controls.Add(browseOutput, 2, 1);
 
-            Label note = Label("Exports decoded data and ranks live-round frag candidates. The first analysis pass finds multi-kills, projectile kills, Medic picks, killstreaks, and random-crit flags. Airshot confirmation follows in the packet-state pass.");
+            parserLayout.Controls.Add(Label("Item schema (optional)"), 0, 2);
+            schemaBox.Dock = DockStyle.Fill;
+            parserLayout.Controls.Add(schemaBox, 1, 2);
+            Button browseSchema = GreenButton("Select schema", 145);
+            browseSchema.Click += BrowseSchema;
+            parserLayout.Controls.Add(browseSchema, 2, 2);
+
+            Label note = Label("Weapon slots use TF2's current items_game.txt when it can be found beside the game. Select it manually only when the demo is stored elsewhere.");
             note.MaximumSize = new Size(850, 0);
             note.ForeColor = Color.Silver;
             parserLayout.SetColumnSpan(note, 3);
-            parserLayout.Controls.Add(note, 0, 2);
+            parserLayout.Controls.Add(note, 0, 3);
 
             Label logTitle = Label("Parser log");
             parserLayout.SetColumnSpan(logTitle, 3);
-            parserLayout.Controls.Add(logTitle, 0, 3);
+            parserLayout.Controls.Add(logTitle, 0, 4);
             log.Dock = DockStyle.Fill;
             log.Multiline = true;
             log.ReadOnly = true;
@@ -134,7 +143,7 @@ namespace Tf2StvParserGui
             log.ForeColor = Color.FromArgb(218, 224, 230);
             log.Font = new Font("Consolas", 9F);
             parserLayout.SetColumnSpan(log, 3);
-            parserLayout.Controls.Add(log, 0, 4);
+            parserLayout.Controls.Add(log, 0, 5);
 
             FlowLayoutPanel actions = new FlowLayoutPanel();
             actions.Dock = DockStyle.Fill;
@@ -150,11 +159,11 @@ namespace Tf2StvParserGui
             actions.Controls.Add(openButton);
             actions.Controls.Add(candidatesButton);
             parserLayout.SetColumnSpan(actions, 3);
-            parserLayout.Controls.Add(actions, 0, 5);
+            parserLayout.Controls.Add(actions, 0, 6);
 
             status.Dock = DockStyle.Fill;
             parserLayout.SetColumnSpan(status, 3);
-            parserLayout.Controls.Add(status, 0, 6);
+            parserLayout.Controls.Add(status, 0, 7);
             progress.Dock = DockStyle.Bottom;
             progress.Height = 14;
             progress.Style = ProgressBarStyle.Continuous;
@@ -257,17 +266,21 @@ namespace Tf2StvParserGui
         {
             string script = Path.Combine(root, "analyze_frags.py");
             if (!File.Exists(script)) throw new FileNotFoundException("Frag analyzer is missing.", script);
+            string analyzerArguments = Quote(script) + " --debug ";
+            if (!String.IsNullOrWhiteSpace(schemaBox.Text))
+                analyzerArguments += "--item-schema " + Quote(schemaBox.Text.Trim()) + " ";
+            analyzerArguments += Quote(exportDirectory);
             Exception pythonFailure = null;
             try
             {
-                await RunWorker("python.exe", Quote(script) + " --debug " + Quote(exportDirectory));
+                await RunWorker("python.exe", analyzerArguments);
             }
             catch (Exception ex)
             {
                 pythonFailure = ex;
             }
             if (pythonFailure != null)
-                await RunWorker("py.exe", "-3 " + Quote(script) + " --debug " + Quote(exportDirectory));
+                await RunWorker("py.exe", "-3 " + analyzerArguments);
         }
 
         private void Cancel(object sender, EventArgs e)
@@ -294,6 +307,16 @@ namespace Tf2StvParserGui
             {
                 if (Directory.Exists(outputBox.Text)) dialog.SelectedPath = outputBox.Text;
                 if (dialog.ShowDialog(this) == DialogResult.OK) outputBox.Text = dialog.SelectedPath;
+            }
+        }
+
+        private void BrowseSchema(object sender, EventArgs e)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Filter = "TF2 item schema (items_game.txt)|items_game.txt|Text files (*.txt)|*.txt|All files (*.*)|*.*";
+                if (File.Exists(schemaBox.Text)) dialog.FileName = schemaBox.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK) schemaBox.Text = dialog.FileName;
             }
         }
 

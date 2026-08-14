@@ -122,9 +122,31 @@ class RoundStateTests(unittest.TestCase):
 
         self.assertEqual(score, 25.0)
         self.assertIn("melee_kill", tags)
-        self.assertIn("market_garden", tags)
+        self.assertIn("market_gardener", tags)
         self.assertEqual(metrics["melee_kills"], 1)
         self.assertIn("player_melee_kill", {item["reason"] for item in breakdown})
+
+    def test_market_garden_requires_blast_jump_state_and_is_not_random_crit(self):
+        garden = dict(self.kill(100, 2, "market_gardener"), crit_type=2, state_evidence={"attacker_blast_jumping": True})
+
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([garden], {"end_tick": 1000})
+
+        self.assertEqual(score, 30.0)
+        self.assertIn("market_garden", tags)
+        self.assertNotIn("melee_kill", tags)
+        self.assertNotIn("random_full_crit", tags)
+        self.assertEqual(metrics["market_gardens"], 1)
+        self.assertIn("confirmed_market_garden", {item["reason"] for item in breakdown})
+
+    def test_market_gardener_crit_without_jump_is_not_random_crit_or_market_garden(self):
+        grounded = dict(self.kill(100, 2, "market_gardener"), crit_type=2, state_evidence={"attacker_blast_jumping": False})
+
+        score, tags, metrics, _ = ANALYZER.score_candidate([grounded], {"end_tick": 1000})
+
+        self.assertEqual(score, 25.0)
+        self.assertNotIn("market_garden", tags)
+        self.assertNotIn("random_full_crit", tags)
+        self.assertEqual(metrics["market_gardens"], 0)
 
     def test_taunt_and_shield_bash_do_not_receive_ordinary_melee_points(self):
         taunt = dict(self.kill(100, 2, "fists"), custom_kill=9)

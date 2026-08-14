@@ -942,6 +942,10 @@ namespace Tf2StvParserGui
                     text.AppendLine("    Kritzkrieg boost | active " + DisplayValue(state, "attacker_kritz_boosted") +
                         " | deployments " + JoinValues(Value(state, "kritzkrieg_deployments")));
                 }
+                if (BooleanValue(state, "attacker_blast_jumping"))
+                {
+                    text.AppendLine("    Market Garden evidence | attacker was blast jumping at the kill tick");
+                }
                 int recentFriendlyDeaths = IntValue(state, "recent_friendly_death_count");
                 if (recentFriendlyDeaths > 0 || BooleanValue(state, "enemy_uber_advantage_before"))
                 {

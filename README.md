@@ -69,6 +69,7 @@ Candidates are grouped by attacker within the same round only when the entire fi
 The score is intentionally explainable. `frag_candidates.ndjson` records `score_breakdown` plus the raw metrics that produced it. Assists are recorded on kills when present, but do not count as kills and currently add no score.
 
 Loose Cannon impact and explosion killfeed variants are normalized as Loose Cannon outcomes for projectile and Double Donk analysis; raw event weapon text remains available in the candidate evidence.
+Projectile matching separates recycled entity-ID lifetimes at removal, so a new projectile cannot inherit an earlier projectile's flight duration or path.
 
 | Signal | Score |
 |---|---:|

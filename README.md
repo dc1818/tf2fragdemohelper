@@ -71,6 +71,8 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 Loose Cannon impact and explosion killfeed variants are normalized as Loose Cannon outcomes for projectile and Double Donk analysis; raw event weapon text remains available in the candidate evidence.
 Projectile matching separates recycled entity-ID lifetimes at removal, so a new projectile cannot inherit an earlier projectile's flight duration or path.
 
+Melee classification does not depend on a complete list of killfeed names. It first uses an explicitly exported `weapon_slot` when available, then Valve's stable `ETFWeaponType` `weapon_id`, and finally the weapon name as a compatibility fallback for older exports. Each recognized melee death records `weapon_slot: "melee"` and `weapon_slot_source`, while its score evidence retains the raw weapon name, `weapon_id`, and `weapon_def_index`. This covers reskins and schema-name variations without adding every item name individually; genuinely new weapon implementations need only one new archetype ID rather than a list of every item using it.
+
 | Signal | Score |
 |---|---:|
 | Candidate base | +10 |

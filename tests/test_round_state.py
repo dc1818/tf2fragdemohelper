@@ -206,6 +206,29 @@ class RoundStateTests(unittest.TestCase):
 
         self.assertFalse(kill["state_evidence"]["confirmed_double_donk"])
 
+    def test_reused_projectile_entity_does_not_inherit_old_flight_time(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.projectiles[99] = [
+            (10, {"entity_id": 99, "launcher_handle": 42, "projectile_type": "loosecannon", "position": [0, 0, 0], "state_tick": 10}),
+            (20, {"entity_id": 99, "launcher_handle": 42, "projectile_type": "loosecannon", "position": [100, 0, 0], "state_tick": 20}),
+            (200, {"entity_id": 99, "launcher_handle": 42, "projectile_type": "loosecannon", "position": [0, 0, 0], "state_tick": 200}),
+            (220, {"entity_id": 99, "launcher_handle": 42, "projectile_type": "loosecannon", "position": [40, 0, 0], "state_tick": 220}),
+        ]
+        timeline.projectile_removals[99] = [21, 221]
+        kill = dict(self.kill(222, 2, "loose_cannon_explosion"))
+
+        evidence = ANALYZER.matching_projectile(
+            timeline,
+            kill,
+            {"weapon_handles": [42]},
+            {"position": [40, 0, 0]},
+        )
+
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence["launch_tick"], 200)
+        self.assertEqual(evidence["flight_ticks"], 21)
+        self.assertLess(evidence["flight_seconds"], 0.5)
+
     def test_taunt_and_shield_bash_do_not_receive_ordinary_melee_points(self):
         taunt = dict(self.kill(100, 2, "fists"), custom_kill=9)
         bash = dict(self.kill(200, 3, "demoshield"), attacker_class="demoman", custom_kill=23)

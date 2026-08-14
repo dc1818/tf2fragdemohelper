@@ -80,7 +80,7 @@ SPECIAL_WEAPON_TAGS = {
 DEMOMAN_MELEE_WEAPONS = {
     "bottle", "sword", "eyelander", "headtaker", "golfclub",
     "scotsmans_skullcutter", "skullcutter", "paintrain", "pain_train",
-    "ullapool_caber", "battleaxe", "claidheamh_mor", "half_zatoichi",
+    "ullapool_caber", "battleaxe", "claidheamh_mor", "claidheamohmor", "half_zatoichi",
     "katana", "persian_persuader", "fryingpan", "golden_fryingpan",
     "saxxy", "conscientious_objector", "freedom_staff", "ham_shank",
     "memory_maker", "necro_smasher", "crossing_guard", "prinny_machete",
@@ -97,6 +97,20 @@ MELEE_WEAPONS = DEMOMAN_MELEE_WEAPONS | {
     "vita_saw", "amputator", "solemn_vow", "knife", "kunai", "eternal_reward",
     "wanga_prick", "big_earner", "spy_cicle", "black_rose", "sharp_dresser",
     "tribalkukri", "shahanshah", "bushwacka", "kukri",
+}
+# ETFWeaponType values from Valve's TF2 shared definitions. Unlike the
+# killfeed/icon string, this identifies the weapon implementation and remains
+# the same across reskins and item-schema display-name changes. Name matching
+# remains a compatibility fallback for older exports that omitted weapon_id.
+MELEE_WEAPON_IDS = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+    64,   # TF_WEAPON_SWORD
+    72,   # TF_WEAPON_BAT_FISH
+    74,   # TF_WEAPON_STICKBOMB (Ullapool Caber)
+    82,   # TF_WEAPON_BAT_GIFTWRAP
+    96,   # TF_WEAPON_HARVESTER_SAW
+    104,  # TF_WEAPON_BREAKABLE_SIGN
+    106,  # TF_WEAPON_SLAP
 }
 # `player_death.custom_kill` is the authoritative killfeed classification. Do
 # not infer taunts from the equipped weapon: several taunt kills keep the
@@ -1069,7 +1083,9 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
             continue
         last_death_by_victim[victim] = tick
         weapon = as_text(fields.get("weapon")).lower()
-        deaths.append({
+        weapon_id = as_int(fields.get("weapon_id"))
+        weapon_def_index = as_int(fields.get("weapon_def_index"))
+        death = {
             # `tick` stays for compatibility. `event_tick` identifies the
             # precise game-event timestamp used for this kill.
             "tick": as_int(item.get("demo_tick", tick)),
@@ -1088,17 +1104,25 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
             "attacker_team": player_team_at(teams, attacker, tick),
             "victim_team": player_team_at(teams, victim, tick),
             "weapon": weapon,
-            "weapon_id": as_int(fields.get("weapon_id")),
-            "weapon_def_index": as_int(fields.get("weapon_def_index")),
+            "weapon_id": weapon_id,
+            "weapon_def_index": weapon_def_index,
             "custom_kill": as_int(fields.get("custom_kill")),
             "crit_type": as_int(fields.get("crit_type")),
             "rocket_jump_victim": bool(scalar(fields.get("rocket_jump", False))),
             "kill_streak_total": as_int(fields.get("kill_streak_total")),
             "assister_user_id": as_int(fields.get("assister")),
-        })
+        }
+        classification_source = melee_classification(death)
+        if classification_source:
+            death["weapon_slot"] = "melee"
+            death["weapon_slot_source"] = classification_source
+        deaths.append(death)
         if debug:
             assister = as_int(fields.get("assister"))
-            print("[candidate-debug] accept kill tick={} attacker={} victim={} assister={} weapon={}".format(tick, attacker, victim, assister or "none", weapon or "unknown"))
+            print("[candidate-debug] accept kill tick={} attacker={} victim={} assister={} weapon={} weapon_id={} defindex={} slot={} slot_source={}".format(
+                tick, attacker, victim, assister or "none", weapon or "unknown", weapon_id or "unknown",
+                weapon_def_index or "unknown", death.get("weapon_slot", "unknown"), death.get("weapon_slot_source", "unknown")
+            ))
     return deaths
 
 
@@ -1195,7 +1219,23 @@ def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[D
     return objectives
 
 
-def weapon_tags(weapon: str) -> List[str]:
+def melee_classification(kill: Dict[str, Any]) -> Optional[str]:
+    """Return the evidence source proving that a player kill used melee."""
+    if as_text(kill.get("weapon_slot")).lower() == "melee":
+        return "weapon_slot"
+    if as_int(kill.get("weapon_id")) in MELEE_WEAPON_IDS:
+        return "weapon_id"
+    if as_text(kill.get("weapon")).lower() in MELEE_WEAPONS:
+        return "weapon_name"
+    return None
+
+
+def is_melee_kill(kill: Dict[str, Any]) -> bool:
+    return melee_classification(kill) is not None
+
+
+def weapon_tags(kill: Dict[str, Any]) -> List[str]:
+    weapon = as_text(kill.get("weapon")).lower()
     tags: List[str] = []
     if weapon in PROJECTILE_WEAPONS or weapon in LOOSE_CANNON_WEAPONS:
         tags.append("projectile_kill")
@@ -1209,7 +1249,7 @@ def weapon_tags(weapon: str) -> List[str]:
         tags.append("crossbow")
     if weapon in SPECIAL_WEAPON_TAGS:
         tags.append(SPECIAL_WEAPON_TAGS[weapon])
-    if weapon in MELEE_WEAPONS:
+    if is_melee_kill(kill):
         tags.append("melee_kill")
     return tags
 
@@ -1225,7 +1265,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     score = 10.0
     breakdown: List[Dict[str, Any]] = [{"reason": "candidate_base", "points": 10.0}]
     for kill in kills:
-        tags.update(weapon_tags(kill["weapon"]))
+        tags.update(weapon_tags(kill))
         state_evidence = kill.get("state_evidence", {})
         kritzkrieg_kill = bool(state_evidence.get("confirmed_kritzkrieg_boost")) and as_int(kill.get("crit_type")) > 0
         market_garden = (
@@ -1257,7 +1297,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         charge_melee = (
             not shield_bash
             and kill.get("attacker_class") == "demoman"
-            and kill.get("weapon") in DEMOMAN_MELEE_WEAPONS
+            and is_melee_kill(kill)
             and state_evidence.get("attacker_recent_shield_charge_tick") is not None
         )
         if shield_bash:
@@ -1277,7 +1317,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             })
         taunt_name = taunt_kill_name(kill)
         ordinary_melee = (
-            kill.get("weapon") in MELEE_WEAPONS
+            is_melee_kill(kill)
             and not taunt_name
             and not shield_bash
             and not charge_melee
@@ -1288,7 +1328,15 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         if ordinary_melee:
             score += 15.0
             tags.add("melee_kill")
-            breakdown.append({"reason": "player_melee_kill", "points": 15.0, "event_tick": kill["event_tick"], "weapon": kill["weapon"]})
+            breakdown.append({
+                "reason": "player_melee_kill",
+                "points": 15.0,
+                "event_tick": kill["event_tick"],
+                "weapon": kill["weapon"],
+                "weapon_id": as_int(kill.get("weapon_id")),
+                "weapon_def_index": as_int(kill.get("weapon_def_index")),
+                "classification_source": melee_classification(kill),
+            })
         if taunt_name:
             score += 25.0
             tags.add("taunt_kill")
@@ -1455,7 +1503,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         score += 12.0
         tags.add("rapid_sequence")
         breakdown.append({"reason": "rapid_sequence", "points": 12.0})
-    if any("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills):
+    if any("projectile_kill" in weapon_tags(kill) for kill in kills):
         score += 8.0
         breakdown.append({"reason": "projectile_sequence", "points": 8.0})
     if round_data["end_tick"] - kills[-1]["event_tick"] <= round(TICKS_PER_SECOND * 8.0):
@@ -1528,9 +1576,9 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "unique_victims": unique_kill_count,
         "duration_seconds": round(duration_seconds, 3),
         "unique_weapons": sorted({kill["weapon"] for kill in kills if kill["weapon"]}),
-        "projectile_kills": sum("projectile_kill" in weapon_tags(kill["weapon"]) for kill in kills),
+        "projectile_kills": sum("projectile_kill" in weapon_tags(kill) for kill in kills),
         "melee_kills": sum(
-            kill.get("weapon") in MELEE_WEAPONS
+            is_melee_kill(kill)
             and not taunt_kill_name(kill)
             and as_int(kill.get("custom_kill")) != SHIELD_BASH_CUSTOM_KILL
             for kill in kills
@@ -1540,7 +1588,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "charge_melee_kills": sum(
             as_int(kill.get("custom_kill")) != SHIELD_BASH_CUSTOM_KILL
             and kill.get("attacker_class") == "demoman"
-            and kill.get("weapon") in DEMOMAN_MELEE_WEAPONS
+            and is_melee_kill(kill)
             and kill.get("state_evidence", {}).get("attacker_recent_shield_charge_tick") is not None
             for kill in kills
         ),

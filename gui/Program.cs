@@ -946,6 +946,10 @@ namespace Tf2StvParserGui
                 {
                     text.AppendLine("    Market Garden evidence | attacker was blast jumping at the kill tick");
                 }
+                if (BooleanValue(state, "confirmed_double_donk"))
+                {
+                    text.AppendLine("    Double Donk | direct impact then Mini-Crit explosion " + JoinValues(Value(state, "double_donk_events")));
+                }
                 int recentFriendlyDeaths = IntValue(state, "recent_friendly_death_count");
                 if (recentFriendlyDeaths > 0 || BooleanValue(state, "enemy_uber_advantage_before"))
                 {

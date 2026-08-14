@@ -303,6 +303,10 @@ class RoundStateTests(unittest.TestCase):
         candidates = ANALYZER.build_candidates(kills, rounds, {"analysis_scope": "all_players"})
         self.assertEqual(len(candidates), 0)  # ordinary low-signal single kill is intentionally filtered
 
+        pov_candidates = ANALYZER.build_candidates(kills, rounds, {"analysis_scope": "pov_player_only", "pov_player_user_id": 1})
+        self.assertEqual(len(pov_candidates), 1)
+        self.assertEqual(pov_candidates[0]["overall_score"], 10.0)
+
         kills[0]["victim_class"] = "medic"
         candidate = ANALYZER.build_candidates(kills, rounds, {"analysis_scope": "all_players"})[0]
         self.assertEqual(candidate["first_kill_tick"], 1000)

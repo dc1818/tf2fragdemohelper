@@ -73,6 +73,7 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 | Candidate base | +10 |
 | Ordinary player melee kill | +15 |
 | Confirmed Market Garden (blast-jumping critical hit) | +20 |
+| Confirmed Loose Cannon Double Donk | +18 |
 | Confirmed Kritzkrieg-boosted kill | +8 |
 | Confirmed taunt kill | +25 |
 | Confirmed Demoknight shield-bash kill | +22 |

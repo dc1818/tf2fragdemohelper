@@ -1613,12 +1613,8 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
         for group in groups:
             score, tags, metrics, score_breakdown = score_candidate(group, round_data, building_destructions, objective_events)
             objective_followups = metrics.get("objective_followup_evidence", [])
-            # A POV demo already limits the stream to the recorder's own
-            # kills, so retain every one and let score/UI filters rank them.
-            # STV demos still suppress ordinary low-signal singles to avoid a
-            # candidate list containing every kill by every player.
-            pov_scope = context.get("analysis_scope") == "pov_player_only"
-            if len(group) == 1 and score < 25.0 and not pov_scope:
+            # Keep single kills only when they contain a meaningful known signal.
+            if len(group) == 1 and score < 25.0:
                 if debug:
                     print("[candidate-debug] discard group round={} attacker={} ticks={} kills={} score={} reason=single_kill_below_threshold".format(round_index, attacker, [kill["event_tick"] for kill in group], len(group), score))
                 continue
@@ -1739,7 +1735,6 @@ def main() -> int:
             "Confirmed airshots require an airborne victim plus a matching reconstructed projectile owner, type, timing, and impact proximity.",
             "When state_samples.ndjson is unavailable, the analyzer retains event-only scoring and does not invent state-backed tags.",
             "Kills must be inside an event-confirmed interval or a state-confirmed in-progress public-server interval; ready-up and countdown events never open an interval by themselves.",
-            "POV demos retain every recorder kill as a ranked candidate; STV demos suppress ordinary single kills below 25 points to control noise.",
             "Kill ticks are the original player_death event ticks. Packet sequence and event-index fields preserve ordering when multiple events share one tick.",
             "POV-only filtering is enabled only when the demo is identified as POV and its header nickname resolves to exactly one player event; otherwise all players are retained.",
         ],

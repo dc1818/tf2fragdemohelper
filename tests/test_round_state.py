@@ -134,13 +134,31 @@ class RoundStateTests(unittest.TestCase):
             [{"reason": "confirmed_taunt_kill", "points": 25.0, "event_tick": 100, "custom_kill": 9, "taunt": "high_noon"}],
         )
 
-    def test_non_taunt_custom_kill_does_not_get_taunt_bonus(self):
+    def test_backstab_is_separate_from_melee_kills(self):
         backstab = dict(self.kill(100, 2, "knife"), custom_kill=2)
-        score, tags, metrics, _ = ANALYZER.score_candidate([backstab], {"end_tick": 1000})
+        score, tags, metrics, breakdown = ANALYZER.score_candidate([backstab], {"end_tick": 1000})
+
+        self.assertEqual(score, 30.0)
+        self.assertNotIn("taunt_kill", tags)
+        self.assertIn("backstab", tags)
+        self.assertNotIn("melee_kill", tags)
+        self.assertEqual(metrics["taunt_kills"], 0)
+        self.assertEqual(metrics["backstab_kills"], 1)
+        self.assertEqual(metrics["melee_kills"], 0)
+        self.assertEqual(
+            [item for item in breakdown if item["reason"] == "confirmed_spy_backstab"],
+            [{"reason": "confirmed_spy_backstab", "points": 20.0, "event_tick": 100, "custom_kill": 2, "weapon": "knife"}],
+        )
+
+    def test_spy_butter_knife_remains_an_ordinary_melee_kill(self):
+        butter_knife = dict(self.kill(100, 2, "knife"), attacker_class="spy", custom_kill=0)
+        score, tags, metrics, _ = ANALYZER.score_candidate([butter_knife], {"end_tick": 1000})
 
         self.assertEqual(score, 25.0)
-        self.assertNotIn("taunt_kill", tags)
-        self.assertEqual(metrics["taunt_kills"], 0)
+        self.assertIn("melee_kill", tags)
+        self.assertNotIn("backstab", tags)
+        self.assertEqual(metrics["melee_kills"], 1)
+        self.assertEqual(metrics["backstab_kills"], 0)
 
     def test_ordinary_melee_kill_is_a_standalone_candidate_signal(self):
         melee = dict(self.kill(100, 2, "market_gardener"), custom_kill=0)

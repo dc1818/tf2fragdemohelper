@@ -1573,7 +1573,13 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             score += 5.0
             tags.add("streak_10_plus")
             breakdown.append({"reason": "streak_10_plus", "points": 5.0, "event_tick": kill["event_tick"]})
-        if kill["crit_type"] == 2 and not charge_melee and not kritzkrieg_kill and kill.get("weapon") != "market_gardener":
+        if (
+            kill["crit_type"] == 2
+            and not charge_melee
+            and not kritzkrieg_kill
+            and kill.get("weapon") != "market_gardener"
+            and not backstab
+        ):
             score -= 12.0
             tags.add("random_full_crit")
             breakdown.append({"reason": "random_full_crit", "points": -12.0, "event_tick": kill["event_tick"]})

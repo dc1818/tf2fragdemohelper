@@ -182,6 +182,80 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(melee_score["classification_source"], "weapon_id")
         self.assertEqual(melee_score["weapon_def_index"], 327)
 
+    def test_item_schema_resolves_inherited_melee_slot(self):
+        schema_text = '''"items_game"
+{
+    "prefabs"
+    {
+        "weapon_base" { "item_slot" "primary" }
+        "weapon_sword" { "prefab" "weapon_base" "item_slot" "melee" }
+    }
+    "items"
+    {
+        "327" { "prefab" "weapon_sword" "name" "The Claidheamohmor" }
+        "999" { "prefab" "weapon_base" }
+    }
+}
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            schema = Path(temp) / "items_game.txt"
+            schema.write_text(schema_text, encoding="utf-8")
+            slots = ANALYZER.item_schema_slots(schema)
+
+        self.assertEqual(slots[327], "melee")
+        self.assertEqual(slots[999], "primary")
+
+    def test_schema_slot_is_authoritative_over_weapon_id_fallback(self):
+        kill = dict(
+            self.kill(100, 2, "unexpected_name"),
+            weapon_id=64,
+            weapon_def_index=999,
+            weapon_slot="secondary",
+            weapon_slot_source="item_schema",
+        )
+
+        self.assertFalse(ANALYZER.is_melee_kill(kill))
+
+    def test_normalized_death_records_schema_slot_source(self):
+        events = [
+            {"tick": 90, "event_type": "round_start", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {
+                "attacker": 1,
+                "user_id": 2,
+                "weapon": "unknown_schema_sword",
+                "weapon_id": 0,
+                "weapon_def_index": 327,
+            }},
+            {"tick": 500, "event_type": "teamplay_round_win", "event": {}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        deaths = ANALYZER.normalized_deaths(
+            events, rounds, {}, {}, {}, {"analysis_scope": "all_players"}, item_slots={327: "melee"}
+        )
+
+        self.assertEqual(deaths[0]["weapon_slot"], "melee")
+        self.assertEqual(deaths[0]["weapon_slot_source"], "item_schema")
+        self.assertTrue(ANALYZER.is_melee_kill(deaths[0]))
+
+    def test_item_schema_is_discovered_from_demo_tf_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tf_directory = root / "Team Fortress 2" / "tf"
+            schema = tf_directory / "scripts" / "items" / "items_game.txt"
+            schema.parent.mkdir(parents=True)
+            schema.write_text('"items_game" { "prefabs" { } "items" { } }', encoding="utf-8")
+            demo = tf_directory / "demos" / "match.dem"
+            demo.parent.mkdir()
+            demo.write_bytes(b"")
+            export = root / "export"
+            export.mkdir()
+            (export / "manifest.json").write_text(json.dumps({"source_demo": str(demo)}), encoding="utf-8")
+
+            discovered = ANALYZER.discover_item_schema(export)
+
+        self.assertEqual(discovered, schema.resolve())
+
     def test_non_melee_weapon_id_does_not_bypass_single_kill_filter(self):
         ranged = dict(
             self.kill(100, 2, "unknown_future_weapon"),

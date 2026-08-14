@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import re
 import sys
 from bisect import bisect_right
 from collections import defaultdict
@@ -210,6 +212,161 @@ def read_json_if_present(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as source:
         value = json.load(source)
     return value if isinstance(value, dict) else {}
+
+
+KEYVALUES_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\r\n]*|[{}]|[^\s{}"]+')
+
+
+def keyvalues_token_value(token: str) -> str:
+    if token.startswith('"') and token.endswith('"'):
+        return token[1:-1].replace(r'\"', '"').replace(r'\\', '\\')
+    return token
+
+
+def parse_keyvalues(text: str) -> Dict[str, Any]:
+    """Parse the KeyValues subset used by TF2's signed items_game.txt."""
+    tokens = [token for token in KEYVALUES_TOKEN.findall(text) if not token.startswith("//")]
+
+    def parse_object(index: int, nested: bool) -> Tuple[Dict[str, Any], int]:
+        result: Dict[str, Any] = {}
+        while index < len(tokens):
+            token = tokens[index]
+            if token == "}":
+                if not nested:
+                    raise ValueError("Unexpected closing brace in item schema")
+                return result, index + 1
+            if token == "{" or (token.startswith("[") and token.endswith("]")):
+                index += 1
+                continue
+            key = keyvalues_token_value(token).lower()
+            index += 1
+            if index >= len(tokens):
+                raise ValueError("Missing value for KeyValues key {!r}".format(key))
+            if tokens[index] == "{":
+                value, index = parse_object(index + 1, True)
+            else:
+                value = keyvalues_token_value(tokens[index])
+                index += 1
+            result[key] = value
+            if index < len(tokens) and tokens[index].startswith("[") and tokens[index].endswith("]"):
+                index += 1
+        if nested:
+            raise ValueError("Unclosed object in item schema")
+        return result, index
+
+    result, _ = parse_object(0, False)
+    return result
+
+
+def item_schema_slots(path: Path) -> Dict[int, str]:
+    """Resolve defindex -> loadout slot, including inherited prefab fields."""
+    with path.open("r", encoding="utf-8-sig", errors="replace") as source:
+        parsed = parse_keyvalues(source.read())
+    root = parsed.get("items_game", parsed)
+    if not isinstance(root, dict):
+        raise ValueError("items_game root object is missing")
+    prefabs = root.get("prefabs", {})
+    items = root.get("items", {})
+    if not isinstance(prefabs, dict) or not isinstance(items, dict):
+        raise ValueError("items_game prefabs/items objects are missing")
+
+    def inherited_slot(record: Any, visited: Optional[set] = None) -> Optional[str]:
+        if not isinstance(record, dict):
+            return None
+        direct = as_text(record.get("item_slot")).lower()
+        if direct:
+            return direct
+        visited = set() if visited is None else set(visited)
+        prefab_names = as_text(record.get("prefab")).split()
+        # Later prefabs override earlier ones in Valve's merge order.
+        for prefab_name in reversed(prefab_names):
+            normalized = prefab_name.lower()
+            if normalized in visited:
+                continue
+            visited.add(normalized)
+            slot = inherited_slot(prefabs.get(normalized), visited)
+            if slot:
+                return slot
+        return None
+
+    slots: Dict[int, str] = {}
+    for raw_defindex, record in items.items():
+        defindex = as_int(raw_defindex, -1)
+        if defindex < 0:
+            continue
+        slot = inherited_slot(record)
+        if slot:
+            slots[defindex] = slot
+    return slots
+
+
+def discover_item_schema(export_directory: Path, explicit_path: Optional[Path] = None) -> Optional[Path]:
+    """Find TF2's current signed client schema without requiring a web API."""
+    candidates: List[Path] = []
+    if explicit_path is not None:
+        candidates.append(explicit_path.expanduser())
+    environment_path = os.environ.get("TF2_ITEM_SCHEMA", "").strip()
+    if environment_path:
+        candidates.append(Path(environment_path).expanduser())
+    candidates.append(export_directory / "items_game.txt")
+
+    manifest = read_json_if_present(export_directory / "manifest.json")
+    source_demo = as_text(manifest.get("source_demo"))
+    if source_demo:
+        demo_path = Path(source_demo).expanduser()
+        for parent in [demo_path.parent, *demo_path.parents]:
+            candidates.append(parent / "scripts" / "items" / "items_game.txt")
+            candidates.append(parent / "tf" / "scripts" / "items" / "items_game.txt")
+
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        normalized = os.path.normcase(str(resolved))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def load_item_schema(export_directory: Path, explicit_path: Optional[Path] = None, debug: bool = False) -> Tuple[Dict[int, str], Dict[str, Any]]:
+    path = discover_item_schema(export_directory, explicit_path)
+    if path is None:
+        info = {
+            "status": "unavailable",
+            "path": None,
+            "resolved_item_slots": 0,
+            "fallback": "weapon_id_then_weapon_name",
+        }
+        if debug:
+            print("[candidate-debug] item schema unavailable; weapon slot fallback=weapon_id_then_weapon_name")
+        return {}, info
+    try:
+        slots = item_schema_slots(path)
+    except (OSError, ValueError) as error:
+        info = {
+            "status": "invalid",
+            "path": str(path),
+            "resolved_item_slots": 0,
+            "error": str(error),
+            "fallback": "weapon_id_then_weapon_name",
+        }
+        if debug:
+            print("[candidate-debug] item schema invalid path={} error={} fallback=weapon_id_then_weapon_name".format(path, error))
+        return {}, info
+    info = {
+        "status": "loaded",
+        "path": str(path),
+        "resolved_item_slots": len(slots),
+        "fallback": "weapon_id_then_weapon_name",
+    }
+    if debug:
+        print("[candidate-debug] item schema loaded path={} resolved_item_slots={}".format(path, len(slots)))
+    return slots, info
 
 
 class StateTimeline:
@@ -1048,7 +1205,7 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
     }
 
 
-def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any], debug: bool = False) -> List[Dict[str, Any]]:
+def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any], debug: bool = False, item_slots: Optional[Dict[int, str]] = None) -> List[Dict[str, Any]]:
     deaths: List[Dict[str, Any]] = []
     pov_user_id = context.get("pov_player_user_id") if context.get("analysis_scope") == "pov_player_only" else None
     last_death_by_victim: Dict[int, int] = {}
@@ -1112,8 +1269,12 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, A
             "kill_streak_total": as_int(fields.get("kill_streak_total")),
             "assister_user_id": as_int(fields.get("assister")),
         }
+        schema_slot = (item_slots or {}).get(weapon_def_index)
+        if schema_slot:
+            death["weapon_slot"] = schema_slot
+            death["weapon_slot_source"] = "item_schema"
         classification_source = melee_classification(death)
-        if classification_source:
+        if classification_source and not schema_slot:
             death["weapon_slot"] = "melee"
             death["weapon_slot_source"] = classification_source
         deaths.append(death)
@@ -1221,8 +1382,11 @@ def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[D
 
 def melee_classification(kill: Dict[str, Any]) -> Optional[str]:
     """Return the evidence source proving that a player kill used melee."""
-    if as_text(kill.get("weapon_slot")).lower() == "melee":
-        return "weapon_slot"
+    weapon_slot = as_text(kill.get("weapon_slot")).lower()
+    if weapon_slot:
+        if weapon_slot != "melee":
+            return None
+        return as_text(kill.get("weapon_slot_source")) or "weapon_slot"
     if as_int(kill.get("weapon_id")) in MELEE_WEAPON_IDS:
         return "weapon_id"
     if as_text(kill.get("weapon")).lower() in MELEE_WEAPONS:
@@ -1312,6 +1476,10 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
                 "points": 16.0,
                 "event_tick": kill["event_tick"],
                 "weapon": kill["weapon"],
+                "weapon_id": as_int(kill.get("weapon_id")),
+                "weapon_def_index": as_int(kill.get("weapon_def_index")),
+                "weapon_slot": as_text(kill.get("weapon_slot")) or None,
+                "classification_source": melee_classification(kill),
                 "charge_tick": state_evidence.get("attacker_recent_shield_charge_tick"),
                 "seconds_since_charge": state_evidence.get("attacker_seconds_since_shield_charge"),
             })
@@ -1752,6 +1920,7 @@ def write_ndjson(path: Path, values: Iterable[Dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Rank live-round TF2 frag candidates from events.ndjson.")
     parser.add_argument("export_directory", type=Path, help="Folder produced by export_all.exe")
+    parser.add_argument("--item-schema", type=Path, help="Optional path to TF2's current scripts/items/items_game.txt")
     parser.add_argument("--debug", action="store_true", help="Print candidate acceptance, rejection, grouping, and scoring decisions")
     arguments = parser.parse_args()
     export_directory = arguments.export_directory.resolve()
@@ -1765,11 +1934,12 @@ def main() -> int:
     classes = class_history(events)
     names = player_name_history(events)
     context = analysis_context(export_directory, names)
+    item_slots, item_schema_info = load_item_schema(export_directory, arguments.item_schema, arguments.debug)
     if arguments.debug:
         print("[candidate-debug] demo capture={} scope={} pov_user_id={} header_nick={}".format(context["capture_type"], context["analysis_scope"], context.get("pov_player_user_id") or "none", context.get("header_nick") or "unknown"))
         for round_data in rounds:
             print("[candidate-debug] live round #{} start={} ({}) end={} ({})".format(round_data["round_index"], round_data["live_start_tick"], round_data["live_start_event"], round_data["end_tick"], round_data["end_reason"]))
-    deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug)
+    deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug, item_slots)
     enrich_state_evidence(deaths, events, state_timeline, arguments.debug, rounds, teams, context)
     building_destructions = normalized_building_destructions(events, rounds, context, arguments.debug)
     objective_events = normalized_objective_events(events, rounds, teams, arguments.debug)
@@ -1780,6 +1950,7 @@ def main() -> int:
         "format_version": 1,
         "source": "events.ndjson",
         "demo_context": context,
+        "item_schema": item_schema_info,
         "ticks_per_second_assumption": TICKS_PER_SECOND,
         "live_rounds": len(rounds),
         "live_round_kills": len(deaths),

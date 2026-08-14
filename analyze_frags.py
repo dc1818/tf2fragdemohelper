@@ -33,6 +33,7 @@ UBER_ADVANTAGE_CHARGE_GAP = 25
 MEDIC_FORCE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 4.0)
 MEDIC_FORCE_PRESSURE_TICKS = round(TICKS_PER_SECOND * 2.0)
 KRITZKRIEG_DURATION_TICKS = round(TICKS_PER_SECOND * 8.0)
+DOUBLE_DONK_WINDOW_TICKS = round(TICKS_PER_SECOND * 0.5)
 PLAYER_SWING_MIN_WINDOW_TICKS = round(TICKS_PER_SECOND * 4.0)
 CHARGE_MELEE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 0.85)
 SHIELD_BASH_CUSTOM_KILL = 23
@@ -454,7 +455,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
     # attributed to the Medic who deployed, not merely to an Uber-like state
     # seen on the POV player's team.
     deploys: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    hurt_events: List[Dict[str, int]] = []
+    hurt_events: List[Dict[str, Any]] = []
     charged_deaths = set()
     friendly_loss_events: List[Tuple[int, int, str, int]] = []
     team_history = teams or {}
@@ -476,6 +477,9 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
                     "event_tick": event["tick"],
                     "attacker_user_id": attacker,
                     "victim_user_id": victim,
+                    "weapon_id": as_int(fields.get("weapon_id", fields.get("weaponid"))),
+                    "damage_amount": as_int(fields.get("damage_amount", fields.get("damageamount"))),
+                    "mini_crit": as_bool(fields.get("mini_crit", fields.get("minicrit"))),
                 })
         elif event_name(event) == "medic_death" and as_bool(fields.get("charged"), False):
             charged_deaths.add((event["tick"], as_int(fields.get("user_id", fields.get("userid")))))
@@ -643,6 +647,37 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
                         "event_tick": deploy_tick,
                         "seconds_before_kill": round((tick - deploy_tick) / TICKS_PER_SECOND, 3),
                     })
+        double_donk_events = []
+        if kill.get("weapon") == "loose_cannon":
+            kill_weapon_id = as_int(kill.get("weapon_id"))
+            matching_hurts = [
+                hurt for hurt in hurt_events
+                if hurt["attacker_user_id"] == attacker
+                and hurt["victim_user_id"] == victim
+                and hurt["event_tick"] <= tick
+                and (not kill_weapon_id or hurt["weapon_id"] == kill_weapon_id)
+            ]
+            for impact in matching_hurts:
+                if impact["mini_crit"]:
+                    continue
+                for explosion in matching_hurts:
+                    if not explosion["mini_crit"]:
+                        continue
+                    if not (impact["event_tick"] <= explosion["event_tick"] <= tick):
+                        continue
+                    if explosion["event_tick"] - impact["event_tick"] > DOUBLE_DONK_WINDOW_TICKS:
+                        continue
+                    # The Mini-Crit explosion must be the damage that actually
+                    # produces this death, not an earlier unrelated donk.
+                    if tick - explosion["event_tick"] > 1:
+                        continue
+                    double_donk_events.append({
+                        "impact_tick": impact["event_tick"],
+                        "explosion_tick": explosion["event_tick"],
+                        "window_seconds": round((explosion["event_tick"] - impact["event_tick"]) / TICKS_PER_SECOND, 3),
+                        "impact_damage": impact["damage_amount"],
+                        "explosion_damage": explosion["damage_amount"],
+                    })
         evidence = {
             "state_available": attacker_state is not None and victim_state is not None,
             "attacker_airborne": bool(attacker_state is not None and attacker_state.get("on_ground") is False),
@@ -650,6 +685,8 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
             "attacker_scoped": bool(attacker_state is not None and attacker_state.get("scoped")),
             "attacker_blast_jumping": bool(attacker_state is not None and attacker_state.get("blast_jumping")),
             "attacker_kritz_boosted": bool(attacker_state is not None and attacker_state.get("kritz_boosted")),
+            "double_donk_events": double_donk_events,
+            "confirmed_double_donk": bool(double_donk_events),
             "kritzkrieg_deployments": kritz_deployments,
             "confirmed_kritzkrieg_boost": bool(kritz_deployments),
             "attacker_shield_charging": shield_charge_active,
@@ -680,7 +717,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         }
         kill["state_evidence"] = evidence
         if debug:
-            print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} uber_drop={} kritz_boost={} alive={}:{} recent_friendly_deaths={} uber_disadvantage={} force_followups={} victim_respawn={}".format(tick, attacker, victim, airborne, bool(projectile_evidence), uber_drop, bool(kritz_deployments), evidence["friendly_alive_before"], evidence["enemy_alive_before"], evidence["recent_friendly_death_count"], enemy_uber_advantage, len(force_followups), victim_respawn_tick or "unknown"))
+            print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} double_donk={} uber_drop={} kritz_boost={} alive={}:{} recent_friendly_deaths={} uber_disadvantage={} force_followups={} victim_respawn={}".format(tick, attacker, victim, airborne, bool(projectile_evidence), bool(double_donk_events), uber_drop, bool(kritz_deployments), evidence["friendly_alive_before"], evidence["enemy_alive_before"], evidence["recent_friendly_death_count"], enemy_uber_advantage, len(force_followups), victim_respawn_tick or "unknown"))
 
 
 def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1141,6 +1178,10 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             score += 20.0
             tags.add("market_garden")
             breakdown.append({"reason": "confirmed_market_garden", "points": 20.0, "event_tick": kill["event_tick"]})
+        if state_evidence.get("confirmed_double_donk"):
+            score += 18.0
+            tags.add("double_donk")
+            breakdown.append({"reason": "confirmed_loose_cannon_double_donk", "points": 18.0, "event_tick": kill["event_tick"], "hits": state_evidence.get("double_donk_events", [])})
         drop_shot = (kill.get("attacker_class") == "sniper" and kill["weapon"] in {"sniperrifle", "sniperrifle_classic", "sniperrifle_decap"}
                      and bool(state_evidence.get("attacker_scoped"))
                      and bool(state_evidence.get("attacker_airborne"))
@@ -1450,6 +1491,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             and bool(kill.get("state_evidence", {}).get("attacker_blast_jumping"))
             for kill in kills
         ),
+        "double_donks": sum(bool(kill.get("state_evidence", {}).get("confirmed_double_donk")) for kill in kills),
         "confirmed_airshots": confirmed_airshot_count,
         "direct_airshots": sum((kill.get("state_evidence", {}).get("projectile") or {}).get("impact_proximity") == "direct" for kill in kills),
         "airborne_projectile_kills": sum(bool(kill.get("state_evidence", {}).get("victim_airborne")) and kill["weapon"] in AIRSHOT_PROJECTILE_WEAPONS for kill in kills),

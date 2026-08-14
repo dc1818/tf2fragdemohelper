@@ -66,8 +66,6 @@ The current scorer creates candidates only inside closed live-round intervals. T
 
 Candidates are grouped by attacker within the same round only when the entire first-to-last kill span is no more than four seconds. Measuring the total window prevents a chain of individually close kills from becoming one overly long multikill. Every candidate includes a five-second lead-in and three-second outro, clipped to the active round. For a public-server recording that begins mid-round and ends before a reset, the analyzer may create an `in_progress_public_server` interval only after reconstructed state confirms an opposing-team player death; it ends at demo EOF.
 
-POV demos retain every kill made by the resolved recorder, including ordinary low-scoring single kills, so the GUI can sort or filter them. STV demos keep the 25-point minimum for isolated single kills to avoid listing every routine frag from every player.
-
 The score is intentionally explainable. `frag_candidates.ndjson` records `score_breakdown` plus the raw metrics that produced it. Assists are recorded on kills when present, but do not count as kills and currently add no score.
 
 | Signal | Score |

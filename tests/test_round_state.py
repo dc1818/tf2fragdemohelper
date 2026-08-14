@@ -135,13 +135,16 @@ class RoundStateTests(unittest.TestCase):
         )
 
     def test_backstab_is_separate_from_melee_kills(self):
-        backstab = dict(self.kill(100, 2, "knife"), custom_kill=2)
+        # The killfeed can mark a backstab as a full crit. Its authoritative
+        # custom-kill value still proves that it is not a random crit.
+        backstab = dict(self.kill(100, 2, "knife"), custom_kill=2, crit_type=2)
         score, tags, metrics, breakdown = ANALYZER.score_candidate([backstab], {"end_tick": 1000})
 
         self.assertEqual(score, 30.0)
         self.assertNotIn("taunt_kill", tags)
         self.assertIn("backstab", tags)
         self.assertNotIn("melee_kill", tags)
+        self.assertNotIn("random_full_crit", tags)
         self.assertEqual(metrics["taunt_kills"], 0)
         self.assertEqual(metrics["backstab_kills"], 1)
         self.assertEqual(metrics["melee_kills"], 0)

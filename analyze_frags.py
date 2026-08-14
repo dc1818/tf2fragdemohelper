@@ -421,14 +421,22 @@ def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_
         distance = math.sqrt(sum((projectile_position[index] - victim_position[index]) ** 2 for index in range(3)))
         if distance > 220.0:
             continue
-        usable_history = [item for item in history if item[0] <= tick + 3]
+        # Entity IDs are recycled. Keep only the lifetime containing the
+        # projectile state matched to this kill; otherwise a new cannonball
+        # could inherit the path and flight time of an older projectile with
+        # the same entity ID.
+        previous_removal = max((removed_tick for removed_tick in removals if removed_tick < projectile_tick), default=None)
+        usable_history = [
+            item for item in history
+            if item[0] <= tick + 3 and (previous_removal is None or item[0] > previous_removal)
+        ]
         path_distance = 0.0
         for previous, current in zip(usable_history, usable_history[1:]):
             previous_position = vector3(previous[1].get("position"))
             current_position = vector3(current[1].get("position"))
             path_distance += math.sqrt(sum((current_position[index] - previous_position[index]) ** 2 for index in range(3)))
         launch_tick = usable_history[0][0] if usable_history else projectile_tick
-        impact_tick = min((removed_tick for removed_tick in removals if removed_tick >= launch_tick), default=tick)
+        impact_tick = min((removed_tick for removed_tick in removals if removed_tick >= projectile_tick), default=tick)
         projectile_type = as_text(projectile.get("projectile_type"))
         flight_state = pipe_flight_state(usable_history, tick) if projectile_type == "pipe" else "in_flight"
         evidence = {

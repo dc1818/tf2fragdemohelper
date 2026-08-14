@@ -79,6 +79,7 @@ Melee classification does not depend on a complete list of killfeed names. The a
 |---|---:|
 | Candidate base | +10 |
 | Ordinary player melee kill | +15 |
+| Confirmed Spy backstab | +20 |
 | Confirmed Market Garden (blast-jumping critical hit) | +20 |
 | Confirmed Loose Cannon Double Donk | +18 |
 | Confirmed Kritzkrieg-boosted kill | +8 |
@@ -113,7 +114,7 @@ Melee classification does not depend on a complete list of killfeed names. The a
 | Enemy-Medic pick that equalizes that Über advantage | +12 |
 | Each random full-crit kill | -12 |
 
-Taunt kills use the authoritative `player_death.custom_kill` value, not a weapon-name guess. A confirmed taunt kill is tagged `taunt_kill`, records its named taunt and custom-kill value in `score_breakdown`, and is strong enough to remain a standalone candidate. The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
+Taunt kills use the authoritative `player_death.custom_kill` value, not a weapon-name guess. A confirmed taunt kill is tagged `taunt_kill`, records its named taunt and custom-kill value in `score_breakdown`, and is strong enough to remain a standalone candidate. Spy backstabs use the same field's `TF_DMG_CUSTOM_BACKSTAB` value (`2`): they receive the separate `backstab` tag and score path rather than `melee_kill`. A non-backstab Spy knife kill remains an ordinary `melee_kill`. The final score is floored at zero. `metrics.score_before_floor` preserves the pre-floor result so the displayed total can be audited against `score_breakdown`.
 
 Building/object destruction events are not kills and do not create important standalone candidates. A destruction can add a small contextual bonus only when the same attacker produces a real player-kill sequence within two seconds. In a resolved POV demo, the recorded player's own deaths are rejected, and a death where that player appears only as an assister is never counted as a POV kill.
 

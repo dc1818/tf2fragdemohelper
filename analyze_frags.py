@@ -38,6 +38,7 @@ KRITZKRIEG_DURATION_TICKS = round(TICKS_PER_SECOND * 8.0)
 DOUBLE_DONK_WINDOW_TICKS = round(TICKS_PER_SECOND * 0.5)
 PLAYER_SWING_MIN_WINDOW_TICKS = round(TICKS_PER_SECOND * 4.0)
 CHARGE_MELEE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 0.85)
+BACKSTAB_CUSTOM_KILL = 2
 SHIELD_BASH_CUSTOM_KILL = 23
 
 ROUND_END_EVENTS = {
@@ -1398,6 +1399,11 @@ def is_melee_kill(kill: Dict[str, Any]) -> bool:
     return melee_classification(kill) is not None
 
 
+def is_backstab_kill(kill: Dict[str, Any]) -> bool:
+    """TF_DMG_CUSTOM_BACKSTAB is the authoritative Spy-backstab event value."""
+    return as_int(kill.get("custom_kill")) == BACKSTAB_CUSTOM_KILL
+
+
 def weapon_tags(kill: Dict[str, Any]) -> List[str]:
     weapon = as_text(kill.get("weapon")).lower()
     tags: List[str] = []
@@ -1413,7 +1419,9 @@ def weapon_tags(kill: Dict[str, Any]) -> List[str]:
         tags.append("crossbow")
     if weapon in SPECIAL_WEAPON_TAGS:
         tags.append(SPECIAL_WEAPON_TAGS[weapon])
-    if is_melee_kill(kill):
+    if is_backstab_kill(kill):
+        tags.append("backstab")
+    elif is_melee_kill(kill):
         tags.append("melee_kill")
     return tags
 
@@ -1484,9 +1492,11 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
                 "seconds_since_charge": state_evidence.get("attacker_seconds_since_shield_charge"),
             })
         taunt_name = taunt_kill_name(kill)
+        backstab = is_backstab_kill(kill)
         ordinary_melee = (
             is_melee_kill(kill)
             and not taunt_name
+            and not backstab
             and not shield_bash
             and not charge_melee
             and not market_garden
@@ -1504,6 +1514,17 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
                 "weapon_id": as_int(kill.get("weapon_id")),
                 "weapon_def_index": as_int(kill.get("weapon_def_index")),
                 "classification_source": melee_classification(kill),
+            })
+        if backstab:
+            score += 20.0
+            tags.discard("melee_kill")
+            tags.add("backstab")
+            breakdown.append({
+                "reason": "confirmed_spy_backstab",
+                "points": 20.0,
+                "event_tick": kill["event_tick"],
+                "custom_kill": BACKSTAB_CUSTOM_KILL,
+                "weapon": kill["weapon"],
             })
         if taunt_name:
             score += 25.0
@@ -1748,9 +1769,11 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "melee_kills": sum(
             is_melee_kill(kill)
             and not taunt_kill_name(kill)
+            and not is_backstab_kill(kill)
             and as_int(kill.get("custom_kill")) != SHIELD_BASH_CUSTOM_KILL
             for kill in kills
         ),
+        "backstab_kills": sum(is_backstab_kill(kill) for kill in kills),
         "taunt_kills": sum(bool(taunt_kill_name(kill)) for kill in kills),
         "shield_bash_kills": sum(as_int(kill.get("custom_kill")) == SHIELD_BASH_CUSTOM_KILL for kill in kills),
         "charge_melee_kills": sum(

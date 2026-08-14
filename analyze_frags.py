@@ -62,9 +62,10 @@ PROJECTILE_WEAPONS = {
     "quickiebomb_launcher", "flaregun", "detonator", "scorch_shot", "compound_bow",
     "crusaders_crossbow", "syringegun_medic", "rescue_ranger", "righteous_bison",
 }
+LOOSE_CANNON_WEAPONS = {"loose_cannon", "loose_cannon_impact", "loose_cannon_explosion"}
 AIRSHOT_PROJECTILE_WEAPONS = {
     "rocketlauncher", "directhit", "blackbox", "liberty_launcher", "airstrike",
-    "grenadelauncher", "loch_n_load", "iron_bomber", "loose_cannon",
+    "grenadelauncher", "loch_n_load", "iron_bomber", *LOOSE_CANNON_WEAPONS,
     "flaregun", "detonator", "scorch_shot", "compound_bow", "huntsman",
 }
 SPECIAL_WEAPON_TAGS = {
@@ -354,7 +355,7 @@ def projectile_type_matches_weapon(projectile_type: str, weapon: str) -> bool:
         return projectile_type == "rocket"
     if weapon in {"grenadelauncher", "loch_n_load", "iron_bomber"}:
         return projectile_type == "pipe"
-    if weapon == "loose_cannon":
+    if weapon in LOOSE_CANNON_WEAPONS:
         return projectile_type == "loosecannon"
     if weapon in {"flaregun", "detonator", "scorch_shot"}:
         return projectile_type == "flare"
@@ -648,7 +649,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
                         "seconds_before_kill": round((tick - deploy_tick) / TICKS_PER_SECOND, 3),
                     })
         double_donk_events = []
-        if kill.get("weapon") == "loose_cannon":
+        if kill.get("weapon") in LOOSE_CANNON_WEAPONS:
             kill_weapon_id = as_int(kill.get("weapon_id"))
             matching_hurts = [
                 hurt for hurt in hurt_events
@@ -1188,7 +1189,7 @@ def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[D
 
 def weapon_tags(weapon: str) -> List[str]:
     tags: List[str] = []
-    if weapon in PROJECTILE_WEAPONS:
+    if weapon in PROJECTILE_WEAPONS or weapon in LOOSE_CANNON_WEAPONS:
         tags.append("projectile_kill")
     if weapon in {"grenadelauncher", "loch_n_load", "iron_bomber"}:
         tags.append("pipe")

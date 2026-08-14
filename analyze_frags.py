@@ -720,7 +720,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
             print("[candidate-debug] state kill tick={} attacker={} victim={} airborne={} projectile_match={} double_donk={} uber_drop={} kritz_boost={} alive={}:{} recent_friendly_deaths={} uber_disadvantage={} force_followups={} victim_respawn={}".format(tick, attacker, victim, airborne, bool(projectile_evidence), bool(double_donk_events), uber_drop, bool(kritz_deployments), evidence["friendly_alive_before"], evidence["enemy_alive_before"], evidence["recent_friendly_death_count"], enemy_uber_advantage, len(force_followups), victim_respawn_tick or "unknown"))
 
 
-def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimeline] = None, teams: Optional[Dict[int, List[Tuple[int, Optional[str]]]]] = None) -> List[Dict[str, Any]]:
     """Build closed playable intervals and retain tournament ready-up evidence.
 
     `teamplay_team_ready` only means a team has readied. It never opens a
@@ -819,7 +819,61 @@ def build_rounds(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 current = None
             clear_ready_up()
             pending_activation = None
-    return [item for item in rounds if item["end_tick"] is not None and item["end_tick"] > item["live_start_tick"]]
+    closed_rounds = [item for item in rounds if item["end_tick"] is not None and item["end_tick"] > item["live_start_tick"]]
+    if closed_rounds or timeline is None or not timeline.sample_count:
+        return closed_rounds
+
+    # Community/public demos commonly begin after a CTF or payload round is
+    # already underway and end before it resets. In that case there is no
+    # round-transition event inside the recording to form a closed interval.
+    # Do not assume that a demo begins live: require a real PvP death whose
+    # participants are independently resolved to opposing TF2 teams by the
+    # reconstructed packet state (or, when available, player_team events).
+    team_history = teams or {}
+    first_combat_tick: Optional[int] = None
+    for item in events:
+        if event_name(item) != "player_death":
+            continue
+        fields = event_fields(item)
+        attacker = as_int(fields.get("attacker"))
+        victim = as_int(fields.get("user_id", fields.get("userid")))
+        tick = as_int(item.get("tick"))
+        if not attacker or not victim or attacker == victim:
+            continue
+        attacker_state = timeline.player_at(attacker, max(0, tick - 1))
+        victim_state = timeline.player_at(victim, max(0, tick - 1))
+        attacker_team = canonical_team(attacker_state.get("team")) if attacker_state is not None else None
+        victim_team = canonical_team(victim_state.get("team")) if victim_state is not None else None
+        attacker_team = attacker_team or player_team_at(team_history, attacker, tick)
+        victim_team = victim_team or player_team_at(team_history, victim, tick)
+        if attacker_team in {"red", "blu"} and victim_team in {"red", "blu"} and attacker_team != victim_team:
+            first_combat_tick = tick
+            break
+    if first_combat_tick is None:
+        return closed_rounds
+
+    last_tick = max((as_int(item.get("tick")) for item in events), default=first_combat_tick)
+    return [{
+        "round_index": 1,
+        "round_active_tick": first_combat_tick,
+        "live_start_tick": first_combat_tick,
+        "live_start_event": "in_progress_public_server",
+        "setup_finished_tick": None,
+        "ready_up": {
+            "red_ready_tick": None,
+            "blu_ready_tick": None,
+            "both_teams_ready": False,
+            "both_teams_ready_tick": None,
+            "ready_restart_tick": None,
+            "countdown_tick": None,
+        },
+        "activation_trigger": {
+            "event": "state_confirmed_opposing_team_death",
+            "tick": first_combat_tick,
+        },
+        "end_tick": max(first_combat_tick + 1, last_tick + 1),
+        "end_reason": "demo_end_while_public_play_active",
+    }]
 
 
 def round_for_tick(rounds: Iterable[Dict[str, Any]], tick: int) -> Optional[Dict[str, Any]]:
@@ -1649,9 +1703,9 @@ def main() -> int:
         raise FileNotFoundError("events.ndjson is missing. Rebuild and run the updated parser first: {}".format(events_path))
     events = read_events(events_path)
     state_timeline = read_state_timeline(export_directory / "state_samples.ndjson", arguments.debug)
-    rounds = build_rounds(events)
-    classes = class_history(events)
     teams = player_team_history(events)
+    rounds = build_rounds(events, state_timeline, teams)
+    classes = class_history(events)
     names = player_name_history(events)
     context = analysis_context(export_directory, names)
     if arguments.debug:

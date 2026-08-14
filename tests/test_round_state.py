@@ -51,6 +51,32 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(rounds[0]["ready_up"]["ready_restart_tick"], 75)
         self.assertEqual(rounds[0]["ready_up"]["countdown_tick"], 80)
 
+    def test_public_server_fallback_requires_state_confirmed_opposing_team_combat(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.sample_count = 2
+        timeline.players[1].append((90, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
+        timeline.players[2].append((90, {"team": "red", "class": "soldier", "life_state": "alive", "health": 200}))
+        events = [
+            {"tick": 100, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2}},
+            {"tick": 200, "event_type": "player_hurt", "event": {"attacker": 1, "user_id": 2}},
+        ]
+
+        rounds = ANALYZER.build_rounds(events, timeline)
+
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["live_start_tick"], 100)
+        self.assertEqual(rounds[0]["live_start_event"], "in_progress_public_server")
+        self.assertEqual(rounds[0]["end_reason"], "demo_end_while_public_play_active")
+
+    def test_public_server_fallback_does_not_open_for_unresolved_or_same_team_death(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.sample_count = 2
+        timeline.players[1].append((90, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
+        timeline.players[2].append((90, {"team": "blu", "class": "soldier", "life_state": "alive", "health": 200}))
+        events = [{"tick": 100, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2}}]
+
+        self.assertEqual(ANALYZER.build_rounds(events, timeline), [])
+
     def test_pov_scope_requires_a_resolved_recorder(self):
         events = ANALYZER.read_events(ROOT / "tests" / "fixture_events.ndjson")
         names = ANALYZER.player_name_history(events)

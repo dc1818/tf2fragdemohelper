@@ -67,7 +67,7 @@ AIRSHOT_PROJECTILE_WEAPONS = {
     "flaregun", "detonator", "scorch_shot", "compound_bow", "huntsman",
 }
 SPECIAL_WEAPON_TAGS = {
-    "market_gardener": "market_garden",
+    "market_gardener": "market_gardener",
     "axtinguisher": "axtinguisher",
     "backburner": "backburner",
     "ambassador": "ambassador",
@@ -648,6 +648,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
             "attacker_airborne": bool(attacker_state is not None and attacker_state.get("on_ground") is False),
             "attacker_vertical_velocity": vector3(attacker_state.get("velocity"))[2] if attacker_state is not None else 0.0,
             "attacker_scoped": bool(attacker_state is not None and attacker_state.get("scoped")),
+            "attacker_blast_jumping": bool(attacker_state is not None and attacker_state.get("blast_jumping")),
             "attacker_kritz_boosted": bool(attacker_state is not None and attacker_state.get("kritz_boosted")),
             "kritzkrieg_deployments": kritz_deployments,
             "confirmed_kritzkrieg_boost": bool(kritz_deployments),
@@ -1127,10 +1128,19 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         tags.update(weapon_tags(kill["weapon"]))
         state_evidence = kill.get("state_evidence", {})
         kritzkrieg_kill = bool(state_evidence.get("confirmed_kritzkrieg_boost")) and as_int(kill.get("crit_type")) > 0
+        market_garden = (
+            kill.get("weapon") == "market_gardener"
+            and as_int(kill.get("crit_type")) > 0
+            and bool(state_evidence.get("attacker_blast_jumping"))
+        )
         if kritzkrieg_kill:
             score += 8.0
             tags.add("kritzkrieg_kill")
             breakdown.append({"reason": "confirmed_kritzkrieg_boosted_kill", "points": 8.0, "event_tick": kill["event_tick"], "deployments": state_evidence.get("kritzkrieg_deployments", [])})
+        if market_garden:
+            score += 20.0
+            tags.add("market_garden")
+            breakdown.append({"reason": "confirmed_market_garden", "points": 20.0, "event_tick": kill["event_tick"]})
         drop_shot = (kill.get("attacker_class") == "sniper" and kill["weapon"] in {"sniperrifle", "sniperrifle_classic", "sniperrifle_decap"}
                      and bool(state_evidence.get("attacker_scoped"))
                      and bool(state_evidence.get("attacker_airborne"))
@@ -1167,6 +1177,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             and not taunt_name
             and not shield_bash
             and not charge_melee
+            and not market_garden
         )
         if not ordinary_melee:
             tags.discard("melee_kill")
@@ -1221,7 +1232,7 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
             score += 5.0
             tags.add("streak_10_plus")
             breakdown.append({"reason": "streak_10_plus", "points": 5.0, "event_tick": kill["event_tick"]})
-        if kill["crit_type"] == 2 and not charge_melee and not kritzkrieg_kill:
+        if kill["crit_type"] == 2 and not charge_melee and not kritzkrieg_kill and kill.get("weapon") != "market_gardener":
             score -= 12.0
             tags.add("random_full_crit")
             breakdown.append({"reason": "random_full_crit", "points": -12.0, "event_tick": kill["event_tick"]})
@@ -1433,6 +1444,12 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         "demoman_kills": sum(kill["victim_class"] == "demoman" for kill in kills),
         "full_crit_kills": sum(kill["crit_type"] == 2 for kill in kills),
         "kritzkrieg_kills": sum(bool(kill.get("state_evidence", {}).get("confirmed_kritzkrieg_boost")) and as_int(kill.get("crit_type")) > 0 for kill in kills),
+        "market_gardens": sum(
+            kill.get("weapon") == "market_gardener"
+            and as_int(kill.get("crit_type")) > 0
+            and bool(kill.get("state_evidence", {}).get("attacker_blast_jumping"))
+            for kill in kills
+        ),
         "confirmed_airshots": confirmed_airshot_count,
         "direct_airshots": sum((kill.get("state_evidence", {}).get("projectile") or {}).get("impact_proximity") == "direct" for kill in kills),
         "airborne_projectile_kills": sum(bool(kill.get("state_evidence", {}).get("victim_airborne")) and kill["weapon"] in AIRSHOT_PROJECTILE_WEAPONS for kill in kills),

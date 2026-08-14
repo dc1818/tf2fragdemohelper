@@ -152,6 +152,58 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(metrics["melee_kills"], 1)
         self.assertIn("player_melee_kill", {item["reason"] for item in breakdown})
 
+    def test_weapon_id_keeps_unknown_melee_name_as_a_candidate(self):
+        melee = dict(
+            self.kill(100, 2, "claidheamohmor"),
+            weapon_id=64,
+            weapon_def_index=327,
+            attacker_class="demoman",
+            round_index=1,
+            attacker_team="blu",
+        )
+        rounds = [{
+            "round_index": 1,
+            "live_start_tick": 1,
+            "live_start_event": "in_progress_public_server",
+            "round_active_tick": None,
+            "setup_finished_tick": None,
+            "activation_trigger": {"event": "opposing_team_player_death", "tick": 1},
+            "ready_up": {},
+            "end_tick": 1000,
+            "end_reason": "demo_end_while_public_play_active",
+        }]
+
+        candidate = ANALYZER.build_candidates([melee], rounds, {"analysis_scope": "pov_player_only"})[0]
+
+        self.assertEqual(candidate["overall_score"], 25.0)
+        self.assertIn("melee_kill", candidate["tags"])
+        self.assertEqual(candidate["metrics"]["melee_kills"], 1)
+        melee_score = next(item for item in candidate["score_breakdown"] if item["reason"] == "player_melee_kill")
+        self.assertEqual(melee_score["classification_source"], "weapon_id")
+        self.assertEqual(melee_score["weapon_def_index"], 327)
+
+    def test_non_melee_weapon_id_does_not_bypass_single_kill_filter(self):
+        ranged = dict(
+            self.kill(100, 2, "unknown_future_weapon"),
+            weapon_id=22,
+            weapon_def_index=9999,
+            round_index=1,
+            attacker_team="blu",
+        )
+        rounds = [{
+            "round_index": 1,
+            "live_start_tick": 1,
+            "live_start_event": "in_progress_public_server",
+            "round_active_tick": None,
+            "setup_finished_tick": None,
+            "activation_trigger": {"event": "opposing_team_player_death", "tick": 1},
+            "ready_up": {},
+            "end_tick": 1000,
+            "end_reason": "demo_end_while_public_play_active",
+        }]
+
+        self.assertEqual(ANALYZER.build_candidates([ranged], rounds, {"analysis_scope": "pov_player_only"}), [])
+
     def test_market_garden_requires_blast_jump_state_and_is_not_random_crit(self):
         garden = dict(self.kill(100, 2, "market_gardener"), crit_type=2, state_evidence={"attacker_blast_jumping": True})
 

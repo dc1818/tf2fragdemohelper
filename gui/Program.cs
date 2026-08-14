@@ -698,6 +698,8 @@ namespace Tf2StvParserGui
             catch { MessageBox.Show(this, "This candidate has no usable demo playback tick.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             int leadTicks = (int)Math.Round((double)leadInSeconds.Value * 66.6666667);
             int targetTick = Math.Max(0, firstTick - leadTicks);
+            int attackerUserId = IntValue(candidate, "attacker_user_id");
+            bool focusStvAttacker = IsStvCandidate(candidate) && attackerUserId > 0;
             try
             {
                 string gameDirectory = GetTfGameDirectory();
@@ -708,7 +710,7 @@ namespace Tf2StvParserGui
                 }
                 DeleteStalePlaybackVdms(gameDirectory);
                 string stagedDemo = StageDemoForPlayback(gameDirectory);
-                string playbackVdm = WritePlaybackVdm(gameDirectory, stagedDemo, targetTick);
+                string playbackVdm = WritePlaybackVdm(gameDirectory, stagedDemo, targetTick, focusStvAttacker ? attackerUserId : 0);
                 string arguments = "-novid -console -game tf +playdemo " + Quote(stagedDemo);
                 Process launchedTf2 = Process.Start(new ProcessStartInfo
                 {
@@ -717,7 +719,7 @@ namespace Tf2StvParserGui
                     UseShellExecute = true,
                     WorkingDirectory = Path.GetDirectoryName(tf2Executable)
                 });
-                AppendLaunchNote(candidate, targetTick, firstTick, stagedDemo, playbackVdm);
+                AppendLaunchNote(candidate, targetTick, firstTick, stagedDemo, playbackVdm, focusStvAttacker, attackerUserId);
                 if (launchedTf2 != null) SchedulePlaybackVdmCleanup(launchedTf2, playbackVdm);
             }
             catch (Exception error)
@@ -773,7 +775,7 @@ namespace Tf2StvParserGui
             return "demos/tf2fragdemohelper/" + stagedFileName;
         }
 
-        private static string WritePlaybackVdm(string gameDirectory, string stagedDemo, int targetTick)
+        private static string WritePlaybackVdm(string gameDirectory, string stagedDemo, int targetTick, int stvAttackerUserId)
         {
             string stagedPath = Path.Combine(gameDirectory, stagedDemo.Replace('/', Path.DirectorySeparatorChar));
             string vdmPath = Path.ChangeExtension(stagedPath, ".vdm");
@@ -787,6 +789,16 @@ namespace Tf2StvParserGui
             lines.Add("        starttick \"1\"");
             lines.Add("        skiptotick \"" + targetTick + "\"");
             lines.Add("    }");
+            if (stvAttackerUserId > 0)
+            {
+                lines.Add("    \"2\"");
+                lines.Add("    {");
+                lines.Add("        factory \"PlayCommands\"");
+                lines.Add("        name \"Focus selected STV candidate\"");
+                lines.Add("        starttick \"" + (targetTick + 1) + "\"");
+                lines.Add("        commands \"spec_autodirector 0; spec_player #" + stvAttackerUserId + "; spec_mode 4\"");
+                lines.Add("    }");
+            }
             lines.Add("}");
             File.WriteAllLines(vdmPath, lines.ToArray());
             return vdmPath;
@@ -823,10 +835,20 @@ namespace Tf2StvParserGui
             });
         }
 
-        private void AppendLaunchNote(IDictionary candidate, int targetTick, int firstTick, string stagedDemo, string playbackVdm)
+        private void AppendLaunchNote(IDictionary candidate, int targetTick, int firstTick, string stagedDemo, string playbackVdm, bool focusedStvAttacker, int attackerUserId)
         {
             details.AppendText("\r\nTF2 launch requested with -novid. Demo staged as " + stagedDemo + ".\r\nTemporary VDM seek script: " + playbackVdm + ". It will be removed after TF2 closes.\r\nSkipping to demo tick " + targetTick + " (" + leadInSeconds.Value + " seconds before first event at " + firstTick + ").\r\n");
+            if (focusedStvAttacker)
+                details.AppendText("STV camera focus: first-person view of selected candidate attacker #" + attackerUserId + ".\r\n");
+            else
+                details.AppendText("Camera focus: preserved recorded POV (automatic attacker focus is used only for confirmed STV demos).\r\n");
             ScrollDetailsToBottom();
+        }
+
+        private static bool IsStvCandidate(IDictionary candidate)
+        {
+            string captureType = TextValue(Map(candidate, "demo_context"), "capture_type");
+            return String.Equals(captureType, "stv", StringComparison.OrdinalIgnoreCase);
         }
 
         private void ShowSelectedCandidate(object sender, EventArgs e)

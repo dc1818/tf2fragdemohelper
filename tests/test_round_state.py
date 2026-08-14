@@ -178,7 +178,9 @@ class RoundStateTests(unittest.TestCase):
         timeline = ANALYZER.StateTimeline()
         timeline.players[1].append((100, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
         timeline.players[2].append((100, {"team": "red", "class": "soldier", "life_state": "alive", "health": 200}))
-        kill = dict(self.kill(130, 2, "loose_cannon"), attacker_class="demoman", attacker_team="blu", victim_team="red", weapon_id=996)
+        # player_death reports the actual impact/explosion variant rather
+        # than the weapon_log_class_name used by the launcher.
+        kill = dict(self.kill(130, 2, "loose_cannon_explosion"), attacker_class="demoman", attacker_team="blu", victim_team="red", weapon_id=996)
 
         ANALYZER.enrich_state_evidence([kill], [
             {"tick": 100, "event_type": "player_hurt", "event": {"attacker": 1, "user_id": 2, "weapon_id": 996, "damage_amount": 50, "mini_crit": False}},
@@ -187,7 +189,7 @@ class RoundStateTests(unittest.TestCase):
         score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], {"end_tick": 1000})
 
         self.assertTrue(kill["state_evidence"]["confirmed_double_donk"])
-        self.assertEqual(score, 28.0)
+        self.assertEqual(score, 36.0)
         self.assertIn("double_donk", tags)
         self.assertEqual(metrics["double_donks"], 1)
         self.assertIn("confirmed_loose_cannon_double_donk", {item["reason"] for item in breakdown})
@@ -196,7 +198,7 @@ class RoundStateTests(unittest.TestCase):
         timeline = ANALYZER.StateTimeline()
         timeline.players[1].append((100, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
         timeline.players[2].append((100, {"team": "red", "class": "soldier", "life_state": "alive", "health": 200}))
-        kill = dict(self.kill(130, 2, "loose_cannon"), attacker_class="demoman", attacker_team="blu", victim_team="red", weapon_id=996)
+        kill = dict(self.kill(130, 2, "loose_cannon_explosion"), attacker_class="demoman", attacker_team="blu", victim_team="red", weapon_id=996)
 
         ANALYZER.enrich_state_evidence([kill], [
             {"tick": 130, "event_type": "player_hurt", "event": {"attacker": 1, "user_id": 2, "weapon_id": 996, "damage_amount": 81, "mini_crit": True}},

@@ -46,14 +46,14 @@ namespace Tf2StvParserGui
 
         public static bool RequiresFfmpeg(HlaeRecordingOutput output)
         {
-            return output != HlaeRecordingOutput.TgaSequence;
+            return output != HlaeRecordingOutput.TgaSequence && output != HlaeRecordingOutput.JpgSequence;
         }
 
         public static string ExpectedFiles(HlaeRecordingOutput output)
         {
             switch (output)
             {
-                case HlaeRecordingOutput.JpgSequence: return "frame_000001.jpg, frame_000002.jpg, ...";
+                case HlaeRecordingOutput.JpgSequence: return "frame00000.jpg, frame00001.jpg, ...";
                 case HlaeRecordingOutput.Mp4Standard:
                 case HlaeRecordingOutput.Mp4Compatible:
                 case HlaeRecordingOutput.Mp4Lossless: return "video.mp4";
@@ -431,7 +431,7 @@ namespace Tf2StvParserGui
             string outputDirectory = Path.Combine(settings.OutputDirectory, "tf2fragdemohelper_batch_" + sessionId);
             Directory.CreateDirectory(stagedDirectory);
             Directory.CreateDirectory(outputDirectory);
-            WriteOfflineConfig(gameDirectory, fps, output, jpgQuality);
+            WriteOfflineConfig(gameDirectory);
 
             List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory);
             if (demos.Count == 0) throw new InvalidOperationException("None of the selected candidates had a valid source demo and playback tick.");
@@ -441,13 +441,13 @@ namespace Tf2StvParserGui
             string hlaeDirectory = Path.GetDirectoryName(settings.HlaeExecutable);
             bool x64 = Is64BitTf2(settings.Tf2Executable);
             string hook = x64 ? Path.Combine(hlaeDirectory, "x64", "AfxHookSource.dll") : Path.Combine(hlaeDirectory, "AfxHookSource.dll");
-            string gameArguments = "-steam -insecure +sv_lan 1 -novid -window -console -condebug -game tf " +
+            string gameArguments = "-steam -insecure +sv_lan 1 -novid -window -console -no_texture_stream -afxGame tf " +
                 (x64 ? "" : "-force32bit ") +
-                "+engine_no_focus_sleep 0 +snd_mute_losefocus 0 +exec tf2fragdemohelper_offline.cfg +playdemo " + demos[0].StagedRelativePath;
-            string hlaeArguments = "-customLoader -noGui -autoStart -noConfig " +
-                "-hookDllPath " + Quote(hook) + " " +
+                "+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +playdemo " + demos[0].StagedRelativePath;
+            string hlaeArguments = "-customLoader -autoStart -noGui " +
                 "-programPath " + Quote(settings.Tf2Executable) + " " +
-                "-cmdLine " + Quote(gameArguments);
+                "-cmdLine " + Quote(gameArguments) + " " +
+                "-hookDllPath " + Quote(hook);
 
             Process.Start(new ProcessStartInfo
             {
@@ -516,6 +516,7 @@ namespace Tf2StvParserGui
                     clipNumber++;
                     string name = clipNumber.ToString("D3") + "_" + BatchCandidateSupport.SafeName(Path.GetFileNameWithoutExtension(clip.DemoName)) + "_" + BatchCandidateSupport.SafeName(clip.CandidateId);
                     clip.OutputPath = Path.Combine(outputDirectory, name);
+                    Directory.CreateDirectory(clip.OutputPath);
                 }
             }
             return result;
@@ -540,7 +541,6 @@ namespace Tf2StvParserGui
 
         private static void WriteRecordingVdm(DemoQueue demo, string nextDemo, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
-            int recorderWarmupTicks = (int)Math.Round(TickRate);
             int recorderFlushTicks = (int)Math.Round(TickRate * 2.0);
             List<string> lines = new List<string>();
             lines.Add("demoactions");
@@ -555,14 +555,13 @@ namespace Tf2StvParserGui
                     clip.EndTick = clip.StartTick + 1;
 
                 int seekActionTick = previousEnd < 0 ? 1 : previousEnd + 1;
-                int warmupTargetTick = Math.Max(seekActionTick, clip.StartTick - recorderWarmupTicks);
-                AddSkipAction(lines, action++, seekActionTick, warmupTargetTick);
+                AddSkipAction(lines, action++, seekActionTick, clip.StartTick);
                 string focus = clip.FocusAttacker
                     ? "spec_autodirector 0; spec_player #" + clip.AttackerUserId + "; spec_mode 4; "
                     : "";
                 string start = focus + BuildRecordingStartCommand(clip.OutputPath, fps, output, jpgQuality);
-                AddCommandAction(lines, action++, clip.StartTick, "Record " + clip.CandidateId, start);
-                AddCommandAction(lines, action++, clip.EndTick, "Stop " + clip.CandidateId, "echo TF2FRAG_RECORD_END " + clip.CandidateId + "; mirv_streams record end; host_framerate 0");
+                AddCommandAction(lines, action++, clip.StartTick + 1, "Record " + clip.CandidateId, start);
+                AddCommandAction(lines, action++, clip.EndTick, "Stop " + clip.CandidateId, BuildRecordingStopCommand(output, clip.CandidateId));
                 previousEnd = clip.EndTick;
             }
             string finishCommand = String.IsNullOrEmpty(nextDemo) ? "quit" : "playdemo " + nextDemo;
@@ -573,20 +572,27 @@ namespace Tf2StvParserGui
 
         private static string BuildRecordingStartCommand(string outputPath, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
+            string frameBase = ForwardSlashes(Path.Combine(outputPath, "frame"));
+            if (output == HlaeRecordingOutput.TgaSequence)
+                return "echo TF2FRAG_RECORD_START " + frameBase + "; host_framerate " + fps + "; startmovie \"" + frameBase + "\"; hideconsole";
+            if (output == HlaeRecordingOutput.JpgSequence)
+                return "echo TF2FRAG_RECORD_START " + frameBase + "; jpeg_quality " + jpgQuality + "; host_framerate " + fps + "; startmovie \"" + frameBase + "\" jpeg; hideconsole";
             return "echo TF2FRAG_RECORD_START " + ForwardSlashes(outputPath) + "; " +
                 "host_framerate " + fps + "; mirv_streams record fps " + fps + "; " +
                 "mirv_streams record screen enabled 1; " + RecordingProfileCommands(output, jpgQuality) +
                 "mirv_streams record name \"" + ForwardSlashes(outputPath) + "\"; mirv_streams record start; hideconsole";
         }
 
+        private static string BuildRecordingStopCommand(HlaeRecordingOutput output, string candidateId)
+        {
+            string stop = output == HlaeRecordingOutput.TgaSequence || output == HlaeRecordingOutput.JpgSequence
+                ? "endmovie"
+                : "mirv_streams record end";
+            return "echo TF2FRAG_RECORD_END " + candidateId + "; " + stop + "; host_framerate 0";
+        }
+
         private static string RecordingProfileCommands(HlaeRecordingOutput output, int jpgQuality)
         {
-            if (output == HlaeRecordingOutput.JpgSequence)
-            {
-                int qualityScale = Math.Max(2, Math.Min(31, 2 + ((100 - jpgQuality) * 29 / 99)));
-                return "mirv_streams settings add ffmpeg tf2fragdemohelper_jpg \"-c:v mjpeg -q:v " + qualityScale + " {QUOTE}{AFX_STREAM_PATH}/frame_%06d.jpg{QUOTE}\"; " +
-                    "mirv_streams record screen settings tf2fragdemohelper_jpg; ";
-            }
             string setting = "afxClassic";
             if (output == HlaeRecordingOutput.Mp4Standard) setting = "afxFfmpeg";
             else if (output == HlaeRecordingOutput.Mp4Compatible) setting = "afxFfmpegYuv420p";
@@ -617,7 +623,7 @@ namespace Tf2StvParserGui
             lines.Add("    }");
         }
 
-        private static void WriteOfflineConfig(string gameDirectory, int fps, HlaeRecordingOutput output, int jpgQuality)
+        private static void WriteOfflineConfig(string gameDirectory)
         {
             string cfgDirectory = Path.Combine(gameDirectory, "cfg");
             Directory.CreateDirectory(cfgDirectory);
@@ -634,9 +640,6 @@ namespace Tf2StvParserGui
             });
             lines.Add("con_logfile tf2fragdemohelper_recording.log");
             lines.Add("echo TF2FRAG_RECORDER_INIT");
-            lines.Add("mirv_streams record fps " + fps);
-            lines.Add("mirv_streams record screen enabled 1");
-            lines.Add(RecordingProfileCommands(output, jpgQuality));
             lines.Add("echo TF2FRAG_RECORDER_READY");
             File.WriteAllLines(Path.Combine(cfgDirectory, "tf2fragdemohelper_offline.cfg"), lines.ToArray(), new UTF8Encoding(false));
         }

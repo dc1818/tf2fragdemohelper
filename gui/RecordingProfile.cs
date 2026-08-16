@@ -192,11 +192,19 @@ namespace Tf2StvParserGui
         private TabPage BuildVisualsTab()
         {
             TabPage page = NewTab("Video and HUD");
-            TableLayoutPanel layout = NewGrid(8, 4);
+            TableLayoutPanel layout = NewGrid(7, 4);
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            layout.RowStyles.Clear();
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 170));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             page.Controls.Add(layout);
 
             AddChoice(layout, 0, 0, "Resolution", resolution, new string[] { "1280x720", "1920x1080", "2560x1440", "3840x2160" });
@@ -222,6 +230,8 @@ namespace Tf2StvParserGui
             TableLayoutPanel checks = NewGrid(4, 2);
             checks.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             checks.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            checks.RowStyles.Clear();
+            for (int row = 0; row < 4; row++) checks.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
             checks.Controls.Add(disableHitSounds, 0, 0);
             checks.Controls.Add(disableCombatText, 1, 0);
             checks.Controls.Add(disableVoiceChat, 0, 1);
@@ -229,6 +239,7 @@ namespace Tf2StvParserGui
             checks.Controls.Add(minimalHud, 0, 2);
             checks.Controls.Add(disableCrosshairSwitching, 1, 2);
             checks.Controls.Add(hudPlayerModel, 0, 3);
+            checks.Dock = DockStyle.Fill;
             distractions.Controls.Add(checks);
             layout.SetColumnSpan(distractions, 4);
             layout.Controls.Add(distractions, 0, 4);

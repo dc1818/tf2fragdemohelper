@@ -128,6 +128,8 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
             self.assertIn(label, self.profile)
         self.assertIn('"98 (highest)"', self.profile)
         self.assertIn('"Kill notices only"', self.profile)
+        self.assertIn('new RowStyle(SizeType.Absolute, 170)', self.profile)
+        self.assertIn('for (int row = 0; row < 4; row++) checks.RowStyles.Add', self.profile)
 
     def test_custom_resources_particles_and_skyboxes_are_supported(self):
         self.assertIn('Temporarily isolate custom resources', self.profile)

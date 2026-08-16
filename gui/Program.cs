@@ -1059,7 +1059,18 @@ namespace Tf2StvParserGui
             if (!inlinePreviewButton.Visible || grid.SelectedRows.Count != 1) return;
             DataGridViewRow row = grid.SelectedRows[0];
             Rectangle rowBounds = grid.GetCellDisplayRectangle(0, row.Index, true);
-            inlinePreviewButton.Left = Math.Max(8, grid.ClientSize.Width - inlinePreviewButton.Width - 18);
+            DataGridViewColumn lastVisibleColumn = null;
+            for (int i = grid.Columns.Count - 1; i >= 0; i--)
+            {
+                if (grid.Columns[i].Visible)
+                {
+                    lastVisibleColumn = grid.Columns[i];
+                    break;
+                }
+            }
+            if (lastVisibleColumn == null) return;
+            Rectangle lastColumnBounds = grid.GetCellDisplayRectangle(lastVisibleColumn.Index, row.Index, true);
+            inlinePreviewButton.Left = Math.Max(8, lastColumnBounds.Right - inlinePreviewButton.Width - 2);
             inlinePreviewButton.Top = Math.Max(grid.ColumnHeadersHeight + 1, rowBounds.Top);
             inlinePreviewButton.Height = Math.Max(1, rowBounds.Height);
             inlinePreviewButton.BringToFront();

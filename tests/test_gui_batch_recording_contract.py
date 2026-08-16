@@ -32,10 +32,20 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
 
     def test_vdm_queue_records_and_stops_each_clip(self):
         self.assertIn(r'factory \"SkipAhead\"', self.batch)
-        self.assertIn('mirv_streams record screen settings afxFfmpegLosslessBest', self.batch)
+        self.assertIn('mirv_streams record screen settings ', self.batch)
         self.assertIn('mirv_streams record start', self.batch)
         self.assertIn('mirv_streams record end; host_framerate 0', self.batch)
         self.assertIn('playdemo ', self.batch)
+
+    def test_lawena_style_output_choices_are_exposed(self):
+        self.assertIn('TGA image sequence', self.program)
+        self.assertIn('JPG image sequence', self.program)
+        self.assertIn('MP4 - standard', self.program)
+        self.assertIn('MP4 - lossless', self.program)
+        self.assertIn('AVI - raw', self.program)
+        self.assertIn('afxClassic', self.batch)
+        self.assertIn('afxFfmpegLosslessBest', self.batch)
+        self.assertIn('frame_%06d.jpg', self.batch)
 
 
 if __name__ == "__main__":

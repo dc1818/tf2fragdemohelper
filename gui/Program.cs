@@ -489,6 +489,8 @@ namespace Tf2StvParserGui
         private readonly NumericUpDown leadInSeconds = new NumericUpDown();
         private readonly NumericUpDown outroSeconds = new NumericUpDown();
         private readonly NumericUpDown recordingFps = new NumericUpDown();
+        private readonly NumericUpDown jpgQuality = new NumericUpDown();
+        private readonly ComboBox recordingOutput = new ComboBox();
         private readonly Button launchButton = GreenButton("Open selected in TF2", 165);
         private readonly Button selectAllButton = GreenButton("Select all visible", 135);
         private readonly Button recordButton = GreenButton("Record selected with HLAE", 205);
@@ -539,15 +541,16 @@ namespace Tf2StvParserGui
             layout.Padding = new Padding(14);
             layout.ColumnCount = 1;
             layout.RowCount = 2;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 152));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(layout);
 
             TableLayoutPanel filters = new TableLayoutPanel();
             filters.Dock = DockStyle.Fill;
             filters.ColumnCount = 1;
-            filters.RowCount = 3;
+            filters.RowCount = 4;
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+            filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             FlowLayoutPanel heading = new FlowLayoutPanel();
@@ -635,13 +638,47 @@ namespace Tf2StvParserGui
             launchButton.Margin = new Padding(0, 3, 2, 2);
             launchButton.Click += delegate { LaunchSelectedCandidate(); };
             playbackControls.Controls.Add(launchButton);
+            filters.Controls.Add(playbackControls, 0, 2);
+
+            FlowLayoutPanel recordingControls = new FlowLayoutPanel();
+            recordingControls.Dock = DockStyle.Fill;
+            recordingControls.FlowDirection = FlowDirection.LeftToRight;
+            recordingControls.WrapContents = false;
+            Label outputLabel = new Label();
+            outputLabel.Text = "Recording output";
+            outputLabel.AutoSize = true;
+            outputLabel.Margin = new Padding(14, 9, 4, 2);
+            recordingControls.Controls.Add(outputLabel);
+            recordingOutput.DropDownStyle = ComboBoxStyle.DropDownList;
+            recordingOutput.Width = 180;
+            recordingOutput.Items.Add("TGA image sequence");
+            recordingOutput.Items.Add("JPG image sequence");
+            recordingOutput.Items.Add("MP4 - standard");
+            recordingOutput.Items.Add("MP4 - compatible");
+            recordingOutput.Items.Add("MP4 - lossless");
+            recordingOutput.Items.Add("AVI - raw");
+            recordingOutput.SelectedIndex = 0;
+            recordingOutput.Margin = new Padding(0, 5, 10, 2);
+            recordingOutput.SelectedIndexChanged += delegate { UpdateOutputDescription(); };
+            recordingControls.Controls.Add(recordingOutput);
+            Label jpgLabel = new Label();
+            jpgLabel.Text = "JPG quality";
+            jpgLabel.AutoSize = true;
+            jpgLabel.Margin = new Padding(3, 9, 4, 2);
+            recordingControls.Controls.Add(jpgLabel);
+            jpgQuality.Width = 50;
+            jpgQuality.Minimum = 1;
+            jpgQuality.Maximum = 100;
+            jpgQuality.Value = 90;
+            jpgQuality.Margin = new Padding(0, 5, 14, 2);
+            recordingControls.Controls.Add(jpgQuality);
             selectAllButton.Margin = new Padding(4, 3, 2, 2);
             selectAllButton.Click += delegate { SelectAllVisibleCandidates(); };
-            playbackControls.Controls.Add(selectAllButton);
+            recordingControls.Controls.Add(selectAllButton);
             recordButton.Margin = new Padding(4, 3, 2, 2);
             recordButton.Click += delegate { RecordSelectedCandidates(); };
-            playbackControls.Controls.Add(recordButton);
-            filters.Controls.Add(playbackControls, 0, 2);
+            recordingControls.Controls.Add(recordButton);
+            filters.Controls.Add(recordingControls, 0, 3);
             layout.Controls.Add(filters, 0, 0);
 
             SplitContainer split = new SplitContainer();
@@ -691,6 +728,7 @@ namespace Tf2StvParserGui
             details.Font = new Font("Consolas", 10F);
             details.TextChanged += delegate { ScrollDetailsToBottom(); };
             split.Panel2.Controls.Add(details);
+            UpdateOutputDescription();
         }
 
         private void AddColumn(string name, int width)
@@ -932,14 +970,26 @@ namespace Tf2StvParserGui
             {
                 if (String.IsNullOrEmpty(tf2Executable) && selected.Count > 0)
                     FindTf2ExecutableNearDemo(BatchCandidateSupport.CandidateDemoPath(selected[0], demoPath));
-                HlaeBatchRecorder.Launch(this, selected, demoPath, tf2Executable, leadInSeconds.Value, outroSeconds.Value, (int)recordingFps.Value);
-                details.AppendText("\r\nHLAE batch prepared for " + selected.Count + " selected candidate(s). The launch is offline-only (-insecure, sv_lan 1).\r\n");
+                HlaeRecordingOutput output = HlaeRecordingOutputs.FromDisplayName(Convert.ToString(recordingOutput.SelectedItem));
+                HlaeBatchRecorder.Launch(this, selected, demoPath, tf2Executable, leadInSeconds.Value, outroSeconds.Value, (int)recordingFps.Value, output, (int)jpgQuality.Value);
+                details.AppendText("\r\nHLAE batch prepared for " + selected.Count + " selected candidate(s) as " + HlaeRecordingOutputs.DisplayName(output) + ". The launch is offline-only (-insecure, sv_lan 1).\r\n");
                 ScrollDetailsToBottom();
             }
             catch (Exception error)
             {
                 MessageBox.Show(this, "Could not prepare HLAE batch recording:\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        private void UpdateOutputDescription()
+        {
+            HlaeRecordingOutput output = HlaeRecordingOutputs.FromDisplayName(Convert.ToString(recordingOutput.SelectedItem));
+            bool jpg = output == HlaeRecordingOutput.JpgSequence;
+            jpgQuality.Enabled = jpg;
+            string note = HlaeRecordingOutputs.DisplayName(output) + " -> " + HlaeRecordingOutputs.ExpectedFiles(output);
+            if (HlaeRecordingOutputs.RequiresFfmpeg(output)) note += " (requires HLAE FFmpeg)";
+            if (jpg) note += " (1 is highest quality; 90 is the default)";
+            summary.Text = note;
         }
 
         private static string WritePlaybackVdm(string gameDirectory, string stagedDemo, int targetTick, int stvAttackerUserId)

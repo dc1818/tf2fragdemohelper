@@ -499,6 +499,7 @@ namespace Tf2StvParserGui
         private string demoPath;
         private string tf2Executable;
         private bool detailsScrollPending;
+        private int clickedSelectedRow = -1;
 
         public event EventHandler BackRequested;
 
@@ -532,6 +533,14 @@ namespace Tf2StvParserGui
             ForeColor = Color.Gainsboro;
             BuildPage();
             LoadCandidates();
+            Shown += delegate
+            {
+                BeginInvoke(new MethodInvoker(delegate
+                {
+                    ClearCandidateSelection();
+                    ScrollDetailsToBottom();
+                }));
+            };
         }
 
         private void BuildPage()
@@ -715,7 +724,8 @@ namespace Tf2StvParserGui
             AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 300);
             grid.SelectionChanged += ShowSelectedCandidate;
-            grid.CellDoubleClick += delegate { LaunchSelectedCandidate(); };
+            grid.CellMouseDown += RememberSelectedRowClick;
+            grid.CellClick += ToggleClickedSelectedRow;
             split.Panel1.Controls.Add(grid);
 
             details.Dock = DockStyle.Fill;
@@ -727,6 +737,7 @@ namespace Tf2StvParserGui
             details.ForeColor = Color.FromArgb(218, 224, 230);
             details.Font = new Font("Consolas", 10F);
             details.TextChanged += delegate { ScrollDetailsToBottom(); };
+            details.HandleCreated += delegate { ScrollDetailsToBottom(); };
             split.Panel2.Controls.Add(details);
             UpdateOutputDescription();
             UpdateCandidateActionAvailability();
@@ -836,8 +847,7 @@ namespace Tf2StvParserGui
                 visible++;
             }
             summary.Text = visible + " of " + records.Count + " ranked candidates. Select one or more rows before recording.";
-            grid.ClearSelection();
-            grid.CurrentCell = null;
+            ClearCandidateSelection();
             if (grid.Rows.Count == 0)
                 details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
             else
@@ -956,6 +966,29 @@ namespace Tf2StvParserGui
             grid.ClearSelection();
             foreach (DataGridViewRow row in grid.Rows) row.Selected = true;
             summary.Text = grid.SelectedRows.Count + " candidate(s) selected for batch recording.";
+            UpdateCandidateActionAvailability();
+        }
+
+        private void ClearCandidateSelection()
+        {
+            grid.ClearSelection();
+            grid.CurrentCell = null;
+            UpdateCandidateActionAvailability();
+        }
+
+        private void RememberSelectedRowClick(object sender, DataGridViewCellMouseEventArgs e)
+        {
+            clickedSelectedRow = -1;
+            if (e.RowIndex < 0 || e.Button != MouseButtons.Left || ModifierKeys != Keys.None) return;
+            if (grid.Rows[e.RowIndex].Selected) clickedSelectedRow = e.RowIndex;
+        }
+
+        private void ToggleClickedSelectedRow(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex != clickedSelectedRow) return;
+            clickedSelectedRow = -1;
+            grid.Rows[e.RowIndex].Selected = false;
+            if (grid.SelectedRows.Count == 0) grid.CurrentCell = null;
             UpdateCandidateActionAvailability();
         }
 

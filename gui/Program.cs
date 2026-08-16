@@ -51,6 +51,7 @@ namespace Tf2StvParserGui
         private string lastExport;
         private readonly List<string> selectedDemos = new List<string>();
         private string demoSelectionDisplay = "";
+        private string autoDetectedSchemaPath = "";
 
         public MainForm()
         {
@@ -128,7 +129,7 @@ namespace Tf2StvParserGui
             browseOutput.Click += BrowseOutput;
             parserLayout.Controls.Add(browseOutput, 2, 1);
 
-            parserLayout.Controls.Add(Label("Item schema (optional)"), 0, 2);
+            parserLayout.Controls.Add(Label("Item schema (auto-detected when possible)"), 0, 2);
             schemaBox.Dock = DockStyle.Fill;
             parserLayout.Controls.Add(schemaBox, 1, 2);
             Button browseSchema = GreenButton("Select schema", 145);
@@ -455,6 +456,45 @@ namespace Tf2StvParserGui
                 ? selectedDemos[0]
                 : selectedDemos.Count + " demos selected: " + String.Join(" | ", selectedDemos.ConvertAll(Path.GetFileName).ToArray());
             demoBox.Text = demoSelectionDisplay;
+            UpdateAutoDetectedItemSchema();
+        }
+
+        private void UpdateAutoDetectedItemSchema()
+        {
+            string current = schemaBox.Text.Trim();
+            if (!String.IsNullOrEmpty(current) && !String.Equals(current, autoDetectedSchemaPath, StringComparison.OrdinalIgnoreCase)) return;
+            string detected = DetectItemSchemaForSelectedDemos();
+            schemaBox.Text = detected ?? "";
+            autoDetectedSchemaPath = detected ?? "";
+        }
+
+        private string DetectItemSchemaForSelectedDemos()
+        {
+            string detected = null;
+            foreach (string demo in selectedDemos)
+            {
+                string candidate = ItemSchemaBesideTfDemos(demo);
+                if (String.IsNullOrEmpty(candidate)) return null;
+                if (detected == null) detected = candidate;
+                else if (!String.Equals(detected, candidate, StringComparison.OrdinalIgnoreCase)) return null;
+            }
+            return detected;
+        }
+
+        private static string ItemSchemaBesideTfDemos(string demoPath)
+        {
+            DirectoryInfo directory = new FileInfo(demoPath).Directory;
+            while (directory != null)
+            {
+                if (String.Equals(directory.Name, "demos", StringComparison.OrdinalIgnoreCase) &&
+                    directory.Parent != null && String.Equals(directory.Parent.Name, "tf", StringComparison.OrdinalIgnoreCase))
+                {
+                    string schema = Path.Combine(directory.Parent.FullName, "scripts", "items", "items_game.txt");
+                    return File.Exists(schema) ? schema : null;
+                }
+                directory = directory.Parent;
+            }
+            return null;
         }
 
         private List<string> SelectedDemoPaths()

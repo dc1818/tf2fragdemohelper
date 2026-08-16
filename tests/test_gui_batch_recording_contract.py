@@ -117,6 +117,14 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('FindFfmpegNearHlae', self.batch)
         self.assertIn('Select ffmpeg.exe at the top of the setup window.', self.batch)
 
+    def test_item_schema_field_is_filled_only_for_tf_demos(self):
+        self.assertIn('UpdateAutoDetectedItemSchema();', self.program)
+        self.assertIn('DetectItemSchemaForSelectedDemos', self.program)
+        self.assertIn('ItemSchemaBesideTfDemos', self.program)
+        self.assertIn('directory.Name, "demos"', self.program)
+        self.assertIn('directory.Parent.Name, "tf"', self.program)
+        self.assertIn('Item schema (auto-detected when possible)', self.program)
+
     def test_movie_settings_are_exposed(self):
         for label in (
             '"Resolution"', '"DX level"', '"Skybox"', '"HUD"', '"Viewmodels"',

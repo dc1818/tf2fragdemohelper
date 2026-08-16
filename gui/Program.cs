@@ -903,6 +903,7 @@ namespace Tf2StvParserGui
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
+            FitCandidateColumnsToContent();
             summary.Text = visible + " of " + records.Count + " ranked candidates. Select one or more rows before recording.";
             ClearCandidateSelection();
             if (grid.Rows.Count == 0)
@@ -910,6 +911,19 @@ namespace Tf2StvParserGui
             else
                 details.Clear();
             UpdateCandidateActionAvailability();
+        }
+
+        private void FitCandidateColumnsToContent()
+        {
+            foreach (DataGridViewColumn column in grid.Columns)
+            {
+                if (!column.Visible) continue;
+                int contentWidth = column.GetPreferredWidth(DataGridViewAutoSizeColumnMode.AllCells, true) + 8;
+                int minimumWidth = Math.Max(column.Width, contentWidth);
+                column.MinimumWidth = minimumWidth;
+                column.Width = minimumWidth;
+            }
+            PositionPreviewButton();
         }
 
         private void LaunchSelectedCandidate()

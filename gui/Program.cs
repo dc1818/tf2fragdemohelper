@@ -706,13 +706,13 @@ namespace Tf2StvParserGui
             recordingControls.Controls.Add(outputLabel);
             recordingOutput.DropDownStyle = ComboBoxStyle.DropDownList;
             recordingOutput.Width = 180;
-            recordingOutput.Items.Add("TGA image sequence");
-            recordingOutput.Items.Add("JPG image sequence");
-            recordingOutput.Items.Add("MP4 - standard");
-            recordingOutput.Items.Add("MP4 - compatible");
-            recordingOutput.Items.Add("MP4 - lossless");
-            recordingOutput.Items.Add("AVI - raw");
-            recordingOutput.SelectedIndex = 0;
+            recordingOutput.Items.Add("TGA Image Sequence");
+            recordingOutput.Items.Add("JPG Image Sequence");
+            recordingOutput.Items.Add("MP4 - Standard");
+            recordingOutput.Items.Add("MP4 - Compatible");
+            recordingOutput.Items.Add("MP4 - Lossless");
+            recordingOutput.Items.Add("AVI - Raw");
+            recordingOutput.SelectedIndex = 2;
             recordingOutput.Margin = new Padding(0, 5, 10, 2);
             recordingOutput.SelectedIndexChanged += delegate { UpdateOutputDescription(); };
             recordingControls.Controls.Add(recordingOutput);
@@ -752,6 +752,8 @@ namespace Tf2StvParserGui
             grid.MultiSelect = true;
             grid.AutoGenerateColumns = false;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
+            grid.AllowUserToOrderColumns = true;
+            grid.AllowUserToResizeColumns = true;
             grid.BackgroundColor = Color.FromArgb(17, 18, 20);
             grid.GridColor = Color.FromArgb(62, 66, 72);
             grid.DefaultCellStyle.BackColor = Color.FromArgb(24, 26, 29);
@@ -769,12 +771,14 @@ namespace Tf2StvParserGui
             AddColumn("Team", 72);
             AddColumn("Demo", 170);
             AddColumn("Exact kill-event ticks", 175);
-            AddColumn("Tags", 300);
+            AddColumn("Tags", 400);
             grid.SelectionChanged += ShowSelectedCandidate;
             grid.CellMouseDown += RememberSelectedRowClick;
             grid.CellClick += ToggleClickedSelectedRow;
             grid.SizeChanged += delegate { PositionPreviewButton(); };
             grid.Scroll += delegate { PositionPreviewButton(); };
+            grid.ColumnWidthChanged += delegate { PositionPreviewButton(); };
+            grid.ColumnDisplayIndexChanged += delegate { PositionPreviewButton(); };
             split.Panel1.Controls.Add(grid);
             inlinePreviewButton.Visible = false;
             inlinePreviewButton.Click += delegate { LaunchSelectedCandidate(); };
@@ -1060,17 +1064,18 @@ namespace Tf2StvParserGui
             DataGridViewRow row = grid.SelectedRows[0];
             Rectangle rowBounds = grid.GetCellDisplayRectangle(0, row.Index, true);
             DataGridViewColumn lastVisibleColumn = null;
-            for (int i = grid.Columns.Count - 1; i >= 0; i--)
+            for (int i = 0; i < grid.Columns.Count; i++)
             {
-                if (grid.Columns[i].Visible)
+                if (grid.Columns[i].Visible && (lastVisibleColumn == null || grid.Columns[i].DisplayIndex > lastVisibleColumn.DisplayIndex))
                 {
                     lastVisibleColumn = grid.Columns[i];
-                    break;
                 }
             }
             if (lastVisibleColumn == null) return;
             Rectangle lastColumnBounds = grid.GetCellDisplayRectangle(lastVisibleColumn.Index, row.Index, true);
-            inlinePreviewButton.Left = Math.Max(8, lastColumnBounds.Right - inlinePreviewButton.Width - 2);
+            int preferredLeft = lastColumnBounds.Right + 2;
+            int rightLimit = grid.ClientSize.Width - inlinePreviewButton.Width - 2;
+            inlinePreviewButton.Left = Math.Max(8, Math.Min(preferredLeft, rightLimit));
             inlinePreviewButton.Top = Math.Max(grid.ColumnHeadersHeight + 1, rowBounds.Top);
             inlinePreviewButton.Height = Math.Max(1, rowBounds.Height);
             inlinePreviewButton.BringToFront();

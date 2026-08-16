@@ -53,7 +53,10 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('Preview Selected in TF2', self.program)
         self.assertIn('PositionPreviewButton();', self.program)
         self.assertIn('inlinePreviewButton.Height = Math.Max(1, rowBounds.Height);', self.program)
-        self.assertIn('lastColumnBounds.Right - inlinePreviewButton.Width - 2', self.program)
+        self.assertIn('lastColumnBounds.Right + 2', self.program)
+        self.assertIn('grid.Columns[i].DisplayIndex > lastVisibleColumn.DisplayIndex', self.program)
+        self.assertIn('grid.ColumnWidthChanged += delegate { PositionPreviewButton(); };', self.program)
+        self.assertIn('grid.ColumnDisplayIndexChanged += delegate { PositionPreviewButton(); };', self.program)
 
     def test_candidate_rows_toggle_off_and_double_click_does_not_preview(self):
         self.assertIn('grid.CellMouseDown += RememberSelectedRowClick;', self.program)
@@ -112,11 +115,12 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertNotIn('-noConfig', self.batch)
 
     def test_movie_output_choices_are_exposed(self):
-        self.assertIn('TGA image sequence', self.program)
-        self.assertIn('JPG image sequence', self.program)
-        self.assertIn('MP4 - standard', self.program)
-        self.assertIn('MP4 - lossless', self.program)
-        self.assertIn('AVI - raw', self.program)
+        self.assertIn('TGA Image Sequence', self.program)
+        self.assertIn('JPG Image Sequence', self.program)
+        self.assertIn('MP4 - Standard', self.program)
+        self.assertIn('MP4 - Lossless', self.program)
+        self.assertIn('AVI - Raw', self.program)
+        self.assertIn('recordingOutput.SelectedIndex = 2;', self.program)
         self.assertIn('afxClassic', self.batch)
         self.assertIn('afxFfmpegLosslessBest', self.batch)
         self.assertIn('startmovie " + captureBaseName + " raw', self.batch)

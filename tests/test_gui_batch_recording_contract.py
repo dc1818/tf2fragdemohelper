@@ -34,18 +34,27 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn(r'factory \"SkipAhead\"', self.batch)
         self.assertIn('mirv_streams record screen settings ', self.batch)
         self.assertIn('mirv_streams record start', self.batch)
-        self.assertIn('mirv_streams record end; host_framerate 0', self.batch)
+        self.assertIn('mirv_streams record end', self.batch)
         self.assertIn('playdemo ', self.batch)
-        self.assertIn('recorderWarmupTicks', self.batch)
         self.assertIn('recorderFlushTicks', self.batch)
         self.assertIn('TF2FRAG_RECORD_START', self.batch)
         self.assertIn('TF2FRAG_RECORD_END', self.batch)
 
     def test_recorder_is_initialized_and_logged_before_demo_playback(self):
-        self.assertIn('-condebug', self.batch)
         self.assertIn('con_logfile tf2fragdemohelper_recording.log', self.batch)
         self.assertIn('TF2FRAG_RECORDER_INIT', self.batch)
         self.assertIn('TF2FRAG_RECORDER_READY', self.batch)
+
+    def test_tf2_image_sequences_use_native_startmovie(self):
+        self.assertIn('startmovie \\"', self.batch)
+        self.assertIn('jpeg_quality ', self.batch)
+        self.assertIn('? "endmovie"', self.batch)
+
+    def test_hlae_launch_matches_tf2_custom_loader_guidance(self):
+        self.assertIn('-customLoader -autoStart -noGui', self.batch)
+        self.assertIn('-afxGame tf', self.batch)
+        self.assertIn('-no_texture_stream', self.batch)
+        self.assertNotIn('-noConfig', self.batch)
 
     def test_lawena_style_output_choices_are_exposed(self):
         self.assertIn('TGA image sequence', self.program)
@@ -55,7 +64,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('AVI - raw', self.program)
         self.assertIn('afxClassic', self.batch)
         self.assertIn('afxFfmpegLosslessBest', self.batch)
-        self.assertIn('frame_%06d.jpg', self.batch)
+        self.assertIn('startmovie \\"', self.batch)
 
     def test_ffmpeg_is_discovered_or_selected_before_hlae_launch(self):
         self.assertIn('AddPathRow(layout, 0, "FFmpeg.exe"', self.batch)

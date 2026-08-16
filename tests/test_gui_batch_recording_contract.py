@@ -123,7 +123,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('ItemSchemaBesideTfDemos', self.program)
         self.assertIn('directory.Name, "demos"', self.program)
         self.assertIn('directory.Parent.Name, "tf"', self.program)
-        self.assertIn('Item schema (auto-detected when possible)', self.program)
+        self.assertIn('Item schema (optional)', self.program)
 
     def test_movie_settings_are_exposed(self):
         for label in (
@@ -152,6 +152,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('particles/particles_manifest.txt', self.profile)
         self.assertIn('ExtractParticleFiles', self.profile)
         self.assertIn('Directory.CreateDirectory(Path.Combine(destination, "particles"))', self.profile)
+        self.assertIn('CopyPackagedParticleFiles(root, profileRoot, selected)', self.profile)
         self.assertIn('InstallSkybox', self.profile)
         self.assertIn('CopyHud', self.profile)
 

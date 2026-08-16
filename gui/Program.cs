@@ -129,7 +129,7 @@ namespace Tf2StvParserGui
             browseOutput.Click += BrowseOutput;
             parserLayout.Controls.Add(browseOutput, 2, 1);
 
-            parserLayout.Controls.Add(Label("Item schema (auto-detected when possible)"), 0, 2);
+            parserLayout.Controls.Add(Label("Item schema (optional)"), 0, 2);
             schemaBox.Dock = DockStyle.Fill;
             parserLayout.Controls.Add(schemaBox, 1, 2);
             Button browseSchema = GreenButton("Select schema", 145);

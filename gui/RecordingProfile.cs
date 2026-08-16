@@ -929,7 +929,8 @@ namespace Tf2StvParserGui
                 string vpk = Path.Combine(root, "custom", "pldx_particles.vpk");
                 if (!File.Exists(vpk)) throw new FileNotFoundException("The included enhanced-particle VPK was not found.", vpk);
                 IList<string> selected = settings.EnhancedParticleFiles.Count == 0 ? (IList<string>)EnhancedParticlesForm.ParticleFiles : settings.EnhancedParticleFiles;
-                ExtractParticleFiles(settings.Tf2Executable, vpk, profileRoot, selected);
+                if (!CopyPackagedParticleFiles(root, profileRoot, selected))
+                    ExtractParticleFiles(settings.Tf2Executable, vpk, profileRoot, selected);
             }
 
             if (!String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase))
@@ -978,6 +979,27 @@ namespace Tf2StvParserGui
             string source = Path.Combine(resourcesRoot, "hud", hudName);
             if (!Directory.Exists(source)) throw new DirectoryNotFoundException("The selected recording HUD was not found: " + source);
             CopyDirectory(source, profileRoot);
+        }
+
+        private static bool CopyPackagedParticleFiles(string resourcesRoot, string destination, IList<string> files)
+        {
+            string sourceRoot = Path.Combine(resourcesRoot, "particles");
+            foreach (string file in files)
+            {
+                string relative = file.StartsWith("particles/", StringComparison.OrdinalIgnoreCase) ? file.Substring("particles/".Length) : file;
+                if (!File.Exists(Path.Combine(sourceRoot, relative))) return false;
+            }
+            string target = Path.Combine(destination, "particles");
+            Directory.CreateDirectory(target);
+            string manifest = Path.Combine(sourceRoot, "particles_manifest.txt");
+            if (!File.Exists(manifest)) return false;
+            File.Copy(manifest, Path.Combine(target, "particles_manifest.txt"), true);
+            foreach (string file in files)
+            {
+                string relative = file.StartsWith("particles/", StringComparison.OrdinalIgnoreCase) ? file.Substring("particles/".Length) : file;
+                File.Copy(Path.Combine(sourceRoot, relative), Path.Combine(target, relative), true);
+            }
+            return true;
         }
 
         private static void ExtractParticleFiles(string tf2Executable, string vpk, string destination, IList<string> files)

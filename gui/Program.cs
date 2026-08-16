@@ -733,6 +733,10 @@ namespace Tf2StvParserGui
             recordButton.Margin = new Padding(4, 3, 2, 2);
             recordButton.Click += delegate { RecordSelectedCandidates(); };
             recordingControls.Controls.Add(recordButton);
+            inlinePreviewButton.Margin = new Padding(4, 3, 2, 2);
+            inlinePreviewButton.Visible = false;
+            inlinePreviewButton.Click += delegate { LaunchSelectedCandidate(); };
+            recordingControls.Controls.Add(inlinePreviewButton);
             filters.Controls.Add(recordingControls, 0, 3);
             layout.Controls.Add(filters, 0, 0);
 
@@ -775,15 +779,7 @@ namespace Tf2StvParserGui
             grid.SelectionChanged += ShowSelectedCandidate;
             grid.CellMouseDown += RememberSelectedRowClick;
             grid.CellClick += ToggleClickedSelectedRow;
-            grid.SizeChanged += delegate { PositionPreviewButton(); };
-            grid.Scroll += delegate { PositionPreviewButton(); };
-            grid.ColumnWidthChanged += delegate { PositionPreviewButton(); };
-            grid.ColumnDisplayIndexChanged += delegate { PositionPreviewButton(); };
             split.Panel1.Controls.Add(grid);
-            inlinePreviewButton.Visible = false;
-            inlinePreviewButton.Click += delegate { LaunchSelectedCandidate(); };
-            split.Panel1.Controls.Add(inlinePreviewButton);
-            inlinePreviewButton.BringToFront();
 
             details.Dock = DockStyle.Fill;
             details.Multiline = true;
@@ -923,7 +919,6 @@ namespace Tf2StvParserGui
                 column.MinimumWidth = minimumWidth;
                 column.Width = minimumWidth;
             }
-            PositionPreviewButton();
         }
 
         private void LaunchSelectedCandidate()
@@ -1069,30 +1064,6 @@ namespace Tf2StvParserGui
             bool hasSelection = selectedCount > 0;
             recordButton.Enabled = hasSelection;
             inlinePreviewButton.Visible = selectedCount == 1;
-            PositionPreviewButton();
-        }
-
-        private void PositionPreviewButton()
-        {
-            if (!inlinePreviewButton.Visible || grid.SelectedRows.Count != 1) return;
-            DataGridViewRow row = grid.SelectedRows[0];
-            Rectangle rowBounds = grid.GetCellDisplayRectangle(0, row.Index, true);
-            DataGridViewColumn lastVisibleColumn = null;
-            for (int i = 0; i < grid.Columns.Count; i++)
-            {
-                if (grid.Columns[i].Visible && (lastVisibleColumn == null || grid.Columns[i].DisplayIndex > lastVisibleColumn.DisplayIndex))
-                {
-                    lastVisibleColumn = grid.Columns[i];
-                }
-            }
-            if (lastVisibleColumn == null) return;
-            Rectangle lastColumnBounds = grid.GetCellDisplayRectangle(lastVisibleColumn.Index, row.Index, true);
-            int preferredLeft = lastColumnBounds.Right + 2;
-            int rightLimit = grid.ClientSize.Width - inlinePreviewButton.Width - 2;
-            inlinePreviewButton.Left = Math.Max(8, Math.Min(preferredLeft, rightLimit));
-            inlinePreviewButton.Top = Math.Max(grid.ColumnHeadersHeight + 1, rowBounds.Top);
-            inlinePreviewButton.Height = Math.Max(1, rowBounds.Height);
-            inlinePreviewButton.BringToFront();
         }
 
         private void RecordSelectedCandidates()

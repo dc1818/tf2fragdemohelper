@@ -24,11 +24,11 @@ namespace Tf2StvParserGui
     {
         public static HlaeRecordingOutput FromDisplayName(string value)
         {
-            if (String.Equals(value, "JPG image sequence", StringComparison.Ordinal)) return HlaeRecordingOutput.JpgSequence;
-            if (String.Equals(value, "MP4 - standard", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Standard;
-            if (String.Equals(value, "MP4 - compatible", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Compatible;
-            if (String.Equals(value, "MP4 - lossless", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Lossless;
-            if (String.Equals(value, "AVI - raw", StringComparison.Ordinal)) return HlaeRecordingOutput.AviRaw;
+            if (String.Equals(value, "JPG Image Sequence", StringComparison.Ordinal)) return HlaeRecordingOutput.JpgSequence;
+            if (String.Equals(value, "MP4 - Standard", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Standard;
+            if (String.Equals(value, "MP4 - Compatible", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Compatible;
+            if (String.Equals(value, "MP4 - Lossless", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Lossless;
+            if (String.Equals(value, "AVI - Raw", StringComparison.Ordinal)) return HlaeRecordingOutput.AviRaw;
             return HlaeRecordingOutput.TgaSequence;
         }
 
@@ -36,12 +36,12 @@ namespace Tf2StvParserGui
         {
             switch (output)
             {
-                case HlaeRecordingOutput.JpgSequence: return "JPG image sequence";
-                case HlaeRecordingOutput.Mp4Standard: return "MP4 - standard";
-                case HlaeRecordingOutput.Mp4Compatible: return "MP4 - compatible";
-                case HlaeRecordingOutput.Mp4Lossless: return "MP4 - lossless";
-                case HlaeRecordingOutput.AviRaw: return "AVI - raw";
-                default: return "TGA image sequence";
+                case HlaeRecordingOutput.JpgSequence: return "JPG Image Sequence";
+                case HlaeRecordingOutput.Mp4Standard: return "MP4 - Standard";
+                case HlaeRecordingOutput.Mp4Compatible: return "MP4 - Compatible";
+                case HlaeRecordingOutput.Mp4Lossless: return "MP4 - Lossless";
+                case HlaeRecordingOutput.AviRaw: return "AVI - Raw";
+                default: return "TGA Image Sequence";
             }
         }
 

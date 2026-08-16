@@ -988,7 +988,7 @@ namespace Tf2StvParserGui
             jpgQuality.Enabled = jpg;
             string note = HlaeRecordingOutputs.DisplayName(output) + " -> " + HlaeRecordingOutputs.ExpectedFiles(output);
             if (HlaeRecordingOutputs.RequiresFfmpeg(output)) note += " (requires HLAE FFmpeg)";
-            if (jpg) note += " (1 is highest quality; 90 is the default)";
+            if (jpg) note += " (100 is highest quality; 90 is the default)";
             summary.Text = note;
         }
 

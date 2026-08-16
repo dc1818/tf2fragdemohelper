@@ -378,6 +378,7 @@ class StateTimeline:
         self.projectiles: Dict[int, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
         self.projectile_removals: Dict[int, List[int]] = defaultdict(list)
         self.sample_count = 0
+        self.ignored_out_of_range_samples = 0
 
     @staticmethod
     def _at(history: List[Tuple[int, Dict[str, Any]]], tick: int, require_alive: bool = False) -> Optional[Dict[str, Any]]:
@@ -466,7 +467,14 @@ class StateTimeline:
         return sorted(respawns)
 
 
-def read_state_timeline(path: Path, debug: bool = False) -> StateTimeline:
+def read_state_timeline(path: Path, debug: bool = False, max_demo_tick: Optional[int] = None) -> StateTimeline:
+    """Read state samples without letting a split-demo bootstrap tick poison state joins.
+
+    Some map-change continuations begin with a signon/bootstrap sample whose
+    ``demo_tick`` belongs to the preceding stream.  Prefer an explicit server
+    tick whenever one exists.  If it is absent, reject a demo tick outside the
+    current demo header's tick range instead of treating it as future state.
+    """
     timeline = StateTimeline()
     if not path.is_file():
         if debug:
@@ -482,7 +490,13 @@ def read_state_timeline(path: Path, debug: bool = False) -> StateTimeline:
                 record = json.loads(line)
             except json.JSONDecodeError as error:
                 raise ValueError("Invalid JSON on state_samples.ndjson line {}: {}".format(line_number, error))
-            tick = as_int(record.get("server_tick")) or as_int(record.get("demo_tick"))
+            server_tick_value = record.get("server_tick")
+            has_server_tick = server_tick_value is not None
+            demo_tick = as_int(record.get("demo_tick"))
+            tick = as_int(server_tick_value) if has_server_tick else demo_tick
+            if not has_server_tick and max_demo_tick is not None and not 0 <= demo_tick <= max_demo_tick:
+                timeline.ignored_out_of_range_samples += 1
+                continue
             timeline.sample_count += 1
             for player in record.get("players", []):
                 if not isinstance(player, dict):
@@ -507,8 +521,17 @@ def read_state_timeline(path: Path, debug: bool = False) -> StateTimeline:
                     timeline.projectiles[entity_id].append((tick, sample))
             for entity_id in record.get("removed_projectiles", []):
                 timeline.projectile_removals[as_int(entity_id)].append(tick)
+    # Packet exports are normally chronological, but a split-demo bootstrap
+    # sample can precede the new stream's tick zero.  Binary searches require
+    # the histories to be monotonic regardless of input order.
+    for history in timeline.players.values():
+        history.sort(key=lambda item: item[0])
+    for history in timeline.projectiles.values():
+        history.sort(key=lambda item: item[0])
+    for removals in timeline.projectile_removals.values():
+        removals.sort()
     if debug:
-        print("[candidate-debug] state timeline samples={} players={} projectiles={}".format(timeline.sample_count, len(timeline.players), len(timeline.projectiles)))
+        print("[candidate-debug] state timeline samples={} ignored_out_of_range={} players={} projectiles={}".format(timeline.sample_count, timeline.ignored_out_of_range_samples, len(timeline.players), len(timeline.projectiles)))
     return timeline
 
 
@@ -1739,8 +1762,9 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
         if 0 <= objective["event_tick"] - kills[-1]["event_tick"] <= OBJECTIVE_CONVERSION_TICKS
         and objective.get("team", 0) == attacker_team
     ]
-    # A point capture is the strongest event-only proof that the fight was
-    # converted. Payload progress can be emitted more than once while a cart
+    # A point capture after the final kill is proof that the sequence secured
+    # the cap; it is not evidence that the kill occurred while on the point.
+    # Payload progress can be emitted more than once while a cart
     # moves, so score at most one of those signals and never stack it on a
     # completed capture from the same short sequence.
     point_capture = next((item for item in objective_followups if item["kind"] == "point_capture"), None)
@@ -1758,10 +1782,10 @@ def score_candidate(kills: List[Dict[str, Any]], round_data: Dict[str, Any], bui
     objective_conversion_kind = ""
     if point_capture is not None:
         objective_score = 24.0
-        objective_conversion_kind = "point_capture"
+        objective_conversion_kind = "kills_to_secure_cap"
         score += objective_score
-        tags.add("objective_capture_followup")
-        breakdown.append({"reason": "kill_sequence_led_to_point_capture", "points": objective_score, "event_tick": point_capture["event_tick"], "point": point_capture.get("point"), "point_name": point_capture.get("point_name")})
+        tags.add("kills_to_secure_cap")
+        breakdown.append({"reason": "kills_to_secure_cap", "points": objective_score, "event_tick": point_capture["event_tick"], "point": point_capture.get("point"), "point_name": point_capture.get("point_name")})
     elif capture_denial is not None:
         objective_score = 20.0
         objective_conversion_kind = "capture_denial"
@@ -1968,7 +1992,13 @@ def main() -> int:
     if not events_path.is_file():
         raise FileNotFoundError("events.ndjson is missing. Rebuild and run the updated parser first: {}".format(events_path))
     events = read_events(events_path)
-    state_timeline = read_state_timeline(export_directory / "state_samples.ndjson", arguments.debug)
+    header = read_json_if_present(export_directory / "header.json")
+    header_ticks = as_int(header.get("ticks"))
+    state_timeline = read_state_timeline(
+        export_directory / "state_samples.ndjson",
+        arguments.debug,
+        max_demo_tick=header_ticks if header_ticks > 0 else None,
+    )
     teams = player_team_history(events)
     rounds = build_rounds(events, state_timeline, teams)
     classes = class_history(events)
@@ -1997,6 +2027,7 @@ def main() -> int:
         "live_round_building_destructions": len(building_destructions),
         "live_round_objective_events": len(objective_events),
         "state_sample_count": state_timeline.sample_count,
+        "state_samples_ignored_out_of_range": state_timeline.ignored_out_of_range_samples,
         "state_backed_analysis": state_timeline.sample_count > 0,
         "candidate_count": len(candidates),
         "limitations": [

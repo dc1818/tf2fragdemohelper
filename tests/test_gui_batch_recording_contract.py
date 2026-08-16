@@ -47,6 +47,11 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('afxFfmpegLosslessBest', self.batch)
         self.assertIn('frame_%06d.jpg', self.batch)
 
+    def test_ffmpeg_is_discovered_or_selected_before_hlae_launch(self):
+        self.assertIn('AddPathRow(layout, 0, "FFmpeg.exe"', self.batch)
+        self.assertIn('FindFfmpegNearHlae', self.batch)
+        self.assertIn('Select ffmpeg.exe at the top of the setup window.', self.batch)
+
 
 if __name__ == "__main__":
     unittest.main()

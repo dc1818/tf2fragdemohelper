@@ -315,9 +315,15 @@ def discover_item_schema(export_directory: Path, explicit_path: Optional[Path] =
     source_demo = as_text(manifest.get("source_demo"))
     if source_demo:
         demo_path = Path(source_demo).expanduser()
+        # Only infer the live TF2 schema when the demo is actually stored in
+        # that installation's tf/demos tree.  An arbitrary uploaded demo can
+        # share parent folder names with a TF2 install, so it must not cause us
+        # to reach outside the selected input; the explicit schema option is
+        # still available for that case.
         for parent in [demo_path.parent, *demo_path.parents]:
-            candidates.append(parent / "scripts" / "items" / "items_game.txt")
-            candidates.append(parent / "tf" / "scripts" / "items" / "items_game.txt")
+            if parent.name.lower() == "demos" and parent.parent.name.lower() == "tf":
+                candidates.append(parent.parent / "scripts" / "items" / "items_game.txt")
+                break
 
     seen = set()
     for candidate in candidates:

@@ -383,6 +383,23 @@ class RoundStateTests(unittest.TestCase):
 
         self.assertEqual(discovered, schema.resolve())
 
+    def test_item_schema_is_not_inferred_for_demo_outside_tf_demos(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            schema = root / "tf" / "scripts" / "items" / "items_game.txt"
+            schema.parent.mkdir(parents=True)
+            schema.write_text('"items_game" { "prefabs" { } "items" { } }', encoding="utf-8")
+            demo = root / "uploads" / "match.dem"
+            demo.parent.mkdir()
+            demo.write_bytes(b"")
+            export = root / "export"
+            export.mkdir()
+            (export / "manifest.json").write_text(json.dumps({"source_demo": str(demo)}), encoding="utf-8")
+
+            discovered = ANALYZER.discover_item_schema(export)
+
+        self.assertIsNone(discovered)
+
     def test_non_melee_weapon_id_does_not_bypass_single_kill_filter(self):
         ranged = dict(
             self.kill(100, 2, "unknown_future_weapon"),

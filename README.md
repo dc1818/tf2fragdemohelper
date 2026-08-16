@@ -45,7 +45,7 @@ Class-specific direct-versus-splash confidence, reflects, headshot chains, garde
 4. Open `TF2_STV_Parser_GUI.exe`.
 5. Select or drag in a `.dem` file, choose an export location, then select **Parse STV demo**.
 
-The **Item schema (optional)** field can point directly to `items_game.txt`. Leave it blank for normal TF2 installations; the analyzer automatically follows the source demo path to `tf/scripts/items/items_game.txt`.
+The **Item schema (optional)** field can point directly to `items_game.txt`. Leave it blank when the selected demo is stored inside `tf/demos`: the analyzer then uses that installation's `tf/scripts/items/items_game.txt`. For demos uploaded from any other location, the field remains optional and no schema path is guessed; select `items_game.txt` only if you want schema-based weapon-slot classification.
 
 The first build compiles `parser/src/bin/export_all.rs` into `parser/target/release/export_all.exe` and compiles the Windows Forms GUI.
 
@@ -104,7 +104,7 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 Loose Cannon impact and explosion killfeed variants are normalized as Loose Cannon outcomes for projectile and Double Donk analysis; raw event weapon text remains available in the candidate evidence.
 Projectile matching separates recycled entity-ID lifetimes at removal, so a new projectile cannot inherit an earlier projectile's flight duration or path.
 
-Melee classification does not depend on a complete list of killfeed names. The analyzer locates TF2's current signed `tf/scripts/items/items_game.txt` from the demo path in `manifest.json`, resolves each `weapon_def_index` through inherited schema prefabs, and uses its authoritative `item_slot`. You can also put `items_game.txt` in the export folder, set `TF2_ITEM_SCHEMA`, or run `analyze_frags.py --item-schema PATH EXPORT_FOLDER`. If the current schema is unavailable, Valve's stable `ETFWeaponType` `weapon_id` and then the weapon name remain compatibility fallbacks. Every schema-resolved kill records `weapon_slot` and `weapon_slot_source: "item_schema"`; `frag_summary.json` reports whether the schema loaded and how many item slots were resolved.
+Melee classification does not depend on a complete list of killfeed names. When the demo is in `tf/demos`, the analyzer locates TF2's current signed `tf/scripts/items/items_game.txt`, resolves each `weapon_def_index` through inherited schema prefabs, and uses its authoritative `item_slot`. You can also put `items_game.txt` in the export folder, set `TF2_ITEM_SCHEMA`, or run `analyze_frags.py --item-schema PATH EXPORT_FOLDER`. If the current schema is unavailable, Valve's stable `ETFWeaponType` `weapon_id` and then the weapon name remain compatibility fallbacks. Every schema-resolved kill records `weapon_slot` and `weapon_slot_source: "item_schema"`; `frag_summary.json` reports whether the schema loaded and how many item slots were resolved.
 
 | Signal | Score |
 |---|---:|

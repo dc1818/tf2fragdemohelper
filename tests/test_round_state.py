@@ -122,6 +122,47 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(rounds[0]["end_tick"], 401)
         self.assertEqual(rounds[0]["end_reason"], "demo_end_while_event_confirmed_round_active")
 
+    def test_split_demo_round_is_finalized_at_eof_and_keeps_its_kills(self):
+        # Mirrors steelpub_2.dem: an earlier round closes at the next round
+        # start, while the actual map-change continuation ends mid-round.
+        events = [
+            {"tick": 247, "event_type": "teamplay_round_start", "event": {}},
+            {"tick": 577, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 2270, "event_type": "teamplay_round_start", "event": {}},
+            {"tick": 2601, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 19416, "event_type": "player_death", "event": {"attacker": 47, "user_id": 52, "weapon": "claidheamohmor"}},
+            {"tick": 19544, "event_type": "player_death", "event": {"attacker": 47, "user_id": 57, "weapon": "claidheamohmor"}},
+            {"tick": 19796, "event_type": "player_death", "event": {"attacker": 47, "user_id": 28, "weapon": "claidheamohmor"}},
+            {"tick": 19867, "event_type": "player_death", "event": {"attacker": 47, "user_id": 40, "weapon": "world"}},
+        ]
+
+        rounds = ANALYZER.build_rounds(events)
+        deaths = ANALYZER.normalized_deaths(events, rounds, {}, {}, {}, {"analysis_scope": "all_players"})
+
+        self.assertEqual(len(rounds), 2)
+        self.assertEqual(rounds[1]["live_start_tick"], 2601)
+        self.assertEqual(rounds[1]["end_tick"], 19868)
+        self.assertEqual(rounds[1]["end_reason"], "demo_end_while_event_confirmed_round_active")
+        self.assertEqual([death["event_tick"] for death in deaths], [19416, 19544, 19796, 19867])
+
+    def test_split_demo_out_of_range_fallback_tick_is_ignored_and_histories_sort(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_path = Path(temp) / "state_samples.ndjson"
+            records = [
+                # Bootstrap value from the prior stream: no server tick means
+                # it must not become future state in this 100-tick demo.
+                {"demo_tick": 188669, "players": [{"entity_id": 1, "user_id": 7, "team": "Red"}], "projectiles": [], "removed_projectiles": []},
+                {"demo_tick": 60, "players": [{"entity_id": 1, "user_id": 7, "team": "Blue"}], "projectiles": [], "removed_projectiles": []},
+                {"demo_tick": 50, "players": [{"entity_id": 1, "user_id": 7, "team": "Red"}], "projectiles": [], "removed_projectiles": []},
+            ]
+            state_path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+            timeline = ANALYZER.read_state_timeline(state_path, max_demo_tick=100)
+
+        self.assertEqual(timeline.sample_count, 2)
+        self.assertEqual(timeline.ignored_out_of_range_samples, 1)
+        self.assertEqual([tick for tick, _ in timeline.players[7]], [50, 60])
+        self.assertEqual(timeline.player_at(7, 55)["team"], "Red")
+
     def test_bare_map_initialization_active_event_remains_rejected(self):
         events = [
             {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
@@ -572,13 +613,13 @@ class RoundStateTests(unittest.TestCase):
         score, tags, metrics, breakdown = ANALYZER.score_candidate([kill], rounds[0], objective_events=objectives)
         self.assertEqual(metrics["point_capture_followups"], 1)
         self.assertEqual(metrics["payload_progress_followups"], 1)
-        self.assertIn("objective_capture_followup", tags)
+        self.assertIn("kills_to_secure_cap", tags)
         self.assertNotIn("payload_progress_followup", tags)
-        self.assertEqual(metrics["objective_conversion_kind"], "point_capture")
+        self.assertEqual(metrics["objective_conversion_kind"], "kills_to_secure_cap")
         self.assertEqual(score, 34.0)
         self.assertEqual(
             {item["reason"] for item in breakdown},
-            {"candidate_base", "kill_sequence_led_to_point_capture"},
+            {"candidate_base", "kills_to_secure_cap"},
         )
 
     def test_payload_progress_is_scored_once_without_a_capture(self):

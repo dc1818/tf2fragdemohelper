@@ -24,8 +24,10 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('Path.Combine(hlaeDirectory, "AfxHookSource.dll")', self.batch)
         self.assertIn('-force32bit', self.batch)
 
-    def test_particle_selector_only_lists_packaged_particles(self):
-        self.assertNotIn('particles/scary_ghost.pcf', self.profile)
+    def test_legacy_particle_override_is_not_exposed_or_installed(self):
+        self.assertNotIn('EnhancedParticles', self.profile)
+        self.assertNotIn('pldx_particles.vpk', self.profile)
+        self.assertNotIn('vpk.exe', self.profile)
 
     def test_recording_dialog_saves_preferences_when_cancelled(self):
         self.assertIn('dialog.FormClosing += delegate { SaveSettings(dialog.Settings); };', self.batch)
@@ -147,18 +149,11 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('new RowStyle(SizeType.Absolute, 170)', self.profile)
         self.assertIn('for (int row = 0; row < 4; row++) checks.RowStyles.Add', self.profile)
 
-    def test_custom_resources_particles_and_skyboxes_are_supported(self):
+    def test_custom_resources_and_skyboxes_are_supported(self):
         self.assertIn('Temporarily isolate custom resources', self.profile)
         self.assertIn('Disable announcer voices', self.profile)
         self.assertIn('Disable applause sounds', self.profile)
         self.assertIn('Disable domination/revenge sounds', self.profile)
-        self.assertIn('Enable enhanced particles', self.profile)
-        self.assertIn('particles/blood_impact.pcf', self.profile)
-        self.assertIn('particles/default.pcf', self.profile)
-        self.assertIn('particles/particles_manifest.txt', self.profile)
-        self.assertIn('ExtractParticleFiles', self.profile)
-        self.assertIn('Directory.CreateDirectory(Path.Combine(destination, "particles"))', self.profile)
-        self.assertIn('CopyPackagedParticleFiles(root, profileRoot, selected)', self.profile)
         self.assertIn('InstallSkybox', self.profile)
         self.assertIn('CopyHud', self.profile)
 
@@ -186,14 +181,12 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('RestoreDxLevel(session);', self.profile)
         self.assertIn('VerifyRestoredFiles(session);', self.profile)
         self.assertIn('FilesMatch(session.ConfigPath, session.BackupConfigPath)', self.profile)
-        self.assertIn('temporary recording resources, including enhanced particles, could not be removed', self.profile)
+        self.assertIn('The temporary recording resources could not be removed.', self.profile)
 
     def test_recording_resources_are_optional_sidecar_assets(self):
         self.assertIn('recording_resources', self.profile)
-        self.assertIn('pldx_particles.vpk', self.profile)
         self.assertIn('no_announcer_voices.vpk', self.profile)
-        self.assertIn('ExtractParticleFiles(settings.Tf2Executable', self.profile)
-        self.assertIn('Path.Combine(root, "bin", "vpk.exe")', self.profile)
+        self.assertIn('InstallSkybox(root, profileRoot, settings.Skybox)', self.profile)
 
     def test_parser_close_removes_only_helper_owned_recording_temporary_files(self):
         self.assertIn('demos", "tf2fragdemohelper_batch', self.batch)

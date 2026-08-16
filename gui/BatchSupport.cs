@@ -677,7 +677,6 @@ namespace Tf2StvParserGui
             movieProfile["viewmodels"] = settings.Viewmodels;
             movieProfile["viewmodel_fov"] = settings.ViewmodelFov;
             movieProfile["motion_blur"] = settings.MotionBlur;
-            movieProfile["enhanced_particles"] = settings.EnhancedParticles;
             movieProfile["isolated_custom_resources"] = settings.IsolateCustomResources;
             movieProfile["custom_resources"] = settings.CustomResources.ToArray();
             manifest["movie_profile"] = movieProfile;
@@ -735,9 +734,7 @@ namespace Tf2StvParserGui
                 settings.DisableAnnouncerVoices = DefaultBool(values, "disable_announcer_voices", settings.DisableAnnouncerVoices);
                 settings.DisableApplauseSounds = DefaultBool(values, "disable_applause_sounds", settings.DisableApplauseSounds);
                 settings.DisableDominationSounds = DefaultBool(values, "disable_domination_sounds", settings.DisableDominationSounds);
-                settings.EnhancedParticles = DefaultBool(values, "enhanced_particles", settings.EnhancedParticles);
                 ReadStringList(values, "custom_resources", settings.CustomResources);
-                ReadStringList(values, "enhanced_particle_files", settings.EnhancedParticleFiles);
             }
             catch { }
             return settings;
@@ -775,9 +772,7 @@ namespace Tf2StvParserGui
                 values["disable_announcer_voices"] = settings.DisableAnnouncerVoices;
                 values["disable_applause_sounds"] = settings.DisableApplauseSounds;
                 values["disable_domination_sounds"] = settings.DisableDominationSounds;
-                values["enhanced_particles"] = settings.EnhancedParticles;
                 values["custom_resources"] = settings.CustomResources.ToArray();
-                values["enhanced_particle_files"] = settings.EnhancedParticleFiles.ToArray();
                 File.WriteAllText(path, serializer.Serialize(values), new UTF8Encoding(false));
             }
             catch { }

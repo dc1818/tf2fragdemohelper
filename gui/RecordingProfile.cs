@@ -1,7 +1,6 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Text;
@@ -38,9 +37,7 @@ namespace Tf2StvParserGui
         public bool DisableAnnouncerVoices = true;
         public bool DisableApplauseSounds = true;
         public bool DisableDominationSounds = true;
-        public bool EnhancedParticles = false;
         public readonly List<string> CustomResources = new List<string>();
-        public readonly List<string> EnhancedParticleFiles = new List<string>();
     }
 
     internal sealed class HlaeRecordingSettingsForm : Form
@@ -69,10 +66,7 @@ namespace Tf2StvParserGui
         private readonly CheckBox announcer = Check("Disable announcer voices");
         private readonly CheckBox applause = Check("Disable applause sounds");
         private readonly CheckBox domination = Check("Disable domination/revenge sounds");
-        private readonly CheckBox enhancedParticles = Check("Enable enhanced particles");
         private readonly CheckedListBox customResources = new CheckedListBox();
-        private readonly Button particlesButton = new Button();
-        private readonly List<string> selectedParticleFiles = new List<string>();
         private readonly HlaeRecordingSettings initial;
 
         public HlaeRecordingSettings Settings
@@ -104,9 +98,7 @@ namespace Tf2StvParserGui
                 value.DisableAnnouncerVoices = announcer.Checked;
                 value.DisableApplauseSounds = applause.Checked;
                 value.DisableDominationSounds = domination.Checked;
-                value.EnhancedParticles = enhancedParticles.Checked;
                 foreach (object item in customResources.CheckedItems) value.CustomResources.Add(Convert.ToString(item));
-                value.EnhancedParticleFiles.AddRange(selectedParticleFiles);
                 return value;
             }
         }
@@ -181,7 +173,7 @@ namespace Tf2StvParserGui
             AddPathRow(layout, 2, "TF2 executable", tf2Box, BrowseTf2);
             AddPathRow(layout, 3, "Recording output", outputBox, BrowseOutput);
             AddPathRow(layout, 4, "Recording resources", recordingResourcesBox, BrowseRecordingResources);
-            Label note = NewLabel("Recording resources provide optional skyboxes, recording HUDs, sound suppressors, and enhanced particles included with this package.");
+            Label note = NewLabel("Recording resources provide optional skyboxes, recording HUDs, and sound suppressors included with this package.");
             note.ForeColor = Color.Silver;
             note.MaximumSize = new Size(700, 0);
             layout.SetColumnSpan(note, 2);
@@ -283,12 +275,6 @@ namespace Tf2StvParserGui
             builtInFlow.Controls.Add(announcer);
             builtInFlow.Controls.Add(applause);
             builtInFlow.Controls.Add(domination);
-            builtInFlow.Controls.Add(enhancedParticles);
-            particlesButton.Text = "Choose enhanced particle files...";
-            particlesButton.Width = 230;
-            particlesButton.Height = 30;
-            particlesButton.Click += ChooseParticles;
-            builtInFlow.Controls.Add(particlesButton);
             builtIns.Controls.Add(builtInFlow);
             layout.Controls.Add(builtIns, 1, 1);
 
@@ -338,12 +324,8 @@ namespace Tf2StvParserGui
             announcer.Checked = initial.DisableAnnouncerVoices;
             applause.Checked = initial.DisableApplauseSounds;
             domination.Checked = initial.DisableDominationSounds;
-            enhancedParticles.Checked = initial.EnhancedParticles;
-            selectedParticleFiles.AddRange(initial.EnhancedParticleFiles);
             RefreshSkyboxes(initial.Skybox);
             PopulateCustomResources();
-            particlesButton.Enabled = enhancedParticles.Checked;
-            enhancedParticles.CheckedChanged += delegate { particlesButton.Enabled = enhancedParticles.Checked; };
         }
 
         private void PopulateCustomResources()
@@ -380,17 +362,6 @@ namespace Tf2StvParserGui
                 foreach (string name in names) if (!skybox.Items.Contains(name)) skybox.Items.Add(name);
             }
             Select(skybox, selected);
-        }
-
-        private void ChooseParticles(object sender, EventArgs e)
-        {
-            using (EnhancedParticlesForm dialog = new EnhancedParticlesForm(selectedParticleFiles))
-            {
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                selectedParticleFiles.Clear();
-                selectedParticleFiles.AddRange(dialog.SelectedFiles);
-                enhancedParticles.Checked = selectedParticleFiles.Count > 0;
-            }
         }
 
         private void BrowseHlae(object sender, EventArgs e)
@@ -571,84 +542,6 @@ namespace Tf2StvParserGui
         }
     }
 
-    internal sealed class EnhancedParticlesForm : Form
-    {
-        internal static readonly string[] ParticleFiles = new string[]
-        {
-            "particles/blood_impact.pcf", "particles/blood_trail.pcf", "particles/buildingdamage.pcf",
-            "particles/bullet_tracers.pcf", "particles/burningplayer.pcf", "particles/cig_smoke.pcf",
-            "particles/cinefx.pcf", "particles/class_fx.pcf", "particles/conc_stars.pcf", "particles/crit.pcf",
-            "particles/dirty_explode.pcf", "particles/disguise.pcf", "particles/default.pcf",
-            "particles/explosion.pcf", "particles/flag_particles.pcf", "particles/flamethrower.pcf",
-            "particles/impact_fx.pcf", "particles/item_fx.pcf", "particles/medicgun_attrib.pcf",
-            "particles/medicgun_beam.pcf", "particles/muzzle_flash.pcf", "particles/nailtrails.pcf",
-            "particles/nemesis.pcf", "particles/player_recent_teleport.pcf", "particles/rocketbackblast.pcf",
-            "particles/rocketjumptrail.pcf", "particles/rockettrail.pcf",
-            "particles/shellejection.pcf", "particles/smoke_blackbillow.pcf",
-            "particles/smoke_blackbillow_hoodoo.pcf", "particles/soldierbuff.pcf", "particles/sparks.pcf",
-            "particles/speechbubbles.pcf", "particles/stickybomb.pcf", "particles/teleport_status.pcf",
-            "particles/teleported_fx.pcf", "particles/water.pcf"
-        };
-
-        private readonly CheckedListBox files = new CheckedListBox();
-        public readonly List<string> SelectedFiles = new List<string>();
-
-        public EnhancedParticlesForm(IList<string> selected)
-        {
-            Text = "Select Enhanced Particles";
-            StartPosition = FormStartPosition.CenterParent;
-            Size = new Size(520, 480);
-            MinimumSize = new Size(460, 360);
-            Font = new Font("Segoe UI", 9F);
-            BackColor = Color.FromArgb(30, 32, 36);
-            ForeColor = Color.Gainsboro;
-
-            TableLayoutPanel layout = new TableLayoutPanel();
-            layout.Dock = DockStyle.Fill;
-            layout.Padding = new Padding(8);
-            layout.RowCount = 3;
-            layout.ColumnCount = 1;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            Controls.Add(layout);
-            Label note = new Label();
-            note.Text = "Select which PLDX enhanced particle files are copied into the temporary tf/custom folder.";
-            note.AutoSize = true;
-            layout.Controls.Add(note, 0, 0);
-            files.Dock = DockStyle.Fill;
-            files.CheckOnClick = true;
-            files.BackColor = Color.FromArgb(24, 26, 29);
-            files.ForeColor = Color.Gainsboro;
-            HashSet<string> selectedSet = new HashSet<string>(selected ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-            bool selectAll = selectedSet.Count == 0;
-            foreach (string file in ParticleFiles) files.Items.Add(file, selectAll || selectedSet.Contains(file));
-            layout.Controls.Add(files, 0, 1);
-
-            FlowLayoutPanel buttons = new FlowLayoutPanel();
-            buttons.Dock = DockStyle.Fill;
-            Button all = new Button(); all.Text = "All"; all.Click += delegate { SetAll(true); };
-            Button none = new Button(); none.Text = "None"; none.Click += delegate { SetAll(false); };
-            Button ok = new Button(); ok.Text = "OK"; ok.DialogResult = DialogResult.OK; ok.Click += Save;
-            Button cancel = new Button(); cancel.Text = "Cancel"; cancel.DialogResult = DialogResult.Cancel;
-            buttons.Controls.Add(all); buttons.Controls.Add(none); buttons.Controls.Add(ok); buttons.Controls.Add(cancel);
-            layout.Controls.Add(buttons, 0, 2);
-            AcceptButton = ok;
-            CancelButton = cancel;
-        }
-
-        private void SetAll(bool value)
-        {
-            for (int index = 0; index < files.Items.Count; index++) files.SetItemChecked(index, value);
-        }
-
-        private void Save(object sender, EventArgs e)
-        {
-            SelectedFiles.Clear();
-            foreach (object item in files.CheckedItems) SelectedFiles.Add(Convert.ToString(item));
-        }
-    }
-
     internal sealed class RecordingProfileSession
     {
         public string SessionId;
@@ -797,7 +690,7 @@ namespace Tf2StvParserGui
                     string profileFolder = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
                     if (Directory.Exists(profileFolder)) Directory.Delete(profileFolder, true);
                     if (Directory.Exists(profileFolder))
-                        throw new IOException("The temporary recording resources, including enhanced particles, could not be removed.");
+                        throw new IOException("The temporary recording resources could not be removed.");
                     foreach (string entry in session.TemporaryRootFiles)
                     {
                         string[] paths = entry.Split(new char[] { '|' }, 2);
@@ -911,7 +804,7 @@ namespace Tf2StvParserGui
         private static void InstallRecordingResources(RecordingProfileSession session, HlaeRecordingSettings settings)
         {
             bool needsResources = settings.DisableAnnouncerVoices || settings.DisableApplauseSounds || settings.DisableDominationSounds ||
-                settings.EnhancedParticles || !String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase) ||
                 !String.Equals(settings.Hud, "Keep current", StringComparison.OrdinalIgnoreCase) && !String.Equals(settings.Hud, "Default TF2 HUD", StringComparison.OrdinalIgnoreCase);
             if (!needsResources) return;
             string root = settings.RecordingResourcesDirectory;
@@ -924,15 +817,6 @@ namespace Tf2StvParserGui
 
             string profileRoot = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
             Directory.CreateDirectory(profileRoot);
-            if (settings.EnhancedParticles)
-            {
-                string vpk = Path.Combine(root, "custom", "pldx_particles.vpk");
-                if (!File.Exists(vpk)) throw new FileNotFoundException("The included enhanced-particle VPK was not found.", vpk);
-                IList<string> selected = settings.EnhancedParticleFiles.Count == 0 ? (IList<string>)EnhancedParticlesForm.ParticleFiles : settings.EnhancedParticleFiles;
-                if (!CopyPackagedParticleFiles(root, profileRoot, selected))
-                    ExtractParticleFiles(settings.Tf2Executable, vpk, profileRoot, selected);
-            }
-
             if (!String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase))
                 InstallSkybox(root, profileRoot, settings.Skybox);
             if (String.Equals(settings.Hud, "Kill notices only", StringComparison.OrdinalIgnoreCase))
@@ -979,74 +863,6 @@ namespace Tf2StvParserGui
             string source = Path.Combine(resourcesRoot, "hud", hudName);
             if (!Directory.Exists(source)) throw new DirectoryNotFoundException("The selected recording HUD was not found: " + source);
             CopyDirectory(source, profileRoot);
-        }
-
-        private static bool CopyPackagedParticleFiles(string resourcesRoot, string destination, IList<string> files)
-        {
-            string sourceRoot = Path.Combine(resourcesRoot, "particles");
-            foreach (string file in files)
-            {
-                string relative = file.StartsWith("particles/", StringComparison.OrdinalIgnoreCase) ? file.Substring("particles/".Length) : file;
-                if (!File.Exists(Path.Combine(sourceRoot, relative))) return false;
-            }
-            string target = Path.Combine(destination, "particles");
-            Directory.CreateDirectory(target);
-            string manifest = Path.Combine(sourceRoot, "particles_manifest.txt");
-            if (!File.Exists(manifest)) return false;
-            File.Copy(manifest, Path.Combine(target, "particles_manifest.txt"), true);
-            foreach (string file in files)
-            {
-                string relative = file.StartsWith("particles/", StringComparison.OrdinalIgnoreCase) ? file.Substring("particles/".Length) : file;
-                File.Copy(Path.Combine(sourceRoot, relative), Path.Combine(target, relative), true);
-            }
-            return true;
-        }
-
-        private static void ExtractParticleFiles(string tf2Executable, string vpk, string destination, IList<string> files)
-        {
-            // TF2's VPK extractor writes paths relative to its working folder
-            // but does not create this nested directory itself.
-            Directory.CreateDirectory(Path.Combine(destination, "particles"));
-            string root = Path.GetDirectoryName(tf2Executable);
-            string[] tools = new string[]
-            {
-                Path.Combine(root, "bin", "vpk.exe"),
-                Path.Combine(root, "bin", "x64", "vpk.exe"),
-                Path.Combine(root, "tf", "bin", "vpk.exe")
-            };
-            string vpkTool = null;
-            foreach (string tool in tools) if (File.Exists(tool)) { vpkTool = tool; break; }
-            if (vpkTool == null) throw new FileNotFoundException("TF2's vpk.exe is required to select enhanced particle files.");
-            List<string> arguments = new List<string>();
-            arguments.Add("x");
-            arguments.Add(Path.GetFullPath(vpk));
-            // Source discovers particle systems through this file.  It is part of the PLDX VPK
-            // and must accompany even a hand-picked subset of PCFs.
-            arguments.Add("particles/particles_manifest.txt");
-            foreach (string file in files) arguments.Add(file);
-            ProcessStartInfo info = new ProcessStartInfo();
-            info.FileName = vpkTool;
-            info.Arguments = JoinArguments(arguments);
-            info.WorkingDirectory = destination;
-            info.UseShellExecute = false;
-            info.CreateNoWindow = true;
-            info.RedirectStandardError = true;
-            info.RedirectStandardOutput = true;
-            using (Process process = Process.Start(info))
-            {
-                string error = process.StandardError.ReadToEnd();
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-                if (process.ExitCode != 0)
-                {
-                    string detail = (error + "\r\n" + output).Trim();
-                    if (String.IsNullOrEmpty(detail)) detail = "vpk.exe returned exit code " + process.ExitCode + ".";
-                    throw new InvalidOperationException("Could not extract the selected enhanced particles. " + detail);
-                }
-            }
-            foreach (string file in files)
-                if (!File.Exists(Path.Combine(destination, file.Replace('/', Path.DirectorySeparatorChar))))
-                    throw new InvalidOperationException("Could not extract the selected enhanced particles. TF2's vpk.exe did not create " + file + ". Verify that vpk.exe is installed with TF2 and that the recording-resources folder is complete.");
         }
 
         private static List<string> BuildProfileConfig(HlaeRecordingSettings settings)
@@ -1234,17 +1050,6 @@ namespace Tf2StvParserGui
         private static void DeleteEmptyDirectory(string path)
         {
             if (Directory.Exists(path) && Directory.GetFileSystemEntries(path).Length == 0) Directory.Delete(path);
-        }
-
-        private static string JoinArguments(IList<string> arguments)
-        {
-            StringBuilder result = new StringBuilder();
-            foreach (string argument in arguments)
-            {
-                if (result.Length > 0) result.Append(' ');
-                result.Append('"').Append((argument ?? "").Replace("\"", "\\\"")).Append('"');
-            }
-            return result.ToString();
         }
 
         private static string Text(IDictionary values, string key)

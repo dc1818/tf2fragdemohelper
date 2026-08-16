@@ -491,7 +491,7 @@ namespace Tf2StvParserGui
         private readonly NumericUpDown recordingFps = new NumericUpDown();
         private readonly NumericUpDown jpgQuality = new NumericUpDown();
         private readonly ComboBox recordingOutput = new ComboBox();
-        private readonly DataGridViewButtonColumn previewColumn = new DataGridViewButtonColumn();
+        private readonly Button inlinePreviewButton = GreenButton("Preview Selected in TF2", 175);
         private readonly Button selectAllButton = GreenButton("Select all visible", 135);
         private readonly Button recordButton = GreenButton("Record selected with HLAE", 205);
         private readonly Button backButton = GreenButton("Back to parser", 165);
@@ -526,8 +526,8 @@ namespace Tf2StvParserGui
             candidatesPath = path;
             Text = "TF2 Frag Candidates";
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(1200, 680);
-            Size = new Size(1280, 780);
+            MinimumSize = new Size(1400, 760);
+            Size = new Size(1480, 860);
             Font = new Font("Segoe UI", 9F);
             BackColor = Color.FromArgb(30, 32, 36);
             ForeColor = Color.Gainsboro;
@@ -720,12 +720,15 @@ namespace Tf2StvParserGui
             AddColumn("Demo", 170);
             AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 300);
-            AddPreviewColumn();
             grid.SelectionChanged += ShowSelectedCandidate;
             grid.CellMouseDown += RememberSelectedRowClick;
             grid.CellClick += ToggleClickedSelectedRow;
-            grid.CellContentClick += PreviewSelectedCandidate;
+            grid.SizeChanged += delegate { PositionPreviewButton(); };
             split.Panel1.Controls.Add(grid);
+            inlinePreviewButton.Visible = false;
+            inlinePreviewButton.Click += delegate { LaunchSelectedCandidate(); };
+            split.Panel1.Controls.Add(inlinePreviewButton);
+            inlinePreviewButton.BringToFront();
 
             details.Dock = DockStyle.Fill;
             details.Multiline = true;
@@ -749,18 +752,6 @@ namespace Tf2StvParserGui
             column.Width = width;
             column.SortMode = DataGridViewColumnSortMode.NotSortable;
             grid.Columns.Add(column);
-        }
-
-        private void AddPreviewColumn()
-        {
-            previewColumn.HeaderText = "";
-            previewColumn.Name = "PreviewSelectedInTf2";
-            previewColumn.Width = 175;
-            previewColumn.Text = "Preview Selected in TF2";
-            previewColumn.UseColumnTextForButtonValue = false;
-            previewColumn.FlatStyle = FlatStyle.Flat;
-            previewColumn.Visible = false;
-            grid.Columns.Add(previewColumn);
         }
 
         private void LoadCandidates()
@@ -853,8 +844,7 @@ namespace Tf2StvParserGui
                     DisplayValue(candidate, "attacker_team"),
                     BatchCandidateSupport.CandidateDemoName(candidate, demoPath),
                     JoinValues(killTicks),
-                    JoinCandidateTags(Value(candidate, "tags")),
-                    "");
+                    JoinCandidateTags(Value(candidate, "tags")));
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
@@ -992,7 +982,6 @@ namespace Tf2StvParserGui
         {
             clickedSelectedRow = -1;
             if (e.RowIndex < 0 || e.Button != MouseButtons.Left || ModifierKeys != Keys.None) return;
-            if (e.ColumnIndex == previewColumn.Index) return;
             if (grid.Rows[e.RowIndex].Selected) clickedSelectedRow = e.RowIndex;
         }
 
@@ -1005,20 +994,23 @@ namespace Tf2StvParserGui
             UpdateCandidateActionAvailability();
         }
 
-        private void PreviewSelectedCandidate(object sender, DataGridViewCellEventArgs e)
-        {
-            if (e.RowIndex >= 0 && e.ColumnIndex == previewColumn.Index && grid.SelectedRows.Count == 1)
-                LaunchSelectedCandidate();
-        }
-
         private void UpdateCandidateActionAvailability()
         {
             int selectedCount = grid.SelectedRows.Count;
             bool hasSelection = selectedCount > 0;
             recordButton.Enabled = hasSelection;
-            previewColumn.Visible = selectedCount == 1;
-            foreach (DataGridViewRow row in grid.Rows)
-                row.Cells[previewColumn.Index].Value = selectedCount == 1 && row.Selected ? "Preview Selected in TF2" : "";
+            inlinePreviewButton.Visible = selectedCount == 1;
+            PositionPreviewButton();
+        }
+
+        private void PositionPreviewButton()
+        {
+            if (!inlinePreviewButton.Visible || grid.SelectedRows.Count != 1) return;
+            DataGridViewRow row = grid.SelectedRows[0];
+            Rectangle rowBounds = grid.GetCellDisplayRectangle(0, row.Index, true);
+            inlinePreviewButton.Left = Math.Max(8, grid.ClientSize.Width - inlinePreviewButton.Width - 18);
+            inlinePreviewButton.Top = Math.Max(grid.ColumnHeadersHeight + 2, rowBounds.Top + (rowBounds.Height - inlinePreviewButton.Height) / 2);
+            inlinePreviewButton.BringToFront();
         }
 
         private void RecordSelectedCandidates()

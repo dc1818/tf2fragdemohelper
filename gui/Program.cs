@@ -34,6 +34,7 @@ namespace Tf2StvParserGui
         private readonly Button cancelButton = GreenButton("Cancel", 90);
         private readonly Button openButton = GreenButton("Open export folder", 150);
         private readonly Button candidatesButton = GreenButton("View candidates", 130);
+        private readonly Button loadExportButton = GreenButton("Load parsed export", 160);
         private readonly ProgressBar progress = new ProgressBar();
         private readonly Label status = new Label();
         private TableLayoutPanel parserLayout;
@@ -154,10 +155,12 @@ namespace Tf2StvParserGui
             openButton.Click += OpenExport;
             candidatesButton.Enabled = false;
             candidatesButton.Click += OpenCandidates;
+            loadExportButton.Click += LoadParsedExport;
             actions.Controls.Add(parseButton);
             actions.Controls.Add(cancelButton);
             actions.Controls.Add(openButton);
             actions.Controls.Add(candidatesButton);
+            actions.Controls.Add(loadExportButton);
             parserLayout.SetColumnSpan(actions, 3);
             parserLayout.Controls.Add(actions, 0, 6);
 
@@ -328,14 +331,46 @@ namespace Tf2StvParserGui
 
         private void OpenCandidates(object sender, EventArgs e)
         {
-            if (String.IsNullOrEmpty(lastExport)) return;
-            string path = Path.Combine(lastExport, "frag_candidates.ndjson");
-            if (!File.Exists(path))
+            OpenCandidatesFromExport(lastExport, true);
+        }
+
+        private void LoadParsedExport(object sender, EventArgs e)
+        {
+            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
             {
-                MessageBox.Show(this, "frag_candidates.ndjson was not found in the latest export.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                dialog.Description = "Select a parsed TF2 export folder containing manifest.json and frag_candidates.ndjson";
+                if (Directory.Exists(lastExport)) dialog.SelectedPath = lastExport;
+                else if (Directory.Exists(outputBox.Text)) dialog.SelectedPath = outputBox.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                    OpenCandidatesFromExport(dialog.SelectedPath, true);
+            }
+        }
+
+        private void OpenCandidatesFromExport(string exportDirectory, bool showErrors)
+        {
+            if (String.IsNullOrWhiteSpace(exportDirectory) || !Directory.Exists(exportDirectory))
+            {
+                if (showErrors)
+                    MessageBox.Show(this, "Select an existing parsed export folder.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string path = Path.Combine(exportDirectory, "frag_candidates.ndjson");
+            string manifestPath = Path.Combine(exportDirectory, "manifest.json");
+            if (!File.Exists(manifestPath) || !File.Exists(path))
+            {
+                if (showErrors)
+                    MessageBox.Show(this,
+                        "Select a parsed export folder containing both manifest.json and frag_candidates.ndjson. " +
+                        "Run Parse STV demo first if this export has not been ranked yet.",
+                        Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             if (candidateViewer != null) return;
+            lastExport = exportDirectory;
+            candidatesButton.Enabled = true;
+            status.Text = "Loaded parsed export: " + exportDirectory;
+            status.ForeColor = Color.LightGreen;
+            Append("Loaded existing parsed export: " + exportDirectory + "\r\n");
             candidateViewer = new CandidateViewerForm(path);
             candidateViewer.BackRequested += ReturnToParser;
             candidateViewer.TopLevel = false;

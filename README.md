@@ -6,7 +6,7 @@ It is built for reviewing long competitive or public STV demos without manually 
 
 ## Current capabilities
 
-- Parses TF2 STV demos with the `demostf/parser` codebase.
+- Parses one or more TF2 STV/POV demos with the `demostf/parser` codebase.
 - Exports the original decoded packet stream as newline-delimited JSON.
 - Writes a compact, named game-event stream for deaths, damage, round transitions, class changes, objectives, and other TF2 events.
 - Excludes setup, waiting, and post-round deaths from highlight candidates.
@@ -15,6 +15,8 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
 - Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
 - The candidate browser can launch the original demo in TF2 at a selectable lead-in before the first event; double-click a candidate or use **Open selected in TF2**.
+- Batch parsing processes selected demos sequentially and creates one combined `frag_candidates.ndjson` whose candidates retain their source demo and export folder.
+- The combined candidate browser supports Ctrl-click multi-selection and **Select all visible**, then records selected candidates demo-by-demo through HLAE and generated VDM actions.
 - Streams candidate-debug decisions into the embedded parser terminal, including rejected deaths, POV filtering, grouping windows, building events, and score outcomes.
 
 ## Packet-state analysis
@@ -46,6 +48,14 @@ Class-specific direct-versus-splash confidence, reflects, headshot chains, garde
 The **Item schema (optional)** field can point directly to `items_game.txt`. Leave it blank for normal TF2 installations; the analyzer automatically follows the source demo path to `tf/scripts/items/items_game.txt`.
 
 The first build compiles `parser/src/bin/export_all.rs` into `parser/target/release/export_all.exe` and compiles the Windows Forms GUI.
+
+## Batch parsing and offline HLAE recording
+
+Use **Browse demos** to select multiple `.dem` files, or drag several demos onto the parser window. The parser exports and analyzes each demo in the chosen order, then writes a batch-level `manifest.json` and combined `frag_candidates.ndjson`. Each combined candidate contains `batch_context` with `demo_order`, `demo_name`, `source_demo`, and `source_export`, allowing one browser to display and queue candidates from every demo.
+
+In the candidate browser, Ctrl-click rows or use **Select all visible**. Set the lead-in, outro, and recording FPS, then choose **Record selected with HLAE**. The recorder groups candidates by their source demo, sorts them by playback tick, stages each demo beside a generated VDM, records every selected candidate with `mirv_streams`, and automatically advances to the next demo. Each clip receives its own lossless `afxFfmpegLosslessBest` output folder and the batch writes `recording_queue.json` for auditing.
+
+Recording mode supports current retail `tf_win64.exe` with HLAE 2.189.0 or newer and the x64 `AfxHookSource.dll`, plus legacy `tf.exe` with the 32-bit hook. HLAE's FFmpeg component is required. The launcher is intentionally offline-only: it always supplies `-insecure` and `+sv_lan 1`, generates a config that disables downloads and replaces `connect`/`retry`, and does not expose custom launch arguments. It is for local demo playback only and must never be used to join a server.
 
 ## Export layout
 

@@ -188,6 +188,7 @@ namespace Tf2StvParserGui
 
     internal sealed class HlaeRecordingSettings
     {
+        public string FfmpegExecutable;
         public string HlaeExecutable;
         public string Tf2Executable;
         public string OutputDirectory;
@@ -196,6 +197,7 @@ namespace Tf2StvParserGui
     internal sealed class HlaeRecordingSettingsForm : Form
     {
         private readonly TextBox hlaeBox = new TextBox();
+        private readonly TextBox ffmpegBox = new TextBox();
         private readonly TextBox tf2Box = new TextBox();
         private readonly TextBox outputBox = new TextBox();
 
@@ -205,6 +207,7 @@ namespace Tf2StvParserGui
             {
                 return new HlaeRecordingSettings
                 {
+                    FfmpegExecutable = ffmpegBox.Text.Trim(),
                     HlaeExecutable = hlaeBox.Text.Trim(),
                     Tf2Executable = tf2Box.Text.Trim(),
                     OutputDirectory = outputBox.Text.Trim()
@@ -226,15 +229,16 @@ namespace Tf2StvParserGui
             layout.Dock = DockStyle.Fill;
             layout.Padding = new Padding(14);
             layout.ColumnCount = 3;
-            layout.RowCount = 5;
+            layout.RowCount = 6;
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
             Controls.Add(layout);
 
-            AddPathRow(layout, 0, "HLAE.exe", hlaeBox, initial.HlaeExecutable, BrowseHlae);
-            AddPathRow(layout, 1, "TF2 executable", tf2Box, initial.Tf2Executable, BrowseTf2);
-            AddPathRow(layout, 2, "Recording output", outputBox, initial.OutputDirectory, BrowseOutput);
+            AddPathRow(layout, 0, "FFmpeg.exe", ffmpegBox, initial.FfmpegExecutable, BrowseFfmpeg);
+            AddPathRow(layout, 1, "HLAE.exe", hlaeBox, initial.HlaeExecutable, BrowseHlae);
+            AddPathRow(layout, 2, "TF2 executable", tf2Box, initial.Tf2Executable, BrowseTf2);
+            AddPathRow(layout, 3, "Recording output", outputBox, initial.OutputDirectory, BrowseOutput);
 
             Label safety = new Label();
             safety.Text = "The app always launches HLAE with -insecure and +sv_lan 1, blocks connect/retry commands, and permits demo playback only.";
@@ -242,7 +246,7 @@ namespace Tf2StvParserGui
             safety.ForeColor = System.Drawing.Color.LightGreen;
             safety.Margin = new Padding(3, 8, 3, 3);
             layout.SetColumnSpan(safety, 3);
-            layout.Controls.Add(safety, 0, 3);
+            layout.Controls.Add(safety, 0, 4);
 
             FlowLayoutPanel buttons = new FlowLayoutPanel();
             buttons.Dock = DockStyle.Fill;
@@ -258,7 +262,7 @@ namespace Tf2StvParserGui
             buttons.Controls.Add(ok);
             buttons.Controls.Add(cancel);
             layout.SetColumnSpan(buttons, 3);
-            layout.Controls.Add(buttons, 0, 4);
+            layout.Controls.Add(buttons, 0, 5);
             AcceptButton = ok;
             CancelButton = cancel;
         }
@@ -286,7 +290,21 @@ namespace Tf2StvParserGui
             {
                 dialog.Filter = "HLAE (HLAE.exe)|HLAE.exe|Executable (*.exe)|*.exe";
                 if (File.Exists(hlaeBox.Text)) dialog.FileName = hlaeBox.Text;
-                if (dialog.ShowDialog(this) == DialogResult.OK) hlaeBox.Text = dialog.FileName;
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    hlaeBox.Text = dialog.FileName;
+                    if (!File.Exists(ffmpegBox.Text)) ffmpegBox.Text = HlaeBatchRecorder.FindFfmpegNearHlae(dialog.FileName) ?? "";
+                }
+            }
+        }
+
+        private void BrowseFfmpeg(object sender, EventArgs e)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Filter = "FFmpeg (ffmpeg.exe)|ffmpeg.exe|Executable (*.exe)|*.exe";
+                if (File.Exists(ffmpegBox.Text)) dialog.FileName = ffmpegBox.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK) ffmpegBox.Text = dialog.FileName;
             }
         }
 
@@ -345,6 +363,7 @@ namespace Tf2StvParserGui
 
             HlaeRecordingSettings initial = LoadSettings();
             if (String.IsNullOrEmpty(initial.Tf2Executable)) initial.Tf2Executable = suggestedTf2Executable;
+            if (String.IsNullOrEmpty(initial.FfmpegExecutable)) initial.FfmpegExecutable = FindFfmpegNearHlae(initial.HlaeExecutable) ?? "";
             using (HlaeRecordingSettingsForm dialog = new HlaeRecordingSettingsForm(initial))
             {
                 if (dialog.ShowDialog(owner) != DialogResult.OK) return;
@@ -378,10 +397,27 @@ namespace Tf2StvParserGui
                     : "This HLAE installation does not contain AfxHookSource.dll.", hook);
             if (HlaeRecordingOutputs.RequiresFfmpeg(output))
             {
-                string ffmpeg = Path.Combine(hlaeDirectory, "ffmpeg", "bin", "ffmpeg.exe");
-                if (!File.Exists(ffmpeg))
-                    throw new FileNotFoundException(HlaeRecordingOutputs.DisplayName(output) + " recording requires HLAE's FFmpeg component. Re-run the HLAE installer with FFmpeg enabled.", ffmpeg);
+                if (!File.Exists(settings.FfmpegExecutable) || !String.Equals(Path.GetFileName(settings.FfmpegExecutable), "ffmpeg.exe", StringComparison.OrdinalIgnoreCase))
+                    throw new FileNotFoundException(HlaeRecordingOutputs.DisplayName(output) + " recording requires FFmpeg. Select ffmpeg.exe at the top of the setup window.", settings.FfmpegExecutable);
             }
+        }
+
+        internal static string FindFfmpegNearHlae(string hlaeExecutable)
+        {
+            if (String.IsNullOrEmpty(hlaeExecutable)) return null;
+            string directory = Path.GetDirectoryName(hlaeExecutable);
+            for (int level = 0; level < 3 && !String.IsNullOrEmpty(directory); level++)
+            {
+                string[] candidates = new string[]
+                {
+                    Path.Combine(directory, "ffmpeg", "bin", "ffmpeg.exe"),
+                    Path.Combine(directory, "ffmpeg", "ffmpeg.exe"),
+                    Path.Combine(directory, "HLAE FFMPEG", "ffmpeg", "bin", "ffmpeg.exe")
+                };
+                foreach (string candidate in candidates) if (File.Exists(candidate)) return candidate;
+                directory = Path.GetDirectoryName(directory);
+            }
+            return null;
         }
 
         private static void PrepareAndLaunch(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingOutput output, int jpgQuality, HlaeRecordingSettings settings)
@@ -641,6 +677,7 @@ namespace Tf2StvParserGui
                 if (!File.Exists(path)) return settings;
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
                 IDictionary values = serializer.DeserializeObject(File.ReadAllText(path)) as IDictionary;
+                settings.FfmpegExecutable = TextValue(values, "ffmpeg_executable");
                 settings.HlaeExecutable = TextValue(values, "hlae_executable");
                 settings.Tf2Executable = TextValue(values, "tf2_executable");
                 settings.OutputDirectory = TextValue(values, "output_directory");
@@ -657,6 +694,7 @@ namespace Tf2StvParserGui
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
                 Dictionary<string, object> values = new Dictionary<string, object>();
+                values["ffmpeg_executable"] = settings.FfmpegExecutable;
                 values["hlae_executable"] = settings.HlaeExecutable;
                 values["tf2_executable"] = settings.Tf2Executable;
                 values["output_directory"] = settings.OutputDirectory;

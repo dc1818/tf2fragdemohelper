@@ -30,7 +30,7 @@ namespace Tf2StvParserGui
         private readonly TextBox outputBox = new TextBox();
         private readonly TextBox schemaBox = new TextBox();
         private readonly TextBox log = new TextBox();
-        private readonly Button parseButton = GreenButton("Parse STV demo", 150);
+        private readonly Button parseButton = GreenButton("Parse demo(s)", 150);
         private readonly Button cancelButton = GreenButton("Cancel", 90);
         private readonly Button openButton = GreenButton("Open export folder", 150);
         private readonly Button candidatesButton = GreenButton("View candidates", 130);
@@ -42,6 +42,8 @@ namespace Tf2StvParserGui
         private Process activeProcess;
         private bool busy;
         private string lastExport;
+        private readonly List<string> selectedDemos = new List<string>();
+        private string demoSelectionDisplay = "";
 
         public MainForm()
         {
@@ -104,10 +106,10 @@ namespace Tf2StvParserGui
             parserLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
             Controls.Add(parserLayout);
 
-            parserLayout.Controls.Add(Label("STV demo"), 0, 0);
+            parserLayout.Controls.Add(Label("TF2 demo(s)"), 0, 0);
             demoBox.Dock = DockStyle.Fill;
             parserLayout.Controls.Add(demoBox, 1, 0);
-            Button browseDemo = GreenButton("Browse demo", 145);
+            Button browseDemo = GreenButton("Browse demos", 145);
             browseDemo.Click += BrowseDemo;
             parserLayout.Controls.Add(browseDemo, 2, 0);
 
@@ -126,7 +128,7 @@ namespace Tf2StvParserGui
             browseSchema.Click += BrowseSchema;
             parserLayout.Controls.Add(browseSchema, 2, 2);
 
-            Label note = Label("Weapon slots use TF2's current items_game.txt when it can be found beside the game. Select it manually only when the demo is stored elsewhere.");
+            Label note = Label("Select one or more demos. Batch parsing runs them in order and creates one combined candidate list. Weapon slots use TF2's current items_game.txt when available.");
             note.MaximumSize = new Size(850, 0);
             note.ForeColor = Color.Silver;
             parserLayout.SetColumnSpan(note, 3);
@@ -176,10 +178,10 @@ namespace Tf2StvParserGui
         private async Task ParseDemo()
         {
             if (busy) return;
-            string demo = demoBox.Text.Trim();
-            if (!File.Exists(demo) || !demo.EndsWith(".dem", StringComparison.OrdinalIgnoreCase))
+            List<string> demos = SelectedDemoPaths();
+            if (demos.Count == 0)
             {
-                MessageBox.Show(this, "Choose an existing .dem file.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "Choose one or more existing .dem files.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             if (String.IsNullOrWhiteSpace(outputBox.Text))
@@ -194,7 +196,11 @@ namespace Tf2StvParserGui
                 return;
             }
 
-            lastExport = Path.Combine(outputBox.Text.Trim(), Path.GetFileNameWithoutExtension(demo) + "_export_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            bool batch = demos.Count > 1;
+            lastExport = batch
+                ? Path.Combine(outputBox.Text.Trim(), "tf2_demo_batch_export_" + timestamp)
+                : Path.Combine(outputBox.Text.Trim(), Path.GetFileNameWithoutExtension(demos[0]) + "_export_" + timestamp);
             Directory.CreateDirectory(lastExport);
             busy = true;
             parseButton.Enabled = false;
@@ -203,22 +209,39 @@ namespace Tf2StvParserGui
             candidatesButton.Enabled = false;
             log.Clear();
             progress.Style = ProgressBarStyle.Marquee;
-            status.Text = "Parsing demo...";
+            status.Text = "Parsing " + demos.Count + " demo" + (demos.Count == 1 ? "" : "s") + "...";
             status.ForeColor = Color.Gainsboro;
-            Append("Input: " + demo + "\r\nExport: " + lastExport + "\r\n\r\n");
+            Append("Inputs: " + demos.Count + " demo(s)\r\nExport: " + lastExport + "\r\n\r\n");
             try
             {
-                await RunWorker(parser, Quote(demo) + " " + Quote(lastExport));
-                status.Text = "Ranking live-round frag candidates...";
-                Append("\r\nRunning frag analysis...\r\n");
-                await RunFragAnalysis(lastExport);
+                List<BatchExportEntry> batchExports = new List<BatchExportEntry>();
+                for (int index = 0; index < demos.Count; index++)
+                {
+                    string demo = demos[index];
+                    string exportDirectory = batch
+                        ? Path.Combine(lastExport, (index + 1).ToString("D3") + "_" + SafeFileName(Path.GetFileNameWithoutExtension(demo)) + "_export")
+                        : lastExport;
+                    Directory.CreateDirectory(exportDirectory);
+                    status.Text = "Parsing demo " + (index + 1) + " of " + demos.Count + ": " + Path.GetFileName(demo);
+                    Append("\r\n[" + (index + 1) + "/" + demos.Count + "] Input: " + demo + "\r\nExport: " + exportDirectory + "\r\n");
+                    await RunWorker(parser, Quote(demo) + " " + Quote(exportDirectory));
+                    status.Text = "Ranking candidates for demo " + (index + 1) + " of " + demos.Count + "...";
+                    Append("Running frag analysis...\r\n");
+                    await RunFragAnalysis(exportDirectory);
+                    batchExports.Add(new BatchExportEntry(index + 1, demo, exportDirectory));
+                }
+                if (batch)
+                {
+                    int count = BatchCandidateSupport.WriteCombinedExport(lastExport, batchExports);
+                    Append("\r\nCombined " + count + " candidates from " + demos.Count + " demos into " + Path.Combine(lastExport, "frag_candidates.ndjson") + ".\r\n");
+                }
                 progress.Style = ProgressBarStyle.Continuous;
                 progress.Value = 100;
-                status.Text = "Export and frag analysis complete.";
+                status.Text = batch ? "Batch export and combined candidate analysis complete." : "Export and frag analysis complete.";
                 status.ForeColor = Color.LightGreen;
                 openButton.Enabled = true;
                 candidatesButton.Enabled = true;
-                Append("\r\nSUCCESS: Export and frag analysis complete. Use View candidates to inspect ranked clips.\r\n");
+                Append("\r\nSUCCESS: Export and frag analysis complete. Use View candidates to inspect and batch-record ranked clips.\r\n");
             }
             catch (Exception ex)
             {
@@ -300,7 +323,9 @@ namespace Tf2StvParserGui
             using (OpenFileDialog dialog = new OpenFileDialog())
             {
                 dialog.Filter = "TF2 demo (*.dem)|*.dem|All files (*.*)|*.*";
-                if (dialog.ShowDialog(this) == DialogResult.OK) demoBox.Text = dialog.FileName;
+                dialog.Multiselect = true;
+                dialog.Title = "Select one or more TF2 demos";
+                if (dialog.ShowDialog(this) == DialogResult.OK) SetSelectedDemos(dialog.FileNames);
             }
         }
 
@@ -402,7 +427,42 @@ namespace Tf2StvParserGui
         private void OnDragDrop(object sender, DragEventArgs e)
         {
             string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files != null && files.Length > 0 && files[0].EndsWith(".dem", StringComparison.OrdinalIgnoreCase)) demoBox.Text = files[0];
+            if (files == null || files.Length == 0) return;
+            List<string> demos = new List<string>();
+            foreach (string file in files)
+                if (file.EndsWith(".dem", StringComparison.OrdinalIgnoreCase) && File.Exists(file)) demos.Add(file);
+            if (demos.Count > 0) SetSelectedDemos(demos.ToArray());
+        }
+
+        private void SetSelectedDemos(string[] paths)
+        {
+            selectedDemos.Clear();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths)
+            {
+                string fullPath = Path.GetFullPath(path);
+                if (File.Exists(fullPath) && fullPath.EndsWith(".dem", StringComparison.OrdinalIgnoreCase) && seen.Add(fullPath))
+                    selectedDemos.Add(fullPath);
+            }
+            demoSelectionDisplay = selectedDemos.Count == 1
+                ? selectedDemos[0]
+                : selectedDemos.Count + " demos selected: " + String.Join(" | ", selectedDemos.ConvertAll(Path.GetFileName).ToArray());
+            demoBox.Text = demoSelectionDisplay;
+        }
+
+        private List<string> SelectedDemoPaths()
+        {
+            if (selectedDemos.Count > 0 && String.Equals(demoBox.Text, demoSelectionDisplay, StringComparison.Ordinal))
+                return new List<string>(selectedDemos);
+            List<string> result = new List<string>();
+            string typed = demoBox.Text.Trim();
+            if (File.Exists(typed) && typed.EndsWith(".dem", StringComparison.OrdinalIgnoreCase)) result.Add(Path.GetFullPath(typed));
+            return result;
+        }
+
+        private static string SafeFileName(string value)
+        {
+            return BatchCandidateSupport.SafeName(value);
         }
 
         private void Append(string text)
@@ -427,7 +487,11 @@ namespace Tf2StvParserGui
         private readonly TextBox filterBox = new TextBox();
         private readonly NumericUpDown minimumScore = new NumericUpDown();
         private readonly NumericUpDown leadInSeconds = new NumericUpDown();
+        private readonly NumericUpDown outroSeconds = new NumericUpDown();
+        private readonly NumericUpDown recordingFps = new NumericUpDown();
         private readonly Button launchButton = GreenButton("Open selected in TF2", 165);
+        private readonly Button selectAllButton = GreenButton("Select all visible", 135);
+        private readonly Button recordButton = GreenButton("Record selected with HLAE", 205);
         private readonly Button backButton = GreenButton("Back to parser", 165);
         private readonly List<CandidateRecord> records = new List<CandidateRecord>();
         private string demoPath;
@@ -545,9 +609,38 @@ namespace Tf2StvParserGui
             leadInSeconds.Increment = 1;
             leadInSeconds.Margin = new Padding(0, 5, 10, 2);
             playbackControls.Controls.Add(leadInSeconds);
+            Label outroLabel = new Label();
+            outroLabel.Text = "Seconds after last event";
+            outroLabel.AutoSize = true;
+            outroLabel.Margin = new Padding(4, 9, 4, 2);
+            playbackControls.Controls.Add(outroLabel);
+            outroSeconds.Width = 52;
+            outroSeconds.Minimum = 0;
+            outroSeconds.Maximum = 60;
+            outroSeconds.Value = 3;
+            outroSeconds.Margin = new Padding(0, 5, 10, 2);
+            playbackControls.Controls.Add(outroSeconds);
+            Label fpsLabel = new Label();
+            fpsLabel.Text = "Record FPS";
+            fpsLabel.AutoSize = true;
+            fpsLabel.Margin = new Padding(4, 9, 4, 2);
+            playbackControls.Controls.Add(fpsLabel);
+            recordingFps.Width = 58;
+            recordingFps.Minimum = 30;
+            recordingFps.Maximum = 1200;
+            recordingFps.Value = 120;
+            recordingFps.Increment = 30;
+            recordingFps.Margin = new Padding(0, 5, 10, 2);
+            playbackControls.Controls.Add(recordingFps);
             launchButton.Margin = new Padding(0, 3, 2, 2);
             launchButton.Click += delegate { LaunchSelectedCandidate(); };
             playbackControls.Controls.Add(launchButton);
+            selectAllButton.Margin = new Padding(4, 3, 2, 2);
+            selectAllButton.Click += delegate { SelectAllVisibleCandidates(); };
+            playbackControls.Controls.Add(selectAllButton);
+            recordButton.Margin = new Padding(4, 3, 2, 2);
+            recordButton.Click += delegate { RecordSelectedCandidates(); };
+            playbackControls.Controls.Add(recordButton);
             filters.Controls.Add(playbackControls, 0, 2);
             layout.Controls.Add(filters, 0, 0);
 
@@ -563,7 +656,7 @@ namespace Tf2StvParserGui
             grid.AllowUserToDeleteRows = false;
             grid.AllowUserToResizeRows = false;
             grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            grid.MultiSelect = false;
+            grid.MultiSelect = true;
             grid.AutoGenerateColumns = false;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
             grid.BackgroundColor = Color.FromArgb(17, 18, 20);
@@ -581,8 +674,9 @@ namespace Tf2StvParserGui
             AddColumn("Attacker", 88);
             AddColumn("Class", 95);
             AddColumn("Team", 72);
+            AddColumn("Demo", 170);
             AddColumn("Exact kill-event ticks", 175);
-            AddColumn("Tags", 430);
+            AddColumn("Tags", 300);
             grid.SelectionChanged += ShowSelectedCandidate;
             grid.CellDoubleClick += delegate { LaunchSelectedCandidate(); };
             split.Panel1.Controls.Add(grid);
@@ -642,15 +736,15 @@ namespace Tf2StvParserGui
                 IDictionary manifest = serializer.DeserializeObject(File.ReadAllText(manifestPath)) as IDictionary;
                 string source = TextValue(manifest, "source_demo");
                 if (!String.IsNullOrEmpty(source) && File.Exists(source)) demoPath = source;
-                FindTf2ExecutableNearDemo();
+                FindTf2ExecutableNearDemo(demoPath);
             }
             catch { demoPath = null; }
         }
 
-        private void FindTf2ExecutableNearDemo()
+        private void FindTf2ExecutableNearDemo(string sourceDemoPath)
         {
-            if (String.IsNullOrEmpty(demoPath) || !File.Exists(demoPath)) return;
-            DirectoryInfo directory = new FileInfo(demoPath).Directory;
+            if (String.IsNullOrEmpty(sourceDemoPath) || !File.Exists(sourceDemoPath)) return;
+            DirectoryInfo directory = new FileInfo(sourceDemoPath).Directory;
             DirectoryInfo tfDirectory = null;
             for (int depth = 0; directory != null && depth < 8; depth++, directory = directory.Parent)
             {
@@ -662,7 +756,7 @@ namespace Tf2StvParserGui
             }
             if (tfDirectory == null || tfDirectory.Parent == null) return;
             string demosRoot = Path.GetFullPath(Path.Combine(tfDirectory.FullName, "demos")).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            string demoDirectory = Path.GetFullPath(Path.GetDirectoryName(demoPath)).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            string demoDirectory = Path.GetFullPath(Path.GetDirectoryName(sourceDemoPath)).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             if (!demoDirectory.StartsWith(demosRoot, StringComparison.OrdinalIgnoreCase)) return;
             foreach (string executableName in new string[] { "tf_win64.exe", "tf.exe" })
             {
@@ -696,12 +790,13 @@ namespace Tf2StvParserGui
                     "#" + TextValue(candidate, "attacker_user_id"),
                     DisplayValue(candidate, "attacker_class"),
                     DisplayValue(candidate, "attacker_team"),
+                    BatchCandidateSupport.CandidateDemoName(candidate, demoPath),
                     JoinValues(killTicks),
                     JoinCandidateTags(Value(candidate, "tags")));
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
-            summary.Text = visible + " of " + records.Count + " ranked candidates. Kill-event ticks are exact; clip boundaries include lead-in and follow-through.";
+            summary.Text = visible + " of " + records.Count + " ranked candidates. Ctrl-click rows or use Select all visible for an HLAE batch.";
             if (grid.Rows.Count > 0) grid.Rows[0].Selected = true;
             else details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
         }
@@ -711,11 +806,13 @@ namespace Tf2StvParserGui
             if (grid.SelectedRows.Count == 0) return;
             IDictionary candidate = grid.SelectedRows[0].Tag as IDictionary;
             if (candidate == null) return;
-            if (String.IsNullOrEmpty(demoPath) || !File.Exists(demoPath))
+            string candidateDemoPath = BatchCandidateSupport.CandidateDemoPath(candidate, demoPath);
+            if (String.IsNullOrEmpty(candidateDemoPath) || !File.Exists(candidateDemoPath))
             {
                 MessageBox.Show(this, "The original demo path was not found in the export manifest. Reopen the export folder or choose the demo again.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
+            if (String.IsNullOrEmpty(tf2Executable)) FindTf2ExecutableNearDemo(candidateDemoPath);
             if (String.IsNullOrEmpty(tf2Executable) || !File.Exists(tf2Executable))
             {
                 using (OpenFileDialog dialog = new OpenFileDialog())
@@ -744,7 +841,7 @@ namespace Tf2StvParserGui
                     return;
                 }
                 DeleteStalePlaybackVdms(gameDirectory);
-                string stagedDemo = StageDemoForPlayback(gameDirectory);
+                string stagedDemo = StageDemoForPlayback(gameDirectory, candidateDemoPath);
                 string playbackVdm = WritePlaybackVdm(gameDirectory, stagedDemo, targetTick, focusStvAttacker ? attackerUserId : 0);
                 string arguments = "-novid -console -game tf +playdemo " + Quote(stagedDemo);
                 Process launchedTf2 = Process.Start(new ProcessStartInfo
@@ -791,11 +888,11 @@ namespace Tf2StvParserGui
             return false;
         }
 
-        private string StageDemoForPlayback(string gameDirectory)
+        private string StageDemoForPlayback(string gameDirectory, string sourceDemoPath)
         {
             string demoDirectory = Path.Combine(gameDirectory, "demos", "tf2fragdemohelper");
             Directory.CreateDirectory(demoDirectory);
-            string sourceName = Path.GetFileNameWithoutExtension(demoPath);
+            string sourceName = Path.GetFileNameWithoutExtension(sourceDemoPath);
             StringBuilder safeName = new StringBuilder();
             foreach (char character in sourceName)
             {
@@ -803,11 +900,46 @@ namespace Tf2StvParserGui
                 else safeName.Append('_');
             }
             if (safeName.Length == 0) safeName.Append("candidate_demo");
-            string stagedFileName = PlaybackTempPrefix + safeName.ToString() + "_" + new FileInfo(demoPath).Length + ".dem";
+            string stagedFileName = PlaybackTempPrefix + safeName.ToString() + "_" + new FileInfo(sourceDemoPath).Length + ".dem";
             string stagedPath = Path.Combine(demoDirectory, stagedFileName);
-            if (!File.Exists(stagedPath) || new FileInfo(stagedPath).Length != new FileInfo(demoPath).Length)
-                File.Copy(demoPath, stagedPath, true);
+            if (!File.Exists(stagedPath) || new FileInfo(stagedPath).Length != new FileInfo(sourceDemoPath).Length)
+                File.Copy(sourceDemoPath, stagedPath, true);
             return "demos/tf2fragdemohelper/" + stagedFileName;
+        }
+
+        private void SelectAllVisibleCandidates()
+        {
+            grid.ClearSelection();
+            foreach (DataGridViewRow row in grid.Rows) row.Selected = true;
+            summary.Text = grid.SelectedRows.Count + " candidate(s) selected for batch recording.";
+        }
+
+        private void RecordSelectedCandidates()
+        {
+            if (grid.SelectedRows.Count == 0)
+            {
+                MessageBox.Show(this, "Select one or more candidate rows first.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            List<IDictionary> selected = new List<IDictionary>();
+            foreach (DataGridViewRow row in grid.SelectedRows)
+            {
+                IDictionary candidate = row.Tag as IDictionary;
+                if (candidate != null) selected.Add(candidate);
+            }
+            selected.Reverse();
+            try
+            {
+                if (String.IsNullOrEmpty(tf2Executable) && selected.Count > 0)
+                    FindTf2ExecutableNearDemo(BatchCandidateSupport.CandidateDemoPath(selected[0], demoPath));
+                HlaeBatchRecorder.Launch(this, selected, demoPath, tf2Executable, leadInSeconds.Value, outroSeconds.Value, (int)recordingFps.Value);
+                details.AppendText("\r\nHLAE batch prepared for " + selected.Count + " selected candidate(s). The launch is offline-only (-insecure, sv_lan 1).\r\n");
+                ScrollDetailsToBottom();
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(this, "Could not prepare HLAE batch recording:\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private static string WritePlaybackVdm(string gameDirectory, string stagedDemo, int targetTick, int stvAttackerUserId)

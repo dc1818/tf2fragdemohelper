@@ -61,7 +61,7 @@ With custom-resource isolation enabled, the app moves the existing `tf/custom` f
 
 Closing the parser also removes helper-owned temporary staging files: copied demos and VDMs, generated recording CFGs, the offline/profile CFGs, recording logs, and queue/finalizer metadata. Saved video or image-sequence folders, original demos, and parsed export folders (including candidates) are kept.
 
-Optional recording assets are loaded from the packaged `recording_resources` folder selected in the setup dialog. The maximum-quality CFG is applied from the command line and again at the start of every staged demo, so it takes precedence over a low-graphics gameplay config during recording without permanently replacing that config.
+Optional recording assets are loaded from the packaged `recording_resources` folder selected in the setup dialog; no separate third-party tool folder is required. The maximum-quality CFG is applied from the command line and again at the start of every staged demo, so it takes precedence over a low-graphics gameplay config during recording without permanently replacing that config.
 
 | Output option | Files written | Notes |
 |---|---|---|

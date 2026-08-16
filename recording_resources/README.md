@@ -9,3 +9,4 @@ The packaged build places optional recording resources in this folder:
 In the HLAE recording dialog, select the folder that directly contains these `custom`, `hud`, and `skybox` folders.
 
 See `THIRD_PARTY_NOTICES.md` in the package for asset attribution and licensing.
+No separate `third_party` folder is required or used at runtime.

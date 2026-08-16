@@ -27,6 +27,9 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
     def test_particle_selector_only_lists_packaged_particles(self):
         self.assertNotIn('particles/scary_ghost.pcf', self.profile)
 
+    def test_recording_dialog_saves_preferences_when_cancelled(self):
+        self.assertIn('dialog.FormClosing += delegate { SaveSettings(dialog.Settings); };', self.batch)
+
     def test_batch_candidates_keep_source_demo_context(self):
         self.assertIn('candidate["batch_context"]', self.batch)
         self.assertIn('batchContext["source_demo"]', self.batch)

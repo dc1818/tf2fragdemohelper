@@ -233,6 +233,9 @@ namespace Tf2StvParserGui
             if (String.IsNullOrEmpty(initial.FfmpegExecutable)) initial.FfmpegExecutable = FindFfmpegNearHlae(initial.HlaeExecutable) ?? "";
             using (HlaeRecordingSettingsForm dialog = new HlaeRecordingSettingsForm(initial))
             {
+                // These are preferences rather than a recording operation. Keep the current values
+                // even when the user closes the setup window with Cancel or the title-bar button.
+                dialog.FormClosing += delegate { SaveSettings(dialog.Settings); };
                 if (dialog.ShowDialog(owner) != DialogResult.OK) return;
                 HlaeRecordingSettings settings = dialog.Settings;
                 ValidateSettings(settings, output);

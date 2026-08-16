@@ -24,6 +24,9 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('Path.Combine(hlaeDirectory, "AfxHookSource.dll")', self.batch)
         self.assertIn('-force32bit', self.batch)
 
+    def test_particle_selector_only_lists_packaged_particles(self):
+        self.assertNotIn('particles/scary_ghost.pcf', self.profile)
+
     def test_batch_candidates_keep_source_demo_context(self):
         self.assertIn('candidate["batch_context"]', self.batch)
         self.assertIn('batchContext["source_demo"]', self.batch)

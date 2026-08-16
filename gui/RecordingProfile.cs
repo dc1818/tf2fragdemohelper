@@ -583,7 +583,7 @@ namespace Tf2StvParserGui
             "particles/impact_fx.pcf", "particles/item_fx.pcf", "particles/medicgun_attrib.pcf",
             "particles/medicgun_beam.pcf", "particles/muzzle_flash.pcf", "particles/nailtrails.pcf",
             "particles/nemesis.pcf", "particles/player_recent_teleport.pcf", "particles/rocketbackblast.pcf",
-            "particles/rocketjumptrail.pcf", "particles/rockettrail.pcf", "particles/scary_ghost.pcf",
+            "particles/rocketjumptrail.pcf", "particles/rockettrail.pcf",
             "particles/shellejection.pcf", "particles/smoke_blackbillow.pcf",
             "particles/smoke_blackbillow_hoodoo.pcf", "particles/soldierbuff.pcf", "particles/sparks.pcf",
             "particles/speechbubbles.pcf", "particles/stickybomb.pcf", "particles/teleport_status.pcf",

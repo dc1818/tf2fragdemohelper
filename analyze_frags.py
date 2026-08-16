@@ -1038,6 +1038,16 @@ def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimel
     if closed_rounds or timeline is None or not timeline.sample_count:
         return closed_rounds
 
+    # A sign-on / warmup `teamplay_round_active` is not evidence that a match
+    # has started.  This matters on tournament servers: players can fight
+    # while the F4 ready-up prompt is still visible.  If that initial active
+    # event was seen but it never followed a real round transition, require a
+    # later explicit transition instead of falling back to the first PvP kill.
+    # The public-server fallback remains available for recordings that begin
+    # mid-round and contain no round-state event at all.
+    if any(event_name(item) == "teamplay_round_active" for item in event_list):
+        return closed_rounds
+
     # Community/public demos commonly begin after a CTF or payload round is
     # already underway and end before it resets. In that case there is no
     # round-transition event inside the recording to form a closed interval.

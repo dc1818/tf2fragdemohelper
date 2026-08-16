@@ -77,6 +77,18 @@ class RoundStateTests(unittest.TestCase):
 
         self.assertEqual(ANALYZER.build_rounds(events, timeline), [])
 
+    def test_public_server_fallback_rejects_initial_active_during_tournament_ready_up(self):
+        timeline = ANALYZER.StateTimeline()
+        timeline.sample_count = 2
+        timeline.players[1].append((90, {"team": "blu", "class": "demoman", "life_state": "alive", "health": 175}))
+        timeline.players[2].append((90, {"team": "red", "class": "soldier", "life_state": "alive", "health": 200}))
+        events = [
+            {"tick": 6, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 100, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2}},
+        ]
+
+        self.assertEqual(ANALYZER.build_rounds(events, timeline), [])
+
     def test_casual_waiting_end_can_activate_a_round(self):
         events = [
             {"tick": 50, "event_type": "teamplay_waiting_begins", "event": {}},

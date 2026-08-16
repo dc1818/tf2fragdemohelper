@@ -187,151 +187,14 @@ namespace Tf2StvParserGui
         }
     }
 
-    internal sealed class HlaeRecordingSettings
-    {
-        public string FfmpegExecutable;
-        public string HlaeExecutable;
-        public string Tf2Executable;
-        public string OutputDirectory;
-    }
-
-    internal sealed class HlaeRecordingSettingsForm : Form
-    {
-        private readonly TextBox hlaeBox = new TextBox();
-        private readonly TextBox ffmpegBox = new TextBox();
-        private readonly TextBox tf2Box = new TextBox();
-        private readonly TextBox outputBox = new TextBox();
-
-        public HlaeRecordingSettings Settings
-        {
-            get
-            {
-                return new HlaeRecordingSettings
-                {
-                    FfmpegExecutable = ffmpegBox.Text.Trim(),
-                    HlaeExecutable = hlaeBox.Text.Trim(),
-                    Tf2Executable = tf2Box.Text.Trim(),
-                    OutputDirectory = outputBox.Text.Trim()
-                };
-            }
-        }
-
-        public HlaeRecordingSettingsForm(HlaeRecordingSettings initial)
-        {
-            Text = "HLAE batch recording setup (offline only)";
-            StartPosition = FormStartPosition.CenterParent;
-            MinimumSize = new System.Drawing.Size(760, 270);
-            Size = new System.Drawing.Size(820, 290);
-            Font = new System.Drawing.Font("Segoe UI", 9F);
-            BackColor = System.Drawing.Color.FromArgb(30, 32, 36);
-            ForeColor = System.Drawing.Color.Gainsboro;
-
-            TableLayoutPanel layout = new TableLayoutPanel();
-            layout.Dock = DockStyle.Fill;
-            layout.Padding = new Padding(14);
-            layout.ColumnCount = 3;
-            layout.RowCount = 6;
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
-            Controls.Add(layout);
-
-            AddPathRow(layout, 0, "FFmpeg.exe", ffmpegBox, initial.FfmpegExecutable, BrowseFfmpeg);
-            AddPathRow(layout, 1, "HLAE.exe", hlaeBox, initial.HlaeExecutable, BrowseHlae);
-            AddPathRow(layout, 2, "TF2 executable", tf2Box, initial.Tf2Executable, BrowseTf2);
-            AddPathRow(layout, 3, "Recording output", outputBox, initial.OutputDirectory, BrowseOutput);
-
-            Label safety = new Label();
-            safety.Text = "The app always launches HLAE with -insecure and +sv_lan 1, blocks connect/retry commands, and permits demo playback only.";
-            safety.AutoSize = true;
-            safety.ForeColor = System.Drawing.Color.LightGreen;
-            safety.Margin = new Padding(3, 8, 3, 3);
-            layout.SetColumnSpan(safety, 3);
-            layout.Controls.Add(safety, 0, 4);
-
-            FlowLayoutPanel buttons = new FlowLayoutPanel();
-            buttons.Dock = DockStyle.Fill;
-            buttons.FlowDirection = FlowDirection.RightToLeft;
-            Button ok = new Button();
-            ok.Text = "Prepare and launch";
-            ok.Width = 140;
-            ok.DialogResult = DialogResult.OK;
-            Button cancel = new Button();
-            cancel.Text = "Cancel";
-            cancel.Width = 90;
-            cancel.DialogResult = DialogResult.Cancel;
-            buttons.Controls.Add(ok);
-            buttons.Controls.Add(cancel);
-            layout.SetColumnSpan(buttons, 3);
-            layout.Controls.Add(buttons, 0, 5);
-            AcceptButton = ok;
-            CancelButton = cancel;
-        }
-
-        private static void AddPathRow(TableLayoutPanel layout, int row, string labelText, TextBox box, string value, EventHandler browse)
-        {
-            Label label = new Label();
-            label.Text = labelText;
-            label.AutoSize = true;
-            label.Margin = new Padding(3, 9, 3, 3);
-            layout.Controls.Add(label, 0, row);
-            box.Text = value ?? "";
-            box.Dock = DockStyle.Fill;
-            layout.Controls.Add(box, 1, row);
-            Button button = new Button();
-            button.Text = "Browse";
-            button.Width = 95;
-            button.Click += browse;
-            layout.Controls.Add(button, 2, row);
-        }
-
-        private void BrowseHlae(object sender, EventArgs e)
-        {
-            using (OpenFileDialog dialog = new OpenFileDialog())
-            {
-                dialog.Filter = "HLAE (HLAE.exe)|HLAE.exe|Executable (*.exe)|*.exe";
-                if (File.Exists(hlaeBox.Text)) dialog.FileName = hlaeBox.Text;
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                {
-                    hlaeBox.Text = dialog.FileName;
-                    if (!File.Exists(ffmpegBox.Text)) ffmpegBox.Text = HlaeBatchRecorder.FindFfmpegNearHlae(dialog.FileName) ?? "";
-                }
-            }
-        }
-
-        private void BrowseFfmpeg(object sender, EventArgs e)
-        {
-            using (OpenFileDialog dialog = new OpenFileDialog())
-            {
-                dialog.Filter = "FFmpeg (ffmpeg.exe)|ffmpeg.exe|Executable (*.exe)|*.exe";
-                if (File.Exists(ffmpegBox.Text)) dialog.FileName = ffmpegBox.Text;
-                if (dialog.ShowDialog(this) == DialogResult.OK) ffmpegBox.Text = dialog.FileName;
-            }
-        }
-
-        private void BrowseTf2(object sender, EventArgs e)
-        {
-            using (OpenFileDialog dialog = new OpenFileDialog())
-            {
-                dialog.Filter = "Team Fortress 2|tf_win64.exe;tf.exe|Executable (*.exe)|*.exe";
-                if (File.Exists(tf2Box.Text)) dialog.FileName = tf2Box.Text;
-                if (dialog.ShowDialog(this) == DialogResult.OK) tf2Box.Text = dialog.FileName;
-            }
-        }
-
-        private void BrowseOutput(object sender, EventArgs e)
-        {
-            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
-            {
-                if (Directory.Exists(outputBox.Text)) dialog.SelectedPath = outputBox.Text;
-                if (dialog.ShowDialog(this) == DialogResult.OK) outputBox.Text = dialog.SelectedPath;
-            }
-        }
-    }
-
     internal static class HlaeBatchRecorder
     {
         private const double TickRate = 66.6666667;
+        private static readonly object ActiveRecordingLock = new object();
+        private static Process activeHlaeProcess;
+        private static string activeTf2Executable;
+        private static DateTime activeLaunchTime;
+        private static RecordingProfileSession activeProfileSession;
 
         private sealed class Clip
         {
@@ -435,34 +298,55 @@ namespace Tf2StvParserGui
             string outputDirectory = Path.Combine(settings.OutputDirectory, "tf2fragdemohelper_batch_" + sessionId);
             Directory.CreateDirectory(stagedDirectory);
             Directory.CreateDirectory(outputDirectory);
-            WriteOfflineConfig(gameDirectory);
-
-            List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory, sessionId);
-            if (demos.Count == 0) throw new InvalidOperationException("None of the selected candidates had a valid source demo and playback tick.");
-            StageDemosAndWriteVdms(demos, stagedDirectory, gameDirectory, sessionId, fps, output, jpgQuality);
-            WriteQueueManifest(demos, outputDirectory, leadSeconds, outroSeconds, fps, output, jpgQuality);
-
-            string hlaeDirectory = Path.GetDirectoryName(settings.HlaeExecutable);
-            bool x64 = Is64BitTf2(settings.Tf2Executable);
-            string hook = x64 ? Path.Combine(hlaeDirectory, "x64", "AfxHookSource.dll") : Path.Combine(hlaeDirectory, "AfxHookSource.dll");
-            string gameArguments = "-steam -insecure +sv_lan 1 -novid -window -console -no_texture_stream -afxGame tf " +
-                (x64 ? "" : "-force32bit ") +
-                "+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +playdemo " + demos[0].StagedRelativePath;
-            string hlaeArguments = "-customLoader -autoStart -noGui " +
-                "-programPath " + Quote(settings.Tf2Executable) + " " +
-                "-cmdLine " + Quote(gameArguments) + " " +
-                "-hookDllPath " + Quote(hook);
-
-            DateTime launchTime = DateTime.Now;
-            Process.Start(new ProcessStartInfo
+            RecordingProfileSession profile = null;
+            try
             {
-                FileName = settings.HlaeExecutable,
-                Arguments = hlaeArguments,
-                WorkingDirectory = hlaeDirectory,
-                UseShellExecute = true
-            });
-            if (output == HlaeRecordingOutput.TgaSequence || output == HlaeRecordingOutput.JpgSequence)
-                StartImageSequenceFinalizer(demos, gameDirectory, settings.Tf2Executable, launchTime, outputDirectory);
+                profile = RecordingProfileManager.Apply(gameDirectory, sessionId, settings);
+                WriteOfflineConfig(gameDirectory);
+
+                List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory, sessionId);
+                if (demos.Count == 0) throw new InvalidOperationException("None of the selected candidates had a valid source demo and playback tick.");
+                StageDemosAndWriteVdms(demos, stagedDirectory, gameDirectory, sessionId, fps, output, jpgQuality);
+                WriteQueueManifest(demos, outputDirectory, leadSeconds, outroSeconds, fps, output, jpgQuality, settings);
+
+                string hlaeDirectory = Path.GetDirectoryName(settings.HlaeExecutable);
+                bool x64 = Is64BitTf2(settings.Tf2Executable);
+                string hook = x64 ? Path.Combine(hlaeDirectory, "x64", "AfxHookSource.dll") : Path.Combine(hlaeDirectory, "AfxHookSource.dll");
+                int width;
+                int height;
+                ParseResolution(settings.Resolution, out width, out height);
+                string dxArgument = DxLevelArgument(settings.DxLevel);
+                string gameArguments = "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf " +
+                    "-w " + width + " -h " + height + " " + dxArgument +
+                    (x64 ? "" : "-force32bit ") +
+                    "+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +playdemo " + demos[0].StagedRelativePath;
+                string hlaeArguments = "-customLoader -autoStart -noGui " +
+                    "-programPath " + Quote(settings.Tf2Executable) + " " +
+                    "-cmdLine " + Quote(gameArguments) + " " +
+                    "-hookDllPath " + Quote(hook);
+
+                DateTime launchTime = DateTime.Now;
+                Process hlae = Process.Start(new ProcessStartInfo
+                {
+                    FileName = settings.HlaeExecutable,
+                    Arguments = hlaeArguments,
+                    WorkingDirectory = hlaeDirectory,
+                    UseShellExecute = true
+                });
+                lock (ActiveRecordingLock)
+                {
+                    activeHlaeProcess = hlae;
+                    activeTf2Executable = settings.Tf2Executable;
+                    activeLaunchTime = launchTime;
+                    activeProfileSession = profile;
+                }
+                StartRecordingFinalizer(demos, gameDirectory, settings.Tf2Executable, launchTime, outputDirectory, output, profile);
+            }
+            catch
+            {
+                if (profile != null) RecordingProfileManager.Restore(profile, true);
+                throw;
+            }
         }
 
         private static List<DemoQueue> BuildQueue(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, string outputDirectory, string sessionId)
@@ -555,6 +439,7 @@ namespace Tf2StvParserGui
             lines.Add("demoactions");
             lines.Add("{");
             int action = 1;
+            AddCommandAction(lines, action++, 1, "Apply movie profile", "exec tf2fragdemohelper_recording_profile");
             int previousEnd = -1;
             foreach (Clip clip in demo.Clips)
             {
@@ -563,7 +448,7 @@ namespace Tf2StvParserGui
                 if (clip.EndTick <= clip.StartTick)
                     clip.EndTick = clip.StartTick + 1;
 
-                int seekActionTick = previousEnd < 0 ? 1 : previousEnd + 1;
+                int seekActionTick = previousEnd < 0 ? 2 : previousEnd + 1;
                 AddSkipAction(lines, action++, seekActionTick, clip.StartTick);
                 AddCommandAction(lines, action++, clip.StartTick + 1, "Record " + clip.CandidateId, "exec " + clip.StartConfigRelative);
                 AddCommandAction(lines, action++, clip.EndTick, "Stop " + clip.CandidateId, "exec " + clip.StopConfigRelative);
@@ -623,23 +508,36 @@ namespace Tf2StvParserGui
             return "echo TF2FRAG_RECORD_END " + candidateId + "; " + stop + "; host_framerate 0";
         }
 
-        private static void StartImageSequenceFinalizer(List<DemoQueue> demos, string gameDirectory, string tf2Executable, DateTime launchTime, string outputDirectory)
+        private static void StartRecordingFinalizer(List<DemoQueue> demos, string gameDirectory, string tf2Executable, DateTime launchTime, string outputDirectory, HlaeRecordingOutput output, RecordingProfileSession profile)
         {
             Thread worker = new Thread(delegate()
             {
                 try
                 {
                     WaitForTf2ToExit(tf2Executable, launchTime);
-                    foreach (DemoQueue demo in demos)
+                    if (output == HlaeRecordingOutput.TgaSequence || output == HlaeRecordingOutput.JpgSequence)
                     {
-                        foreach (Clip clip in demo.Clips)
-                            TransferNativeMovieFiles(gameDirectory, clip);
+                        foreach (DemoQueue demo in demos)
+                        {
+                            foreach (Clip clip in demo.Clips)
+                                TransferNativeMovieFiles(gameDirectory, clip);
+                        }
                     }
                 }
                 catch (Exception error)
                 {
                     try { File.WriteAllText(Path.Combine(outputDirectory, "recording_finalize_error.txt"), error.ToString(), new UTF8Encoding(false)); }
                     catch { }
+                }
+                finally
+                {
+                    RecordingProfileManager.Restore(profile, false);
+                    lock (ActiveRecordingLock)
+                    {
+                        activeHlaeProcess = null;
+                        activeTf2Executable = null;
+                        activeProfileSession = null;
+                    }
                 }
             });
             worker.IsBackground = true;
@@ -736,7 +634,7 @@ namespace Tf2StvParserGui
             File.WriteAllLines(Path.Combine(cfgDirectory, "tf2fragdemohelper_offline.cfg"), lines.ToArray(), new UTF8Encoding(false));
         }
 
-        private static void WriteQueueManifest(List<DemoQueue> demos, string outputDirectory, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingOutput output, int jpgQuality)
+        private static void WriteQueueManifest(List<DemoQueue> demos, string outputDirectory, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingOutput output, int jpgQuality, HlaeRecordingSettings settings)
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = Int32.MaxValue;
@@ -752,6 +650,19 @@ namespace Tf2StvParserGui
             if (output == HlaeRecordingOutput.JpgSequence) manifest["jpg_quality"] = jpgQuality;
             manifest["lead_in_seconds"] = leadSeconds;
             manifest["outro_seconds"] = outroSeconds;
+            Dictionary<string, object> movieProfile = new Dictionary<string, object>();
+            movieProfile["resolution"] = settings.Resolution;
+            movieProfile["dx_level"] = settings.DxLevel;
+            movieProfile["maximum_graphics"] = settings.MaximumGraphics;
+            movieProfile["skybox"] = settings.Skybox;
+            movieProfile["hud"] = settings.Hud;
+            movieProfile["viewmodels"] = settings.Viewmodels;
+            movieProfile["viewmodel_fov"] = settings.ViewmodelFov;
+            movieProfile["motion_blur"] = settings.MotionBlur;
+            movieProfile["enhanced_particles"] = settings.EnhancedParticles;
+            movieProfile["isolated_custom_resources"] = settings.IsolateCustomResources;
+            movieProfile["custom_resources"] = settings.CustomResources.ToArray();
+            manifest["movie_profile"] = movieProfile;
             List<object> clips = new List<object>();
             foreach (DemoQueue demo in demos)
             {
@@ -786,6 +697,29 @@ namespace Tf2StvParserGui
                 settings.HlaeExecutable = TextValue(values, "hlae_executable");
                 settings.Tf2Executable = TextValue(values, "tf2_executable");
                 settings.OutputDirectory = TextValue(values, "output_directory");
+                settings.LawenaResourcesDirectory = TextValue(values, "lawena_resources_directory");
+                settings.Resolution = DefaultText(values, "resolution", settings.Resolution);
+                settings.DxLevel = DefaultText(values, "dx_level", settings.DxLevel);
+                settings.Skybox = DefaultText(values, "skybox", settings.Skybox);
+                settings.Hud = DefaultText(values, "hud", settings.Hud);
+                settings.Viewmodels = DefaultText(values, "viewmodels", settings.Viewmodels);
+                settings.ViewmodelFov = DefaultInt(values, "viewmodel_fov", settings.ViewmodelFov);
+                settings.MaximumGraphics = DefaultBool(values, "maximum_graphics", settings.MaximumGraphics);
+                settings.MotionBlur = DefaultBool(values, "motion_blur", settings.MotionBlur);
+                settings.DisableHitSounds = DefaultBool(values, "disable_hit_sounds", settings.DisableHitSounds);
+                settings.DisableVoiceChat = DefaultBool(values, "disable_voice_chat", settings.DisableVoiceChat);
+                settings.MinimalHud = DefaultBool(values, "minimal_hud", settings.MinimalHud);
+                settings.DisableCombatText = DefaultBool(values, "disable_combat_text", settings.DisableCombatText);
+                settings.DisableCrosshair = DefaultBool(values, "disable_crosshair", settings.DisableCrosshair);
+                settings.DisableCrosshairSwitching = DefaultBool(values, "disable_crosshair_switching", settings.DisableCrosshairSwitching);
+                settings.HudPlayerModel = DefaultBool(values, "hud_player_model", settings.HudPlayerModel);
+                settings.IsolateCustomResources = DefaultBool(values, "isolate_custom_resources", settings.IsolateCustomResources);
+                settings.DisableAnnouncerVoices = DefaultBool(values, "disable_announcer_voices", settings.DisableAnnouncerVoices);
+                settings.DisableApplauseSounds = DefaultBool(values, "disable_applause_sounds", settings.DisableApplauseSounds);
+                settings.DisableDominationSounds = DefaultBool(values, "disable_domination_sounds", settings.DisableDominationSounds);
+                settings.EnhancedParticles = DefaultBool(values, "enhanced_particles", settings.EnhancedParticles);
+                ReadStringList(values, "custom_resources", settings.CustomResources);
+                ReadStringList(values, "enhanced_particle_files", settings.EnhancedParticleFiles);
             }
             catch { }
             return settings;
@@ -803,6 +737,29 @@ namespace Tf2StvParserGui
                 values["hlae_executable"] = settings.HlaeExecutable;
                 values["tf2_executable"] = settings.Tf2Executable;
                 values["output_directory"] = settings.OutputDirectory;
+                values["lawena_resources_directory"] = settings.LawenaResourcesDirectory;
+                values["resolution"] = settings.Resolution;
+                values["dx_level"] = settings.DxLevel;
+                values["skybox"] = settings.Skybox;
+                values["hud"] = settings.Hud;
+                values["viewmodels"] = settings.Viewmodels;
+                values["viewmodel_fov"] = settings.ViewmodelFov;
+                values["maximum_graphics"] = settings.MaximumGraphics;
+                values["motion_blur"] = settings.MotionBlur;
+                values["disable_hit_sounds"] = settings.DisableHitSounds;
+                values["disable_voice_chat"] = settings.DisableVoiceChat;
+                values["minimal_hud"] = settings.MinimalHud;
+                values["disable_combat_text"] = settings.DisableCombatText;
+                values["disable_crosshair"] = settings.DisableCrosshair;
+                values["disable_crosshair_switching"] = settings.DisableCrosshairSwitching;
+                values["hud_player_model"] = settings.HudPlayerModel;
+                values["isolate_custom_resources"] = settings.IsolateCustomResources;
+                values["disable_announcer_voices"] = settings.DisableAnnouncerVoices;
+                values["disable_applause_sounds"] = settings.DisableApplauseSounds;
+                values["disable_domination_sounds"] = settings.DisableDominationSounds;
+                values["enhanced_particles"] = settings.EnhancedParticles;
+                values["custom_resources"] = settings.CustomResources.ToArray();
+                values["enhanced_particle_files"] = settings.EnhancedParticleFiles.ToArray();
                 File.WriteAllText(path, serializer.Serialize(values), new UTF8Encoding(false));
             }
             catch { }
@@ -839,6 +796,103 @@ namespace Tf2StvParserGui
         {
             try { return Convert.ToInt32(Value(values, key)); }
             catch { return 0; }
+        }
+
+        public static void ShutdownActiveRecording()
+        {
+            Process hlae;
+            string tf2Executable;
+            DateTime launchTime;
+            RecordingProfileSession profile;
+            lock (ActiveRecordingLock)
+            {
+                hlae = activeHlaeProcess;
+                tf2Executable = activeTf2Executable;
+                launchTime = activeLaunchTime;
+                profile = activeProfileSession;
+            }
+            if (!String.IsNullOrEmpty(tf2Executable)) StopTf2Process(tf2Executable, launchTime);
+            if (hlae != null)
+            {
+                try
+                {
+                    if (!hlae.HasExited)
+                    {
+                        hlae.CloseMainWindow();
+                        if (!hlae.WaitForExit(3000)) hlae.Kill();
+                    }
+                }
+                catch { }
+                finally { hlae.Dispose(); }
+            }
+            if (profile != null) RecordingProfileManager.Restore(profile, true);
+            else RecordingProfileManager.RestoreActiveSession(true);
+        }
+
+        private static void StopTf2Process(string executable, DateTime launchTime)
+        {
+            string processName = Path.GetFileNameWithoutExtension(executable);
+            foreach (Process process in Process.GetProcessesByName(processName))
+            {
+                try
+                {
+                    if (process.StartTime < launchTime.AddSeconds(-5)) continue;
+                    process.CloseMainWindow();
+                    if (!process.WaitForExit(5000)) process.Kill();
+                }
+                catch { }
+                finally { process.Dispose(); }
+            }
+        }
+
+        private static void ParseResolution(string value, out int width, out int height)
+        {
+            width = 2560;
+            height = 1440;
+            string[] parts = (value ?? "").ToLowerInvariant().Split('x');
+            if (parts.Length != 2) return;
+            int parsedWidth;
+            int parsedHeight;
+            if (Int32.TryParse(parts[0], out parsedWidth) && Int32.TryParse(parts[1], out parsedHeight) && parsedWidth >= 640 && parsedHeight >= 360)
+            {
+                width = parsedWidth;
+                height = parsedHeight;
+            }
+        }
+
+        private static string DxLevelArgument(string value)
+        {
+            if (String.IsNullOrEmpty(value) || value.StartsWith("Default", StringComparison.OrdinalIgnoreCase)) return "";
+            int space = value.IndexOf(' ');
+            string level = space < 0 ? value : value.Substring(0, space);
+            return "-dxlevel " + level + " ";
+        }
+
+        private static string DefaultText(IDictionary values, string key, string fallback)
+        {
+            string value = TextValue(values, key);
+            return String.IsNullOrEmpty(value) ? fallback : value;
+        }
+
+        private static int DefaultInt(IDictionary values, string key, int fallback)
+        {
+            try { return values != null && values.Contains(key) ? Convert.ToInt32(values[key]) : fallback; }
+            catch { return fallback; }
+        }
+
+        private static bool DefaultBool(IDictionary values, string key, bool fallback)
+        {
+            try { return values != null && values.Contains(key) ? Convert.ToBoolean(values[key]) : fallback; }
+            catch { return fallback; }
+        }
+
+        private static void ReadStringList(IDictionary values, string key, IList<string> target)
+        {
+            if (values == null || !values.Contains(key)) return;
+            IList list = values[key] as IList;
+            if (list == null) return;
+            target.Clear();
+            foreach (object item in list) if (item != null) target.Add(Convert.ToString(item));
         }
 
         private static string EscapeVdm(string value)

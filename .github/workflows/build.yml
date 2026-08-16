@@ -29,5 +29,5 @@ jobs:
           if (-not (Test-Path $compiler)) {
             $compiler = "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe"
           }
-          & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /out:TF2_STV_Parser_GUI.exe /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll gui\Program.cs gui\BatchSupport.cs
+          & $compiler /nologo /target:winexe /optimize+ /platform:anycpu /out:TF2_STV_Parser_GUI.exe /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll gui\Program.cs gui\BatchSupport.cs gui\RecordingProfile.cs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

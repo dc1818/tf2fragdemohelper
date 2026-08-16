@@ -12,7 +12,7 @@ if not exist "%CSC%" (
 )
 echo.
 echo Building parser GUI...
-"%CSC%" /nologo /target:winexe /optimize+ /platform:anycpu /out:"%~dp0TF2_STV_Parser_GUI.exe" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "%~dp0gui\Program.cs" "%~dp0gui\BatchSupport.cs"
+"%CSC%" /nologo /target:winexe /optimize+ /platform:anycpu /out:"%~dp0TF2_STV_Parser_GUI.exe" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "%~dp0gui\Program.cs" "%~dp0gui\BatchSupport.cs" "%~dp0gui\RecordingProfile.cs"
 if errorlevel 1 goto :fail
 echo.
 echo BUILD PASSED

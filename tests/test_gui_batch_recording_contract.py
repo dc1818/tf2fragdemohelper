@@ -10,6 +10,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.program = (ROOT / "gui" / "Program.cs").read_text(encoding="utf-8")
         cls.batch = (ROOT / "gui" / "BatchSupport.cs").read_text(encoding="utf-8")
+        cls.profile = (ROOT / "gui" / "RecordingProfile.cs").read_text(encoding="utf-8")
 
     def test_hlae_launcher_is_offline_only(self):
         self.assertIn('-steam -insecure +sv_lan 1', self.batch)
@@ -112,9 +113,61 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('startmovie " + captureBaseName + " raw', self.batch)
 
     def test_ffmpeg_is_discovered_or_selected_before_hlae_launch(self):
-        self.assertIn('AddPathRow(layout, 0, "FFmpeg.exe"', self.batch)
+        self.assertIn('AddPathRow(layout, 0, "FFmpeg.exe"', self.profile)
         self.assertIn('FindFfmpegNearHlae', self.batch)
         self.assertIn('Select ffmpeg.exe at the top of the setup window.', self.batch)
+
+    def test_lawena_movie_settings_are_exposed(self):
+        for label in (
+            '"Resolution"', '"DX level"', '"Skybox"', '"HUD"', '"Viewmodels"',
+            '"Viewmodel FOV"', '"Maximum-quality graphics profile"',
+            '"Enable motion blur"', '"Disable hit sounds"', '"Disable voice chat"',
+            '"Minimal HUD"', '"Disable combat text"', '"Disable crosshair"',
+            '"Disable crosshair switching"', '"3D player model in HUD"',
+        ):
+            self.assertIn(label, self.profile)
+        self.assertIn('"98 (Lawena highest)"', self.profile)
+        self.assertIn('"Kill notices only"', self.profile)
+
+    def test_custom_resources_particles_and_skyboxes_are_supported(self):
+        self.assertIn('Temporarily isolate custom resources', self.profile)
+        self.assertIn('Disable announcer voices', self.profile)
+        self.assertIn('Disable applause sounds', self.profile)
+        self.assertIn('Disable domination/revenge sounds', self.profile)
+        self.assertIn('Enable enhanced particles', self.profile)
+        self.assertIn('particles/blood_impact.pcf', self.profile)
+        self.assertIn('particles/default.pcf', self.profile)
+        self.assertIn('particles/particles_manifest.txt', self.profile)
+        self.assertIn('ExtractParticleFiles', self.profile)
+        self.assertIn('InstallSkybox', self.profile)
+        self.assertIn('CopyHud', self.profile)
+
+    def test_maximum_graphics_profile_overrides_low_quality_configs(self):
+        for command in (
+            'mat_picmip -1', 'mat_antialias 8', 'mat_forceaniso 16',
+            'mat_hdr_level 2', 'r_lod 0', 'r_rootlod 0',
+            'r_shadowrendertotexture 1', 'r_waterforceexpensive 1',
+        ):
+            self.assertIn(command, self.profile)
+        self.assertIn('+exec tf2fragdemohelper_recording_profile.cfg', self.batch)
+        self.assertIn('"exec tf2fragdemohelper_recording_profile"', self.batch)
+
+    def test_recording_profile_is_reversible_and_crash_recoverable(self):
+        self.assertIn('active_recording_profile.json', self.profile)
+        self.assertIn('Directory.Move(session.TemporaryCustomDirectory, session.OriginalCustomDirectory)', self.profile)
+        self.assertIn('Directory.Move(session.OriginalCustomDirectory, session.TemporaryCustomDirectory)', self.profile)
+        self.assertIn('RecoverInterruptedSession(null);', self.program)
+        self.assertIn('HlaeBatchRecorder.ShutdownActiveRecording();', self.program)
+        self.assertIn('RecordingProfileManager.Restore(profile, false);', self.batch)
+        self.assertIn('BackupVideoConfigPath', self.profile)
+        self.assertIn('BackupConfigPath', self.profile)
+        self.assertIn('config.cfg', self.profile)
+        self.assertIn('RestoreDxLevel(session);', self.profile)
+
+    def test_lawena_resources_are_optional_sidecar_assets(self):
+        self.assertIn('lawena_resources', self.profile)
+        self.assertIn('pldx_particles.vpk', self.profile)
+        self.assertIn('no_announcer_voices.vpk', self.profile)
 
 
 if __name__ == "__main__":

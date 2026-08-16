@@ -53,8 +53,8 @@ namespace Tf2StvParserGui
             // The integrated candidate browser has a wide grid and a
             // dedicated Back button. Keep the shared window large enough for
             // those controls at normal Windows scaling.
-            MinimumSize = new Size(1200, 680);
-            Size = new Size(1280, 780);
+            MinimumSize = new Size(1400, 760);
+            Size = new Size(1480, 860);
             Font = new Font("Segoe UI", 9F);
             BackColor = Color.FromArgb(30, 32, 36);
             ForeColor = Color.Gainsboro;
@@ -488,7 +488,7 @@ namespace Tf2StvParserGui
         private readonly NumericUpDown minimumScore = new NumericUpDown();
         private readonly NumericUpDown leadInSeconds = new NumericUpDown();
         private readonly NumericUpDown outroSeconds = new NumericUpDown();
-        private readonly NumericUpDown recordingFps = new NumericUpDown();
+        private readonly ComboBox recordingFps = new ComboBox();
         private readonly NumericUpDown jpgQuality = new NumericUpDown();
         private readonly ComboBox recordingOutput = new ComboBox();
         private readonly Button inlinePreviewButton = GreenButton("Preview Selected in TF2", 175);
@@ -633,15 +633,17 @@ namespace Tf2StvParserGui
             outroSeconds.Margin = new Padding(0, 5, 10, 2);
             playbackControls.Controls.Add(outroSeconds);
             Label fpsLabel = new Label();
-            fpsLabel.Text = "Record FPS";
+            fpsLabel.Text = "Capture FPS";
             fpsLabel.AutoSize = true;
             fpsLabel.Margin = new Padding(4, 9, 4, 2);
             playbackControls.Controls.Add(fpsLabel);
-            recordingFps.Width = 58;
-            recordingFps.Minimum = 30;
-            recordingFps.Maximum = 1200;
-            recordingFps.Value = 120;
-            recordingFps.Increment = 30;
+            recordingFps.DropDownStyle = ComboBoxStyle.DropDownList;
+            recordingFps.Width = 72;
+            recordingFps.Items.Add("60");
+            recordingFps.Items.Add("120");
+            recordingFps.Items.Add("240");
+            recordingFps.Items.Add("480");
+            recordingFps.SelectedIndex = 1;
             recordingFps.Margin = new Padding(0, 5, 10, 2);
             playbackControls.Controls.Add(recordingFps);
             filters.Controls.Add(playbackControls, 0, 2);
@@ -698,6 +700,7 @@ namespace Tf2StvParserGui
             grid.AllowUserToAddRows = false;
             grid.AllowUserToDeleteRows = false;
             grid.AllowUserToResizeRows = false;
+            grid.RowHeadersVisible = false;
             grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
             grid.MultiSelect = true;
             grid.AutoGenerateColumns = false;
@@ -724,6 +727,7 @@ namespace Tf2StvParserGui
             grid.CellMouseDown += RememberSelectedRowClick;
             grid.CellClick += ToggleClickedSelectedRow;
             grid.SizeChanged += delegate { PositionPreviewButton(); };
+            grid.Scroll += delegate { PositionPreviewButton(); };
             split.Panel1.Controls.Add(grid);
             inlinePreviewButton.Visible = false;
             inlinePreviewButton.Click += delegate { LaunchSelectedCandidate(); };
@@ -1009,7 +1013,8 @@ namespace Tf2StvParserGui
             DataGridViewRow row = grid.SelectedRows[0];
             Rectangle rowBounds = grid.GetCellDisplayRectangle(0, row.Index, true);
             inlinePreviewButton.Left = Math.Max(8, grid.ClientSize.Width - inlinePreviewButton.Width - 18);
-            inlinePreviewButton.Top = Math.Max(grid.ColumnHeadersHeight + 2, rowBounds.Top + (rowBounds.Height - inlinePreviewButton.Height) / 2);
+            inlinePreviewButton.Top = Math.Max(grid.ColumnHeadersHeight + 1, rowBounds.Top);
+            inlinePreviewButton.Height = Math.Max(1, rowBounds.Height);
             inlinePreviewButton.BringToFront();
         }
 
@@ -1032,7 +1037,8 @@ namespace Tf2StvParserGui
                 if (String.IsNullOrEmpty(tf2Executable) && selected.Count > 0)
                     FindTf2ExecutableNearDemo(BatchCandidateSupport.CandidateDemoPath(selected[0], demoPath));
                 HlaeRecordingOutput output = HlaeRecordingOutputs.FromDisplayName(Convert.ToString(recordingOutput.SelectedItem));
-                HlaeBatchRecorder.Launch(this, selected, demoPath, tf2Executable, leadInSeconds.Value, outroSeconds.Value, (int)recordingFps.Value, output, (int)jpgQuality.Value);
+                int captureFps = Convert.ToInt32(recordingFps.SelectedItem);
+                HlaeBatchRecorder.Launch(this, selected, demoPath, tf2Executable, leadInSeconds.Value, outroSeconds.Value, captureFps, output, (int)jpgQuality.Value);
                 details.AppendText("\r\nHLAE batch prepared for " + selected.Count + " selected candidate(s) as " + HlaeRecordingOutputs.DisplayName(output) + ". The launch is offline-only (-insecure, sv_lan 1).\r\n");
                 ScrollDetailsToBottom();
             }

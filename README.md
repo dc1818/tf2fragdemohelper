@@ -53,7 +53,18 @@ The first build compiles `parser/src/bin/export_all.rs` into `parser/target/rele
 
 Use **Browse demos** to select multiple `.dem` files, or drag several demos onto the parser window. The parser exports and analyzes each demo in the chosen order, then writes a batch-level `manifest.json` and combined `frag_candidates.ndjson`. Each combined candidate contains `batch_context` with `demo_order`, `demo_name`, `source_demo`, and `source_export`, allowing one browser to display and queue candidates from every demo.
 
-In the candidate browser, Ctrl-click rows or use **Select all visible**. Set the lead-in, outro, and recording FPS, then choose **Record selected with HLAE**. The recorder groups candidates by their source demo, sorts them by playback tick, stages each demo beside a generated VDM, records every selected candidate with `mirv_streams`, and automatically advances to the next demo. Each clip receives its own lossless `afxFfmpegLosslessBest` output folder and the batch writes `recording_queue.json` for auditing.
+In the candidate browser, Ctrl-click rows or use **Select all visible**. Set the lead-in, outro, recording FPS, and output type, then choose **Record selected with HLAE**. The recorder groups candidates by their source demo, sorts them by playback tick, stages each demo beside a generated VDM, records every selected candidate with `mirv_streams`, and automatically advances to the next demo. Each clip receives its own output folder and the batch writes `recording_queue.json` for auditing.
+
+| Output option | Files written | Notes |
+|---|---|---|
+| TGA image sequence | `frame00000.tga`, `frame00001.tga`, … | Lossless frames; no HLAE FFmpeg installation needed; largest storage use. |
+| JPG image sequence | `frame_000001.jpg`, `frame_000002.jpg`, … | Smaller frame sequence; choose quality 1–100 (90 default). Requires HLAE FFmpeg. |
+| MP4 – standard | `video.mp4` | HLAE's standard FFmpeg MP4 preset. |
+| MP4 – compatible | `video.mp4` | HLAE's YUV 4:2:0 preset for broad player/editor compatibility. |
+| MP4 – lossless | `video.mp4` | HLAE's lossless high-file-size MP4 preset. |
+| AVI – raw | `video.avi` | Uncompressed AVI; extremely large. |
+
+The selected FPS is applied both to `host_framerate` and `mirv_streams record fps`, as TF2 requires. TGA is the only option that works without FFmpeg; the GUI checks for HLAE's FFmpeg installation before launching JPG, MP4, or AVI recording.
 
 Recording mode supports current retail `tf_win64.exe` with HLAE 2.189.0 or newer and the x64 `AfxHookSource.dll`, plus legacy `tf.exe` with the 32-bit hook. HLAE's FFmpeg component is required. The launcher is intentionally offline-only: it always supplies `-insecure` and `+sv_lan 1`, generates a config that disables downloads and replaces `connect`/`retry`, and does not expose custom launch arguments. It is for local demo playback only and must never be used to join a server.
 

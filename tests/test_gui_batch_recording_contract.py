@@ -36,6 +36,16 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('mirv_streams record start', self.batch)
         self.assertIn('mirv_streams record end; host_framerate 0', self.batch)
         self.assertIn('playdemo ', self.batch)
+        self.assertIn('recorderWarmupTicks', self.batch)
+        self.assertIn('recorderFlushTicks', self.batch)
+        self.assertIn('TF2FRAG_RECORD_START', self.batch)
+        self.assertIn('TF2FRAG_RECORD_END', self.batch)
+
+    def test_recorder_is_initialized_and_logged_before_demo_playback(self):
+        self.assertIn('-condebug', self.batch)
+        self.assertIn('con_logfile tf2fragdemohelper_recording.log', self.batch)
+        self.assertIn('TF2FRAG_RECORDER_INIT', self.batch)
+        self.assertIn('TF2FRAG_RECORDER_READY', self.batch)
 
     def test_lawena_style_output_choices_are_exposed(self):
         self.assertIn('TGA image sequence', self.program)

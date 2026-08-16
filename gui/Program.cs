@@ -1193,7 +1193,7 @@ namespace Tf2StvParserGui
             if (String.Equals(tag, "kills_to_secure_cap", StringComparison.Ordinal) ||
                 String.Equals(tag, "cap_secure_kills", StringComparison.Ordinal) ||
                 String.Equals(tag, "objective_capture_followup", StringComparison.Ordinal))
-                return "kills to secure cap";
+                return "kills_to_secure_cap";
             return tag;
         }
 
@@ -1202,7 +1202,7 @@ namespace Tf2StvParserGui
             if (String.Equals(reason, "kills_to_secure_cap", StringComparison.Ordinal) ||
                 String.Equals(reason, "cap_secure_kills", StringComparison.Ordinal) ||
                 String.Equals(reason, "kill_sequence_led_to_point_capture", StringComparison.Ordinal))
-                return "kills to secure cap (capture followed this sequence)";
+                return "kills_to_secure_cap (capture followed this sequence)";
             return reason;
         }
 

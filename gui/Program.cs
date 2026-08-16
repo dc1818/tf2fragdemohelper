@@ -697,7 +697,7 @@ namespace Tf2StvParserGui
                     DisplayValue(candidate, "attacker_class"),
                     DisplayValue(candidate, "attacker_team"),
                     JoinValues(killTicks),
-                    JoinValues(Value(candidate, "tags")));
+                    JoinCandidateTags(Value(candidate, "tags")));
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
@@ -894,7 +894,7 @@ namespace Tf2StvParserGui
             StringBuilder text = new StringBuilder();
             text.AppendLine("Candidate " + DisplayValue(candidate, "candidate_id"));
             text.AppendLine("Score " + DisplayValue(candidate, "overall_score") + " | attacker #" + DisplayValue(candidate, "attacker_user_id") + " | " + DisplayValue(candidate, "attacker_team") + " " + DisplayValue(candidate, "attacker_class"));
-            text.AppendLine("Tags: " + JoinValues(Value(candidate, "tags")));
+            text.AppendLine("Tags: " + JoinCandidateTags(Value(candidate, "tags")));
             text.AppendLine();
             IList kills = List(candidate, "kills");
             text.AppendLine("Kill count: " + kills.Count);
@@ -964,7 +964,7 @@ namespace Tf2StvParserGui
 
         private static void AppendObjectiveEvidence(StringBuilder text, IList objectives)
         {
-            text.AppendLine("Objective follow-up evidence");
+            text.AppendLine("Cap-secure/objective follow-up evidence");
             if (objectives.Count == 0)
             {
                 text.AppendLine("  None within eight seconds after the final kill.");
@@ -1089,7 +1089,7 @@ namespace Tf2StvParserGui
                 if (!points.StartsWith("-", StringComparison.Ordinal)) points = "+" + points;
                 string eventTick = TextValue(contribution, "event_tick");
                 string count = TextValue(contribution, "count");
-                text.AppendLine("  " + points + "  " + DisplayValue(contribution, "reason") +
+                text.AppendLine("  " + points + "  " + CandidateReasonName(DisplayValue(contribution, "reason")) +
                     (String.IsNullOrEmpty(count) ? "" : " (count " + count + ")") +
                     (String.IsNullOrEmpty(eventTick) ? "" : " at tick " + eventTick));
             }
@@ -1177,6 +1177,33 @@ namespace Tf2StvParserGui
             List<string> text = new List<string>();
             foreach (object value in list) text.Add(Convert.ToString(value));
             return String.Join(", ", text.ToArray());
+        }
+
+        private static string JoinCandidateTags(object values)
+        {
+            IList list = values as IList;
+            if (list == null || list.Count == 0) return "None";
+            List<string> text = new List<string>();
+            foreach (object value in list) text.Add(CandidateTagName(Convert.ToString(value)));
+            return String.Join(", ", text.ToArray());
+        }
+
+        private static string CandidateTagName(string tag)
+        {
+            if (String.Equals(tag, "kills_to_secure_cap", StringComparison.Ordinal) ||
+                String.Equals(tag, "cap_secure_kills", StringComparison.Ordinal) ||
+                String.Equals(tag, "objective_capture_followup", StringComparison.Ordinal))
+                return "kills to secure cap";
+            return tag;
+        }
+
+        private static string CandidateReasonName(string reason)
+        {
+            if (String.Equals(reason, "kills_to_secure_cap", StringComparison.Ordinal) ||
+                String.Equals(reason, "cap_secure_kills", StringComparison.Ordinal) ||
+                String.Equals(reason, "kill_sequence_led_to_point_capture", StringComparison.Ordinal))
+                return "kills to secure cap (capture followed this sequence)";
+            return reason;
         }
 
         private sealed class CandidateRecord

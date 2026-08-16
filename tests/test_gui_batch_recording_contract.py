@@ -49,6 +49,9 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('startmovie \\"', self.batch)
         self.assertIn('jpeg_quality ', self.batch)
         self.assertIn('? "endmovie"', self.batch)
+        self.assertIn('clip.CaptureBaseName', self.batch)
+        self.assertIn('TransferNativeMovieFiles', self.batch)
+        self.assertIn('WaitForTf2ToExit', self.batch)
 
     def test_hlae_launch_matches_tf2_custom_loader_guidance(self):
         self.assertIn('-customLoader -autoStart -noGui', self.batch)

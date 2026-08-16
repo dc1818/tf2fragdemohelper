@@ -77,6 +77,59 @@ class RoundStateTests(unittest.TestCase):
 
         self.assertEqual(ANALYZER.build_rounds(events, timeline), [])
 
+    def test_casual_waiting_end_can_activate_a_round(self):
+        events = [
+            {"tick": 50, "event_type": "teamplay_waiting_begins", "event": {}},
+            {"tick": 90, "event_type": "teamplay_waiting_ends", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2}},
+            {"tick": 500, "event_type": "teamplay_round_win", "event": {"team": 3}},
+        ]
+
+        rounds = ANALYZER.build_rounds(events)
+
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["live_start_tick"], 100)
+        self.assertEqual(rounds[0]["activation_trigger"], {"event": "teamplay_waiting_ends", "tick": 90})
+
+    def test_casual_setup_still_delays_live_play_after_waiting_ends(self):
+        events = [
+            {"tick": 50, "event_type": "teamplay_waiting_begins", "event": {}},
+            {"tick": 90, "event_type": "teamplay_waiting_ends", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 300, "event_type": "teamplay_setup_finished", "event": {}},
+            {"tick": 350, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2}},
+            {"tick": 500, "event_type": "teamplay_round_win", "event": {"team": 3}},
+        ]
+
+        rounds = ANALYZER.build_rounds(events)
+
+        self.assertEqual(rounds[0]["live_start_tick"], 300)
+        self.assertEqual(rounds[0]["live_start_event"], "teamplay_setup_finished")
+
+    def test_map_rollover_closes_event_confirmed_live_round_at_demo_end(self):
+        events = [
+            {"tick": 90, "event_type": "teamplay_waiting_ends", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2}},
+            {"tick": 400, "event_type": "player_hurt", "event": {"attacker": 1, "user_id": 2}},
+        ]
+
+        rounds = ANALYZER.build_rounds(iter(events))
+
+        self.assertEqual(len(rounds), 1)
+        self.assertEqual(rounds[0]["live_start_tick"], 100)
+        self.assertEqual(rounds[0]["end_tick"], 401)
+        self.assertEqual(rounds[0]["end_reason"], "demo_end_while_event_confirmed_round_active")
+
+    def test_bare_map_initialization_active_event_remains_rejected(self):
+        events = [
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 200, "event_type": "player_death", "event": {"attacker": 1, "user_id": 2}},
+        ]
+
+        self.assertEqual(ANALYZER.build_rounds(events), [])
+
     def test_pov_scope_requires_a_resolved_recorder(self):
         events = ANALYZER.read_events(ROOT / "tests" / "fixture_events.ndjson")
         names = ANALYZER.player_name_history(events)

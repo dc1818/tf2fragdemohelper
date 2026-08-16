@@ -346,6 +346,8 @@ namespace Tf2StvParserGui
             public bool FocusAttacker;
             public string OutputPath;
             public string CaptureBaseName;
+            public string StartConfigRelative;
+            public string StopConfigRelative;
         }
 
         private sealed class DemoQueue
@@ -437,7 +439,7 @@ namespace Tf2StvParserGui
 
             List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory, sessionId);
             if (demos.Count == 0) throw new InvalidOperationException("None of the selected candidates had a valid source demo and playback tick.");
-            StageDemosAndWriteVdms(demos, stagedDirectory, sessionId, fps, output, jpgQuality);
+            StageDemosAndWriteVdms(demos, stagedDirectory, gameDirectory, sessionId, fps, output, jpgQuality);
             WriteQueueManifest(demos, outputDirectory, leadSeconds, outroSeconds, fps, output, jpgQuality);
 
             string hlaeDirectory = Path.GetDirectoryName(settings.HlaeExecutable);
@@ -528,7 +530,7 @@ namespace Tf2StvParserGui
             return result;
         }
 
-        private static void StageDemosAndWriteVdms(List<DemoQueue> demos, string stagedDirectory, string sessionId, int fps, HlaeRecordingOutput output, int jpgQuality)
+        private static void StageDemosAndWriteVdms(List<DemoQueue> demos, string stagedDirectory, string gameDirectory, string sessionId, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
             for (int index = 0; index < demos.Count; index++)
             {
@@ -538,14 +540,15 @@ namespace Tf2StvParserGui
                 demo.StagedRelativePath = "demos/tf2fragdemohelper_batch/" + sessionId + "/" + stagedName;
                 File.Copy(demo.DemoPath, demo.StagedAbsolutePath, true);
             }
+            WriteRecordingConfigs(demos, gameDirectory, sessionId, fps, output, jpgQuality);
             for (int index = 0; index < demos.Count; index++)
             {
                 string nextDemo = index + 1 < demos.Count ? demos[index + 1].StagedRelativePath : null;
-                WriteRecordingVdm(demos[index], nextDemo, fps, output, jpgQuality);
+                WriteRecordingVdm(demos[index], nextDemo);
             }
         }
 
-        private static void WriteRecordingVdm(DemoQueue demo, string nextDemo, int fps, HlaeRecordingOutput output, int jpgQuality)
+        private static void WriteRecordingVdm(DemoQueue demo, string nextDemo)
         {
             int recorderFlushTicks = (int)Math.Round(TickRate * 2.0);
             List<string> lines = new List<string>();
@@ -562,12 +565,8 @@ namespace Tf2StvParserGui
 
                 int seekActionTick = previousEnd < 0 ? 1 : previousEnd + 1;
                 AddSkipAction(lines, action++, seekActionTick, clip.StartTick);
-                string focus = clip.FocusAttacker
-                    ? "spec_autodirector 0; spec_player #" + clip.AttackerUserId + "; spec_mode 4; "
-                    : "";
-                string start = focus + BuildRecordingStartCommand(clip.OutputPath, clip.CaptureBaseName, fps, output, jpgQuality);
-                AddCommandAction(lines, action++, clip.StartTick + 1, "Record " + clip.CandidateId, start);
-                AddCommandAction(lines, action++, clip.EndTick, "Stop " + clip.CandidateId, BuildRecordingStopCommand(output, clip.CandidateId));
+                AddCommandAction(lines, action++, clip.StartTick + 1, "Record " + clip.CandidateId, "exec " + clip.StartConfigRelative);
+                AddCommandAction(lines, action++, clip.EndTick, "Stop " + clip.CandidateId, "exec " + clip.StopConfigRelative);
                 previousEnd = clip.EndTick;
             }
             string finishCommand = String.IsNullOrEmpty(nextDemo) ? "quit" : "playdemo " + nextDemo;
@@ -576,12 +575,40 @@ namespace Tf2StvParserGui
             File.WriteAllLines(Path.ChangeExtension(demo.StagedAbsolutePath, ".vdm"), lines.ToArray(), new UTF8Encoding(false));
         }
 
+        private static void WriteRecordingConfigs(List<DemoQueue> demos, string gameDirectory, string sessionId, int fps, HlaeRecordingOutput output, int jpgQuality)
+        {
+            string relativeDirectory = "tf2fragdemohelper_batch/" + sessionId;
+            string configDirectory = Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_batch", sessionId);
+            Directory.CreateDirectory(configDirectory);
+            foreach (DemoQueue demo in demos)
+            {
+                foreach (Clip clip in demo.Clips)
+                {
+                    string startName = clip.CaptureBaseName + "_start";
+                    string stopName = clip.CaptureBaseName + "_stop";
+                    clip.StartConfigRelative = relativeDirectory + "/" + startName;
+                    clip.StopConfigRelative = relativeDirectory + "/" + stopName;
+                    string focus = clip.FocusAttacker
+                        ? "spec_autodirector 0; spec_player #" + clip.AttackerUserId + "; spec_mode 4; "
+                        : "";
+                    File.WriteAllText(
+                        Path.Combine(configDirectory, startName + ".cfg"),
+                        focus + BuildRecordingStartCommand(clip.OutputPath, clip.CaptureBaseName, fps, output, jpgQuality) + Environment.NewLine,
+                        new UTF8Encoding(false));
+                    File.WriteAllText(
+                        Path.Combine(configDirectory, stopName + ".cfg"),
+                        BuildRecordingStopCommand(output, clip.CandidateId) + Environment.NewLine,
+                        new UTF8Encoding(false));
+                }
+            }
+        }
+
         private static string BuildRecordingStartCommand(string outputPath, string captureBaseName, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
             if (output == HlaeRecordingOutput.TgaSequence)
-                return "echo TF2FRAG_RECORD_START " + captureBaseName + "; host_framerate " + fps + "; startmovie \"" + captureBaseName + "\"; hideconsole";
+                return "echo TF2FRAG_RECORD_START " + captureBaseName + "; host_framerate " + fps + "; startmovie " + captureBaseName + " raw; hideconsole";
             if (output == HlaeRecordingOutput.JpgSequence)
-                return "echo TF2FRAG_RECORD_START " + captureBaseName + "; jpeg_quality " + jpgQuality + "; host_framerate " + fps + "; startmovie \"" + captureBaseName + "\" jpeg; hideconsole";
+                return "echo TF2FRAG_RECORD_START " + captureBaseName + "; jpeg_quality " + jpgQuality + "; host_framerate " + fps + "; startmovie " + captureBaseName + " jpeg; hideconsole";
             return "echo TF2FRAG_RECORD_START " + ForwardSlashes(outputPath) + "; " +
                 "host_framerate " + fps + "; mirv_streams record fps " + fps + "; " +
                 "mirv_streams record screen enabled 1; " + RecordingProfileCommands(output, jpgQuality) +
@@ -700,7 +727,8 @@ namespace Tf2StvParserGui
                 "alias connect \"echo BLOCKED: recording mode cannot connect to servers\"",
                 "alias retry \"echo BLOCKED: recording mode cannot reconnect to servers\"",
                 "alias tf_party_join_request_mode \"echo BLOCKED: matchmaking is disabled in recording mode\"",
-                "engine_no_focus_sleep 0"
+                "engine_no_focus_sleep 0",
+                "snd_mute_losefocus 0"
             });
             lines.Add("con_logfile tf2fragdemohelper_recording.log");
             lines.Add("echo TF2FRAG_RECORDER_INIT");
@@ -718,6 +746,7 @@ namespace Tf2StvParserGui
             manifest["offline_only"] = true;
             manifest["hlae_launch_flags"] = new string[] { "-insecure", "+sv_lan 1" };
             manifest["fps"] = fps;
+            manifest["fps_semantics"] = "captured_frames_per_demo_second";
             manifest["output_format"] = HlaeRecordingOutputs.DisplayName(output);
             manifest["expected_output_files"] = HlaeRecordingOutputs.ExpectedFiles(output);
             if (output == HlaeRecordingOutput.JpgSequence) manifest["jpg_quality"] = jpgQuality;

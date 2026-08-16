@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -344,6 +345,7 @@ namespace Tf2StvParserGui
             public int AttackerUserId;
             public bool FocusAttacker;
             public string OutputPath;
+            public string CaptureBaseName;
         }
 
         private sealed class DemoQueue
@@ -433,7 +435,7 @@ namespace Tf2StvParserGui
             Directory.CreateDirectory(outputDirectory);
             WriteOfflineConfig(gameDirectory);
 
-            List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory);
+            List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory, sessionId);
             if (demos.Count == 0) throw new InvalidOperationException("None of the selected candidates had a valid source demo and playback tick.");
             StageDemosAndWriteVdms(demos, stagedDirectory, sessionId, fps, output, jpgQuality);
             WriteQueueManifest(demos, outputDirectory, leadSeconds, outroSeconds, fps, output, jpgQuality);
@@ -449,6 +451,7 @@ namespace Tf2StvParserGui
                 "-cmdLine " + Quote(gameArguments) + " " +
                 "-hookDllPath " + Quote(hook);
 
+            DateTime launchTime = DateTime.Now;
             Process.Start(new ProcessStartInfo
             {
                 FileName = settings.HlaeExecutable,
@@ -456,9 +459,11 @@ namespace Tf2StvParserGui
                 WorkingDirectory = hlaeDirectory,
                 UseShellExecute = true
             });
+            if (output == HlaeRecordingOutput.TgaSequence || output == HlaeRecordingOutput.JpgSequence)
+                StartImageSequenceFinalizer(demos, gameDirectory, settings.Tf2Executable, launchTime, outputDirectory);
         }
 
-        private static List<DemoQueue> BuildQueue(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, string outputDirectory)
+        private static List<DemoQueue> BuildQueue(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, string outputDirectory, string sessionId)
         {
             Dictionary<string, DemoQueue> byDemo = new Dictionary<string, DemoQueue>(StringComparer.OrdinalIgnoreCase);
             int appearanceOrder = 0;
@@ -516,6 +521,7 @@ namespace Tf2StvParserGui
                     clipNumber++;
                     string name = clipNumber.ToString("D3") + "_" + BatchCandidateSupport.SafeName(Path.GetFileNameWithoutExtension(clip.DemoName)) + "_" + BatchCandidateSupport.SafeName(clip.CandidateId);
                     clip.OutputPath = Path.Combine(outputDirectory, name);
+                    clip.CaptureBaseName = "tf2frag_" + sessionId + "_" + clipNumber.ToString("D3");
                     Directory.CreateDirectory(clip.OutputPath);
                 }
             }
@@ -559,7 +565,7 @@ namespace Tf2StvParserGui
                 string focus = clip.FocusAttacker
                     ? "spec_autodirector 0; spec_player #" + clip.AttackerUserId + "; spec_mode 4; "
                     : "";
-                string start = focus + BuildRecordingStartCommand(clip.OutputPath, fps, output, jpgQuality);
+                string start = focus + BuildRecordingStartCommand(clip.OutputPath, clip.CaptureBaseName, fps, output, jpgQuality);
                 AddCommandAction(lines, action++, clip.StartTick + 1, "Record " + clip.CandidateId, start);
                 AddCommandAction(lines, action++, clip.EndTick, "Stop " + clip.CandidateId, BuildRecordingStopCommand(output, clip.CandidateId));
                 previousEnd = clip.EndTick;
@@ -570,13 +576,12 @@ namespace Tf2StvParserGui
             File.WriteAllLines(Path.ChangeExtension(demo.StagedAbsolutePath, ".vdm"), lines.ToArray(), new UTF8Encoding(false));
         }
 
-        private static string BuildRecordingStartCommand(string outputPath, int fps, HlaeRecordingOutput output, int jpgQuality)
+        private static string BuildRecordingStartCommand(string outputPath, string captureBaseName, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
-            string frameBase = ForwardSlashes(Path.Combine(outputPath, "frame"));
             if (output == HlaeRecordingOutput.TgaSequence)
-                return "echo TF2FRAG_RECORD_START " + frameBase + "; host_framerate " + fps + "; startmovie \"" + frameBase + "\"; hideconsole";
+                return "echo TF2FRAG_RECORD_START " + captureBaseName + "; host_framerate " + fps + "; startmovie \"" + captureBaseName + "\"; hideconsole";
             if (output == HlaeRecordingOutput.JpgSequence)
-                return "echo TF2FRAG_RECORD_START " + frameBase + "; jpeg_quality " + jpgQuality + "; host_framerate " + fps + "; startmovie \"" + frameBase + "\" jpeg; hideconsole";
+                return "echo TF2FRAG_RECORD_START " + captureBaseName + "; jpeg_quality " + jpgQuality + "; host_framerate " + fps + "; startmovie \"" + captureBaseName + "\" jpeg; hideconsole";
             return "echo TF2FRAG_RECORD_START " + ForwardSlashes(outputPath) + "; " +
                 "host_framerate " + fps + "; mirv_streams record fps " + fps + "; " +
                 "mirv_streams record screen enabled 1; " + RecordingProfileCommands(output, jpgQuality) +
@@ -589,6 +594,65 @@ namespace Tf2StvParserGui
                 ? "endmovie"
                 : "mirv_streams record end";
             return "echo TF2FRAG_RECORD_END " + candidateId + "; " + stop + "; host_framerate 0";
+        }
+
+        private static void StartImageSequenceFinalizer(List<DemoQueue> demos, string gameDirectory, string tf2Executable, DateTime launchTime, string outputDirectory)
+        {
+            Thread worker = new Thread(delegate()
+            {
+                try
+                {
+                    WaitForTf2ToExit(tf2Executable, launchTime);
+                    foreach (DemoQueue demo in demos)
+                    {
+                        foreach (Clip clip in demo.Clips)
+                            TransferNativeMovieFiles(gameDirectory, clip);
+                    }
+                }
+                catch (Exception error)
+                {
+                    try { File.WriteAllText(Path.Combine(outputDirectory, "recording_finalize_error.txt"), error.ToString(), new UTF8Encoding(false)); }
+                    catch { }
+                }
+            });
+            worker.IsBackground = true;
+            worker.Name = "TF2 image sequence finalizer";
+            worker.Start();
+        }
+
+        private static void WaitForTf2ToExit(string tf2Executable, DateTime launchTime)
+        {
+            string processName = Path.GetFileNameWithoutExtension(tf2Executable);
+            Process game = null;
+            DateTime deadline = DateTime.Now.AddMinutes(2);
+            while (DateTime.Now < deadline && game == null)
+            {
+                foreach (Process candidate in Process.GetProcessesByName(processName))
+                {
+                    try
+                    {
+                        if (candidate.StartTime >= launchTime.AddSeconds(-5)) { game = candidate; break; }
+                    }
+                    catch { candidate.Dispose(); }
+                }
+                if (game == null) Thread.Sleep(250);
+            }
+            if (game == null) throw new InvalidOperationException("TF2 did not start, so image-sequence files could not be collected.");
+            using (game) game.WaitForExit();
+        }
+
+        private static void TransferNativeMovieFiles(string gameDirectory, Clip clip)
+        {
+            string[] files = Directory.GetFiles(gameDirectory, clip.CaptureBaseName + "*");
+            if (files.Length == 0)
+                throw new FileNotFoundException("TF2 produced no startmovie files for " + clip.CandidateId + ". Check tf2fragdemohelper_recording.log for StartMovie errors.");
+            foreach (string source in files)
+            {
+                string suffix = Path.GetFileName(source).Substring(clip.CaptureBaseName.Length);
+                string destination = Path.Combine(clip.OutputPath, "frame" + suffix);
+                File.Copy(source, destination, true);
+                File.Delete(source);
+            }
         }
 
         private static string RecordingProfileCommands(HlaeRecordingOutput output, int jpgQuality)
@@ -672,6 +736,7 @@ namespace Tf2StvParserGui
                     record["end_tick"] = clip.EndTick;
                     record["attacker_user_id"] = clip.AttackerUserId;
                     record["output_path"] = clip.OutputPath;
+                    record["native_capture_base"] = clip.CaptureBaseName;
                     clips.Add(record);
                 }
             }

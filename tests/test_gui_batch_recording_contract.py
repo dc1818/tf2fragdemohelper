@@ -136,6 +136,8 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
             self.assertIn(label, self.profile)
         self.assertIn('"98 (highest)"', self.profile)
         self.assertIn('"Kill notices only"', self.profile)
+        self.assertIn('new RowStyle(SizeType.Absolute, 110)', self.profile)
+        self.assertIn('q.AutoScroll = false;', self.profile)
         self.assertIn('new RowStyle(SizeType.Absolute, 170)', self.profile)
         self.assertIn('for (int row = 0; row < 4; row++) checks.RowStyles.Add', self.profile)
 
@@ -149,6 +151,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('particles/default.pcf', self.profile)
         self.assertIn('particles/particles_manifest.txt', self.profile)
         self.assertIn('ExtractParticleFiles', self.profile)
+        self.assertIn('Directory.CreateDirectory(Path.Combine(destination, "particles"))', self.profile)
         self.assertIn('InstallSkybox', self.profile)
         self.assertIn('CopyHud', self.profile)
 

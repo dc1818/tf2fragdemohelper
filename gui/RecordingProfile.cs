@@ -201,7 +201,7 @@ namespace Tf2StvParserGui
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 170));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
@@ -220,6 +220,7 @@ namespace Tf2StvParserGui
 
             GroupBox quality = NewGroup("Graphics");
             FlowLayoutPanel q = NewVerticalFlow();
+            q.AutoScroll = false;
             q.Controls.Add(maximumGraphics);
             q.Controls.Add(motionBlur);
             quality.Controls.Add(q);
@@ -981,6 +982,9 @@ namespace Tf2StvParserGui
 
         private static void ExtractParticleFiles(string tf2Executable, string vpk, string destination, IList<string> files)
         {
+            // TF2's VPK extractor writes paths relative to its working folder
+            // but does not create this nested directory itself.
+            Directory.CreateDirectory(Path.Combine(destination, "particles"));
             string root = Path.GetDirectoryName(tf2Executable);
             string[] tools = new string[]
             {

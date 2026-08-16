@@ -491,7 +491,7 @@ namespace Tf2StvParserGui
         private readonly NumericUpDown recordingFps = new NumericUpDown();
         private readonly NumericUpDown jpgQuality = new NumericUpDown();
         private readonly ComboBox recordingOutput = new ComboBox();
-        private readonly Button launchButton = GreenButton("Open selected in TF2", 165);
+        private readonly Button launchButton = GreenButton("Preview Candidate in TF2", 175);
         private readonly Button selectAllButton = GreenButton("Select all visible", 135);
         private readonly Button recordButton = GreenButton("Record selected with HLAE", 205);
         private readonly Button backButton = GreenButton("Back to parser", 165);

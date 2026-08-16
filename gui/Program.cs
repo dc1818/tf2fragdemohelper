@@ -491,7 +491,7 @@ namespace Tf2StvParserGui
         private readonly NumericUpDown recordingFps = new NumericUpDown();
         private readonly NumericUpDown jpgQuality = new NumericUpDown();
         private readonly ComboBox recordingOutput = new ComboBox();
-        private readonly Button launchButton = GreenButton("Preview Candidate in TF2", 175);
+        private readonly DataGridViewButtonColumn previewColumn = new DataGridViewButtonColumn();
         private readonly Button selectAllButton = GreenButton("Select all visible", 135);
         private readonly Button recordButton = GreenButton("Record selected with HLAE", 205);
         private readonly Button backButton = GreenButton("Back to parser", 165);
@@ -644,9 +644,6 @@ namespace Tf2StvParserGui
             recordingFps.Increment = 30;
             recordingFps.Margin = new Padding(0, 5, 10, 2);
             playbackControls.Controls.Add(recordingFps);
-            launchButton.Margin = new Padding(0, 3, 2, 2);
-            launchButton.Click += delegate { LaunchSelectedCandidate(); };
-            playbackControls.Controls.Add(launchButton);
             filters.Controls.Add(playbackControls, 0, 2);
 
             FlowLayoutPanel recordingControls = new FlowLayoutPanel();
@@ -723,9 +720,11 @@ namespace Tf2StvParserGui
             AddColumn("Demo", 170);
             AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 300);
+            AddPreviewColumn();
             grid.SelectionChanged += ShowSelectedCandidate;
             grid.CellMouseDown += RememberSelectedRowClick;
             grid.CellClick += ToggleClickedSelectedRow;
+            grid.CellContentClick += PreviewSelectedCandidate;
             split.Panel1.Controls.Add(grid);
 
             details.Dock = DockStyle.Fill;
@@ -750,6 +749,18 @@ namespace Tf2StvParserGui
             column.Width = width;
             column.SortMode = DataGridViewColumnSortMode.NotSortable;
             grid.Columns.Add(column);
+        }
+
+        private void AddPreviewColumn()
+        {
+            previewColumn.HeaderText = "";
+            previewColumn.Name = "PreviewSelectedInTf2";
+            previewColumn.Width = 175;
+            previewColumn.Text = "Preview Selected in TF2";
+            previewColumn.UseColumnTextForButtonValue = false;
+            previewColumn.FlatStyle = FlatStyle.Flat;
+            previewColumn.Visible = false;
+            grid.Columns.Add(previewColumn);
         }
 
         private void LoadCandidates()
@@ -842,7 +853,8 @@ namespace Tf2StvParserGui
                     DisplayValue(candidate, "attacker_team"),
                     BatchCandidateSupport.CandidateDemoName(candidate, demoPath),
                     JoinValues(killTicks),
-                    JoinCandidateTags(Value(candidate, "tags")));
+                    JoinCandidateTags(Value(candidate, "tags")),
+                    "");
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
@@ -980,6 +992,7 @@ namespace Tf2StvParserGui
         {
             clickedSelectedRow = -1;
             if (e.RowIndex < 0 || e.Button != MouseButtons.Left || ModifierKeys != Keys.None) return;
+            if (e.ColumnIndex == previewColumn.Index) return;
             if (grid.Rows[e.RowIndex].Selected) clickedSelectedRow = e.RowIndex;
         }
 
@@ -992,12 +1005,20 @@ namespace Tf2StvParserGui
             UpdateCandidateActionAvailability();
         }
 
+        private void PreviewSelectedCandidate(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex >= 0 && e.ColumnIndex == previewColumn.Index && grid.SelectedRows.Count == 1)
+                LaunchSelectedCandidate();
+        }
+
         private void UpdateCandidateActionAvailability()
         {
             int selectedCount = grid.SelectedRows.Count;
             bool hasSelection = selectedCount > 0;
             recordButton.Enabled = hasSelection;
-            launchButton.Enabled = selectedCount == 1;
+            previewColumn.Visible = selectedCount == 1;
+            foreach (DataGridViewRow row in grid.Rows)
+                row.Cells[previewColumn.Index].Value = selectedCount == 1 && row.Selected ? "Preview Selected in TF2" : "";
         }
 
         private void RecordSelectedCandidates()

@@ -50,7 +50,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('int selectedCount = grid.SelectedRows.Count;', self.program)
         self.assertIn('private readonly Button inlinePreviewButton', self.program)
         self.assertIn('inlinePreviewButton.Visible = selectedCount == 1;', self.program)
-        self.assertIn('Preview Selected in TF2', self.program)
+        self.assertIn('Preview Selected Clip in TF2', self.program)
         self.assertIn('recordingControls.Controls.Add(recordButton);', self.program)
         self.assertIn('recordingControls.Controls.Add(inlinePreviewButton);', self.program)
         self.assertNotIn('private void PositionPreviewButton()', self.program)
@@ -58,6 +58,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
     def test_candidate_rows_toggle_off_and_double_click_does_not_preview(self):
         self.assertIn('grid.CellMouseDown += RememberSelectedRowClick;', self.program)
         self.assertIn('grid.CellClick += ToggleClickedSelectedRow;', self.program)
+        self.assertIn('if (e.RowIndex < 0 || e.RowIndex != clickedSelectedRow) return;', self.program)
         self.assertIn('grid.Rows[e.RowIndex].Selected = false;', self.program)
         self.assertNotIn('grid.CellDoubleClick += delegate { LaunchSelectedCandidate(); };', self.program)
         self.assertNotIn('private readonly Button launchButton', self.program)

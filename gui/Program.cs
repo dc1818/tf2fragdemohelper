@@ -729,6 +729,7 @@ namespace Tf2StvParserGui
             details.TextChanged += delegate { ScrollDetailsToBottom(); };
             split.Panel2.Controls.Add(details);
             UpdateOutputDescription();
+            UpdateCandidateActionAvailability();
         }
 
         private void AddColumn(string name, int width)
@@ -834,9 +835,14 @@ namespace Tf2StvParserGui
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
-            summary.Text = visible + " of " + records.Count + " ranked candidates. Ctrl-click rows or use Select all visible for an HLAE batch.";
-            if (grid.Rows.Count > 0) grid.Rows[0].Selected = true;
-            else details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
+            summary.Text = visible + " of " + records.Count + " ranked candidates. Select one or more rows before recording.";
+            grid.ClearSelection();
+            grid.CurrentCell = null;
+            if (grid.Rows.Count == 0)
+                details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
+            else
+                details.Clear();
+            UpdateCandidateActionAvailability();
         }
 
         private void LaunchSelectedCandidate()
@@ -950,6 +956,15 @@ namespace Tf2StvParserGui
             grid.ClearSelection();
             foreach (DataGridViewRow row in grid.Rows) row.Selected = true;
             summary.Text = grid.SelectedRows.Count + " candidate(s) selected for batch recording.";
+            UpdateCandidateActionAvailability();
+        }
+
+        private void UpdateCandidateActionAvailability()
+        {
+            int selectedCount = grid.SelectedRows.Count;
+            bool hasSelection = selectedCount > 0;
+            recordButton.Enabled = hasSelection;
+            launchButton.Enabled = selectedCount == 1;
         }
 
         private void RecordSelectedCandidates()
@@ -1070,7 +1085,12 @@ namespace Tf2StvParserGui
 
         private void ShowSelectedCandidate(object sender, EventArgs e)
         {
-            if (grid.SelectedRows.Count == 0) return;
+            UpdateCandidateActionAvailability();
+            if (grid.SelectedRows.Count == 0)
+            {
+                details.Clear();
+                return;
+            }
             IDictionary candidate = grid.SelectedRows[0].Tag as IDictionary;
             if (candidate == null) return;
             StringBuilder text = new StringBuilder();

@@ -829,6 +829,53 @@ namespace Tf2StvParserGui
             else RecordingProfileManager.RestoreActiveSession(true);
         }
 
+        // Only paths under the helper's own names are removed here. Parsed
+        // exports, source demos, and recorded video/frame folders are never
+        // touched by this cleanup.
+        public static void CleanupTemporaryFiles()
+        {
+            string gameDirectory = null;
+            lock (ActiveRecordingLock)
+            {
+                if (activeProfileSession != null) gameDirectory = activeProfileSession.TfDirectory;
+            }
+            HlaeRecordingSettings settings = LoadSettings();
+            if (String.IsNullOrEmpty(gameDirectory) && settings != null && !String.IsNullOrEmpty(settings.Tf2Executable))
+            {
+                string tfRoot = Path.GetDirectoryName(settings.Tf2Executable);
+                gameDirectory = String.IsNullOrEmpty(tfRoot) ? null : Path.Combine(tfRoot, "tf");
+            }
+            if (!String.IsNullOrEmpty(gameDirectory) && Directory.Exists(gameDirectory))
+            {
+                DeleteOwnedDirectory(Path.Combine(gameDirectory, "demos", "tf2fragdemohelper_batch"));
+                DeleteOwnedDirectory(Path.Combine(gameDirectory, "demos", "tf2fragdemohelper"));
+                DeleteOwnedDirectory(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_batch"));
+                DeleteOwnedFile(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_offline.cfg"));
+                DeleteOwnedFile(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_recording_profile.cfg"));
+                DeleteOwnedFile(Path.Combine(gameDirectory, "tf2fragdemohelper_recording.log"));
+            }
+            if (settings != null && !String.IsNullOrEmpty(settings.OutputDirectory) && Directory.Exists(settings.OutputDirectory))
+            {
+                foreach (string directory in Directory.GetDirectories(settings.OutputDirectory, "tf2fragdemohelper_batch_*"))
+                {
+                    DeleteOwnedFile(Path.Combine(directory, "recording_queue.json"));
+                    DeleteOwnedFile(Path.Combine(directory, "recording_finalize_error.txt"));
+                }
+            }
+        }
+
+        private static void DeleteOwnedDirectory(string path)
+        {
+            try { if (Directory.Exists(path)) Directory.Delete(path, true); }
+            catch { }
+        }
+
+        private static void DeleteOwnedFile(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch { }
+        }
+
         private static void StopTf2Process(string executable, DateTime launchTime)
         {
             string processName = Path.GetFileNameWithoutExtension(executable);

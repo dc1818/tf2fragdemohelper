@@ -21,7 +21,11 @@ namespace Tf2StvParserGui
             Application.SetCompatibleTextRenderingDefault(false);
             RecordingProfileManager.RecoverInterruptedSession(null);
             MainForm main = new MainForm();
-            main.FormClosing += delegate { HlaeBatchRecorder.ShutdownActiveRecording(); };
+            main.FormClosing += delegate
+            {
+                HlaeBatchRecorder.ShutdownActiveRecording();
+                HlaeBatchRecorder.CleanupTemporaryFiles();
+            };
             Application.Run(main);
         }
     }

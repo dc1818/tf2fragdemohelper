@@ -59,6 +59,8 @@ The recording setup also provides a reversible Lawena-style movie profile. It in
 
 With custom-resource isolation enabled, the app moves the existing `tf/custom` folder into a timestamped backup, creates a temporary recording-only `custom` folder, and restores the original folder after TF2 exits. It also backs up the movie profile CFG, `video.txt`, and the pre-launch DirectX registry value. Closing the parser stops the recording session before restoring. An active-session manifest in Local AppData lets the next parser launch recover files after an interrupted run. If automatic restore cannot finish, the original files remain under `tf/tf2fragdemohelper_backups/<session>` with `RESTORE_REQUIRED.txt` instead of being deleted.
 
+Closing the parser also removes helper-owned temporary staging files: copied demos and VDMs, generated recording CFGs, the offline/profile CFGs, recording logs, and queue/finalizer metadata. Saved video or image-sequence folders, original demos, and parsed export folders (including candidates) are kept.
+
 Optional Lawena assets are loaded from the packaged `lawena_resources` folder or from an existing Lawena folder selected in the setup dialog. The maximum-quality CFG is applied from the command line and again at the start of every staged demo, so it takes precedence over a low-graphics gameplay config during recording without permanently replacing that config.
 
 | Output option | Files written | Notes |

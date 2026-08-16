@@ -158,6 +158,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('Directory.Move(session.OriginalCustomDirectory, session.TemporaryCustomDirectory)', self.profile)
         self.assertIn('RecoverInterruptedSession(null);', self.program)
         self.assertIn('HlaeBatchRecorder.ShutdownActiveRecording();', self.program)
+        self.assertIn('HlaeBatchRecorder.CleanupTemporaryFiles();', self.program)
         self.assertIn('RecordingProfileManager.Restore(profile, false);', self.batch)
         self.assertIn('BackupVideoConfigPath', self.profile)
         self.assertIn('BackupConfigPath', self.profile)
@@ -168,6 +169,15 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('lawena_resources', self.profile)
         self.assertIn('pldx_particles.vpk', self.profile)
         self.assertIn('no_announcer_voices.vpk', self.profile)
+
+    def test_parser_close_removes_only_helper_owned_recording_temporary_files(self):
+        self.assertIn('demos", "tf2fragdemohelper_batch', self.batch)
+        self.assertIn('demos", "tf2fragdemohelper', self.batch)
+        self.assertIn('cfg", "tf2fragdemohelper_batch', self.batch)
+        self.assertIn('tf2fragdemohelper_offline.cfg', self.batch)
+        self.assertIn('tf2fragdemohelper_recording.log', self.batch)
+        self.assertIn('recording_queue.json', self.batch)
+        self.assertIn('exports, source demos, and recorded video/frame folders are never', self.batch)
 
 
 if __name__ == "__main__":

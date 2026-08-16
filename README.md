@@ -58,7 +58,7 @@ In the candidate browser, Ctrl-click rows or use **Select all visible**. Set the
 | Output option | Files written | Notes |
 |---|---|---|
 | TGA image sequence | `frame00000.tga`, `frame00001.tga`, … | Lossless frames; no HLAE FFmpeg installation needed; largest storage use. |
-| JPG image sequence | `frame_000001.jpg`, `frame_000002.jpg`, … | Smaller frame sequence; choose quality 1–100 (90 default). Requires HLAE FFmpeg. |
+| JPG image sequence | `frame_000001.jpg`, `frame_000002.jpg`, … | Smaller frame sequence; choose quality 1–100 (100 highest, 90 default). Requires HLAE FFmpeg. |
 | MP4 – standard | `video.mp4` | HLAE's standard FFmpeg MP4 preset. |
 | MP4 – compatible | `video.mp4` | HLAE's YUV 4:2:0 preset for broad player/editor compatibility. |
 | MP4 – lossless | `video.mp4` | HLAE's lossless high-file-size MP4 preset. |

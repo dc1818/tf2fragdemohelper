@@ -9,6 +9,60 @@ using System.Windows.Forms;
 
 namespace Tf2StvParserGui
 {
+    internal enum HlaeRecordingOutput
+    {
+        TgaSequence,
+        JpgSequence,
+        Mp4Standard,
+        Mp4Compatible,
+        Mp4Lossless,
+        AviRaw
+    }
+
+    internal static class HlaeRecordingOutputs
+    {
+        public static HlaeRecordingOutput FromDisplayName(string value)
+        {
+            if (String.Equals(value, "JPG image sequence", StringComparison.Ordinal)) return HlaeRecordingOutput.JpgSequence;
+            if (String.Equals(value, "MP4 - standard", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Standard;
+            if (String.Equals(value, "MP4 - compatible", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Compatible;
+            if (String.Equals(value, "MP4 - lossless", StringComparison.Ordinal)) return HlaeRecordingOutput.Mp4Lossless;
+            if (String.Equals(value, "AVI - raw", StringComparison.Ordinal)) return HlaeRecordingOutput.AviRaw;
+            return HlaeRecordingOutput.TgaSequence;
+        }
+
+        public static string DisplayName(HlaeRecordingOutput output)
+        {
+            switch (output)
+            {
+                case HlaeRecordingOutput.JpgSequence: return "JPG image sequence";
+                case HlaeRecordingOutput.Mp4Standard: return "MP4 - standard";
+                case HlaeRecordingOutput.Mp4Compatible: return "MP4 - compatible";
+                case HlaeRecordingOutput.Mp4Lossless: return "MP4 - lossless";
+                case HlaeRecordingOutput.AviRaw: return "AVI - raw";
+                default: return "TGA image sequence";
+            }
+        }
+
+        public static bool RequiresFfmpeg(HlaeRecordingOutput output)
+        {
+            return output != HlaeRecordingOutput.TgaSequence;
+        }
+
+        public static string ExpectedFiles(HlaeRecordingOutput output)
+        {
+            switch (output)
+            {
+                case HlaeRecordingOutput.JpgSequence: return "frame_000001.jpg, frame_000002.jpg, ...";
+                case HlaeRecordingOutput.Mp4Standard:
+                case HlaeRecordingOutput.Mp4Compatible:
+                case HlaeRecordingOutput.Mp4Lossless: return "video.mp4";
+                case HlaeRecordingOutput.AviRaw: return "video.avi";
+                default: return "frame00000.tga, frame00001.tga, ...";
+            }
+        }
+    }
+
     internal sealed class BatchExportEntry
     {
         public readonly int Order;
@@ -284,7 +338,7 @@ namespace Tf2StvParserGui
             public readonly List<Clip> Clips = new List<Clip>();
         }
 
-        public static void Launch(Form owner, IList<IDictionary> selectedCandidates, string fallbackDemoPath, string suggestedTf2Executable, decimal leadSeconds, decimal outroSeconds, int fps)
+        public static void Launch(Form owner, IList<IDictionary> selectedCandidates, string fallbackDemoPath, string suggestedTf2Executable, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
             if (selectedCandidates == null || selectedCandidates.Count == 0)
                 throw new InvalidOperationException("Select at least one candidate to record.");
@@ -295,13 +349,13 @@ namespace Tf2StvParserGui
             {
                 if (dialog.ShowDialog(owner) != DialogResult.OK) return;
                 HlaeRecordingSettings settings = dialog.Settings;
-                ValidateSettings(settings);
+                ValidateSettings(settings, output);
                 SaveSettings(settings);
-                PrepareAndLaunch(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, fps, settings);
+                PrepareAndLaunch(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, fps, output, jpgQuality, settings);
             }
         }
 
-        private static void ValidateSettings(HlaeRecordingSettings settings)
+        private static void ValidateSettings(HlaeRecordingSettings settings, HlaeRecordingOutput output)
         {
             if (!File.Exists(settings.HlaeExecutable) || !String.Equals(Path.GetFileName(settings.HlaeExecutable), "HLAE.exe", StringComparison.OrdinalIgnoreCase))
                 throw new FileNotFoundException("Select HLAE.exe from a current HLAE installation.", settings.HlaeExecutable);
@@ -322,12 +376,15 @@ namespace Tf2StvParserGui
                 throw new FileNotFoundException(Is64BitTf2(settings.Tf2Executable)
                     ? "This HLAE installation does not contain x64\\AfxHookSource.dll. TF2 x64 requires HLAE 2.189.0 or newer."
                     : "This HLAE installation does not contain AfxHookSource.dll.", hook);
-            string ffmpeg = Path.Combine(hlaeDirectory, "ffmpeg", "bin", "ffmpeg.exe");
-            if (!File.Exists(ffmpeg))
-                throw new FileNotFoundException("Lossless batch recording requires HLAE's FFmpeg component. Re-run the HLAE installer with FFmpeg enabled.", ffmpeg);
+            if (HlaeRecordingOutputs.RequiresFfmpeg(output))
+            {
+                string ffmpeg = Path.Combine(hlaeDirectory, "ffmpeg", "bin", "ffmpeg.exe");
+                if (!File.Exists(ffmpeg))
+                    throw new FileNotFoundException(HlaeRecordingOutputs.DisplayName(output) + " recording requires HLAE's FFmpeg component. Re-run the HLAE installer with FFmpeg enabled.", ffmpeg);
+            }
         }
 
-        private static void PrepareAndLaunch(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingSettings settings)
+        private static void PrepareAndLaunch(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingOutput output, int jpgQuality, HlaeRecordingSettings settings)
         {
             string tfRoot = Path.GetDirectoryName(settings.Tf2Executable);
             string gameDirectory = Path.Combine(tfRoot, "tf");
@@ -342,8 +399,8 @@ namespace Tf2StvParserGui
 
             List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory);
             if (demos.Count == 0) throw new InvalidOperationException("None of the selected candidates had a valid source demo and playback tick.");
-            StageDemosAndWriteVdms(demos, stagedDirectory, sessionId, fps);
-            WriteQueueManifest(demos, outputDirectory, leadSeconds, outroSeconds, fps);
+            StageDemosAndWriteVdms(demos, stagedDirectory, sessionId, fps, output, jpgQuality);
+            WriteQueueManifest(demos, outputDirectory, leadSeconds, outroSeconds, fps, output, jpgQuality);
 
             string hlaeDirectory = Path.GetDirectoryName(settings.HlaeExecutable);
             bool x64 = Is64BitTf2(settings.Tf2Executable);
@@ -428,7 +485,7 @@ namespace Tf2StvParserGui
             return result;
         }
 
-        private static void StageDemosAndWriteVdms(List<DemoQueue> demos, string stagedDirectory, string sessionId, int fps)
+        private static void StageDemosAndWriteVdms(List<DemoQueue> demos, string stagedDirectory, string sessionId, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
             for (int index = 0; index < demos.Count; index++)
             {
@@ -441,11 +498,11 @@ namespace Tf2StvParserGui
             for (int index = 0; index < demos.Count; index++)
             {
                 string nextDemo = index + 1 < demos.Count ? demos[index + 1].StagedRelativePath : null;
-                WriteRecordingVdm(demos[index], nextDemo, fps);
+                WriteRecordingVdm(demos[index], nextDemo, fps, output, jpgQuality);
             }
         }
 
-        private static void WriteRecordingVdm(DemoQueue demo, string nextDemo, int fps)
+        private static void WriteRecordingVdm(DemoQueue demo, string nextDemo, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
             List<string> lines = new List<string>();
             lines.Add("demoactions");
@@ -464,11 +521,7 @@ namespace Tf2StvParserGui
                 string focus = clip.FocusAttacker
                     ? "spec_autodirector 0; spec_player #" + clip.AttackerUserId + "; spec_mode 4; "
                     : "";
-                string start = focus +
-                    "engine_no_focus_sleep 0; snd_mute_losefocus 0; hideconsole; " +
-                    "host_framerate " + fps + "; mirv_streams record fps " + fps + "; " +
-                    "mirv_streams record screen enabled 1; mirv_streams record screen settings afxFfmpegLosslessBest; " +
-                    "mirv_streams record name \"" + ForwardSlashes(clip.OutputPath) + "\"; mirv_streams record start";
+                string start = focus + BuildRecordingStartCommand(clip.OutputPath, fps, output, jpgQuality);
                 AddCommandAction(lines, action++, clip.StartTick + 1, "Record " + clip.CandidateId, start);
                 AddCommandAction(lines, action++, clip.EndTick, "Stop " + clip.CandidateId, "mirv_streams record end; host_framerate 0");
                 previousEnd = clip.EndTick;
@@ -477,6 +530,30 @@ namespace Tf2StvParserGui
             AddCommandAction(lines, action++, previousEnd + 2, "Continue batch", finishCommand);
             lines.Add("}");
             File.WriteAllLines(Path.ChangeExtension(demo.StagedAbsolutePath, ".vdm"), lines.ToArray(), new UTF8Encoding(false));
+        }
+
+        private static string BuildRecordingStartCommand(string outputPath, int fps, HlaeRecordingOutput output, int jpgQuality)
+        {
+            string profile;
+            if (output == HlaeRecordingOutput.JpgSequence)
+            {
+                int qualityScale = Math.Max(2, Math.Min(31, 2 + ((100 - jpgQuality) * 29 / 99)));
+                profile = "mirv_streams settings add ffmpeg tf2fragdemohelper_jpg \"-c:v mjpeg -q:v " + qualityScale + " {QUOTE}{AFX_STREAM_PATH}/frame_%06d.jpg{QUOTE}\"; " +
+                    "mirv_streams record screen settings tf2fragdemohelper_jpg; ";
+            }
+            else
+            {
+                string setting = "afxClassic";
+                if (output == HlaeRecordingOutput.Mp4Standard) setting = "afxFfmpeg";
+                else if (output == HlaeRecordingOutput.Mp4Compatible) setting = "afxFfmpegYuv420p";
+                else if (output == HlaeRecordingOutput.Mp4Lossless) setting = "afxFfmpegLosslessBest";
+                else if (output == HlaeRecordingOutput.AviRaw) setting = "afxFfmpegRaw";
+                profile = "mirv_streams record screen settings " + setting + "; ";
+            }
+            return "engine_no_focus_sleep 0; snd_mute_losefocus 0; hideconsole; " +
+                "host_framerate " + fps + "; mirv_streams record fps " + fps + "; " +
+                "mirv_streams record screen enabled 1; " + profile +
+                "mirv_streams record name \"" + ForwardSlashes(outputPath) + "\"; mirv_streams record start";
         }
 
         private static void AddSkipAction(List<string> lines, int action, int actionTick, int targetTick)
@@ -520,7 +597,7 @@ namespace Tf2StvParserGui
             File.WriteAllLines(Path.Combine(cfgDirectory, "tf2fragdemohelper_offline.cfg"), lines, new UTF8Encoding(false));
         }
 
-        private static void WriteQueueManifest(List<DemoQueue> demos, string outputDirectory, decimal leadSeconds, decimal outroSeconds, int fps)
+        private static void WriteQueueManifest(List<DemoQueue> demos, string outputDirectory, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = Int32.MaxValue;
@@ -530,6 +607,9 @@ namespace Tf2StvParserGui
             manifest["offline_only"] = true;
             manifest["hlae_launch_flags"] = new string[] { "-insecure", "+sv_lan 1" };
             manifest["fps"] = fps;
+            manifest["output_format"] = HlaeRecordingOutputs.DisplayName(output);
+            manifest["expected_output_files"] = HlaeRecordingOutputs.ExpectedFiles(output);
+            if (output == HlaeRecordingOutput.JpgSequence) manifest["jpg_quality"] = jpgQuality;
             manifest["lead_in_seconds"] = leadSeconds;
             manifest["outro_seconds"] = outroSeconds;
             List<object> clips = new List<object>();

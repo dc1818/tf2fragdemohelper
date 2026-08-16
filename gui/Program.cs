@@ -34,7 +34,7 @@ namespace Tf2StvParserGui
         private readonly Button cancelButton = GreenButton("Cancel", 90);
         private readonly Button openButton = GreenButton("Open export folder", 150);
         private readonly Button candidatesButton = GreenButton("View candidates", 130);
-        private readonly Button loadExportButton = GreenButton("Load parsed export", 160);
+        private readonly Button loadExportButton = GreenButton("Load Previously Parsed Export", 210);
         private readonly ProgressBar progress = new ProgressBar();
         private readonly Label status = new Label();
         private TableLayoutPanel parserLayout;

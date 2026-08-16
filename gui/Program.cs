@@ -538,7 +538,7 @@ namespace Tf2StvParserGui
         private readonly ComboBox recordingFps = new ComboBox();
         private readonly NumericUpDown jpgQuality = new NumericUpDown();
         private readonly ComboBox recordingOutput = new ComboBox();
-        private readonly Button inlinePreviewButton = GreenButton("Preview Selected in TF2", 175);
+        private readonly Button inlinePreviewButton = GreenButton("Preview Selected Clip in TF2", 190);
         private readonly Button selectAllButton = GreenButton("Select all visible", 135);
         private readonly Button recordButton = GreenButton("Record selected with HLAE", 205);
         private readonly Button backButton = GreenButton("Back to parser", 165);
@@ -1051,7 +1051,7 @@ namespace Tf2StvParserGui
 
         private void ToggleClickedSelectedRow(object sender, DataGridViewCellEventArgs e)
         {
-            if (e.RowIndex != clickedSelectedRow) return;
+            if (e.RowIndex < 0 || e.RowIndex != clickedSelectedRow) return;
             clickedSelectedRow = -1;
             grid.Rows[e.RowIndex].Selected = false;
             if (grid.SelectedRows.Count == 0) grid.CurrentCell = null;

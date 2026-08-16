@@ -107,6 +107,8 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
     def test_grid_starts_with_rank_column_and_no_row_header_column(self):
         self.assertIn('grid.RowHeadersVisible = false;', self.program)
         self.assertIn('AddColumn("#", 42);', self.program)
+        self.assertIn('FitCandidateColumnsToContent();', self.program)
+        self.assertIn('column.GetPreferredWidth(DataGridViewAutoSizeColumnMode.AllCells, true)', self.program)
 
     def test_hlae_launch_matches_tf2_custom_loader_guidance(self):
         self.assertIn('-customLoader -autoStart -noGui', self.batch)

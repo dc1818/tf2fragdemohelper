@@ -849,6 +849,14 @@ namespace Tf2StvParserGui
         // touched by this cleanup.
         public static void CleanupTemporaryFiles()
         {
+            string restoreReason;
+            if (!RecordingProfileManager.IsRestoreComplete(out restoreReason))
+            {
+                MessageBox.Show("Temporary recording cleanup was not started because restore verification has not completed.\r\n\r\n" + restoreReason,
+                    "TF2 Frag Demo Helper restore warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            List<string> failures = new List<string>();
             string gameDirectory = null;
             lock (ActiveRecordingLock)
             {
@@ -862,33 +870,44 @@ namespace Tf2StvParserGui
             }
             if (!String.IsNullOrEmpty(gameDirectory) && Directory.Exists(gameDirectory))
             {
-                DeleteOwnedDirectory(Path.Combine(gameDirectory, "demos", "tf2fragdemohelper_batch"));
-                DeleteOwnedDirectory(Path.Combine(gameDirectory, "demos", "tf2fragdemohelper"));
-                DeleteOwnedDirectory(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_batch"));
-                DeleteOwnedFile(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_offline.cfg"));
-                DeleteOwnedFile(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_recording_profile.cfg"));
-                DeleteOwnedFile(Path.Combine(gameDirectory, "tf2fragdemohelper_recording.log"));
+                DeleteOwnedDirectory(Path.Combine(gameDirectory, "demos", "tf2fragdemohelper_batch"), failures);
+                DeleteOwnedDirectory(Path.Combine(gameDirectory, "demos", "tf2fragdemohelper"), failures);
+                DeleteOwnedDirectory(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_batch"), failures);
+                DeleteOwnedFile(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_offline.cfg"), failures);
+                DeleteOwnedFile(Path.Combine(gameDirectory, "cfg", "tf2fragdemohelper_recording_profile.cfg"), failures);
+                DeleteOwnedFile(Path.Combine(gameDirectory, "tf2fragdemohelper_recording.log"), failures);
             }
             if (settings != null && !String.IsNullOrEmpty(settings.OutputDirectory) && Directory.Exists(settings.OutputDirectory))
             {
                 foreach (string directory in Directory.GetDirectories(settings.OutputDirectory, "tf2fragdemohelper_batch_*"))
                 {
-                    DeleteOwnedFile(Path.Combine(directory, "recording_queue.json"));
-                    DeleteOwnedFile(Path.Combine(directory, "recording_finalize_error.txt"));
+                    DeleteOwnedFile(Path.Combine(directory, "recording_queue.json"), failures);
+                    DeleteOwnedFile(Path.Combine(directory, "recording_finalize_error.txt"), failures);
                 }
             }
+            if (failures.Count > 0)
+                MessageBox.Show("Some helper-owned temporary files could not be removed:\r\n\r\n" + String.Join("\r\n", failures.ToArray()),
+                    "TF2 Frag Demo Helper cleanup warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
-        private static void DeleteOwnedDirectory(string path)
+        private static void DeleteOwnedDirectory(string path, IList<string> failures)
         {
-            try { if (Directory.Exists(path)) Directory.Delete(path, true); }
-            catch { }
+            try
+            {
+                if (Directory.Exists(path)) Directory.Delete(path, true);
+                if (Directory.Exists(path)) failures.Add(path);
+            }
+            catch { failures.Add(path); }
         }
 
-        private static void DeleteOwnedFile(string path)
+        private static void DeleteOwnedFile(string path, IList<string> failures)
         {
-            try { if (File.Exists(path)) File.Delete(path); }
-            catch { }
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                if (File.Exists(path)) failures.Add(path);
+            }
+            catch { failures.Add(path); }
         }
 
         private static void StopTf2Process(string executable, DateTime launchTime)

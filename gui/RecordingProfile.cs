@@ -775,6 +775,8 @@ namespace Tf2StvParserGui
                 if (session.IsolatedCustom)
                 {
                     if (Directory.Exists(session.TemporaryCustomDirectory)) Directory.Delete(session.TemporaryCustomDirectory, true);
+                    if (Directory.Exists(session.TemporaryCustomDirectory))
+                        throw new IOException("The temporary TF2 custom folder still exists after removal.");
                     if (session.OriginalCustomExisted && Directory.Exists(session.OriginalCustomDirectory))
                         Directory.Move(session.OriginalCustomDirectory, session.TemporaryCustomDirectory);
                 }
@@ -782,6 +784,8 @@ namespace Tf2StvParserGui
                 {
                     string profileFolder = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
                     if (Directory.Exists(profileFolder)) Directory.Delete(profileFolder, true);
+                    if (Directory.Exists(profileFolder))
+                        throw new IOException("The temporary recording resources, including enhanced particles, could not be removed.");
                     foreach (string entry in session.TemporaryRootFiles)
                     {
                         string[] paths = entry.Split(new char[] { '|' }, 2);
@@ -802,6 +806,7 @@ namespace Tf2StvParserGui
                 if (session.ConfigExisted && File.Exists(session.BackupConfigPath))
                     File.Copy(session.BackupConfigPath, session.ConfigPath, true);
                 else if (!session.ConfigExisted && File.Exists(session.ConfigPath)) File.Delete(session.ConfigPath);
+                VerifyRestoredFiles(session);
                 if (File.Exists(session.BackupConfigPath)) File.Delete(session.BackupConfigPath);
                 RestoreDxLevel(session);
                 DeleteEmptyDirectory(session.BackupDirectory);
@@ -826,6 +831,25 @@ namespace Tf2StvParserGui
             lock (SessionLock) session = activeSession;
             if (session != null) Restore(session, showErrors);
             else RecoverInterruptedSession(showErrors ? Form.ActiveForm : null);
+        }
+
+        public static bool IsRestoreComplete(out string reason)
+        {
+            lock (SessionLock)
+            {
+                if (activeSession != null)
+                {
+                    reason = "The recording profile is still active.";
+                    return false;
+                }
+            }
+            if (File.Exists(ActivePointerPath()))
+            {
+                reason = "The recording-profile recovery marker still exists.";
+                return false;
+            }
+            reason = "";
+            return true;
         }
 
         public static void RecoverInterruptedSession(IWin32Window owner)
@@ -893,7 +917,7 @@ namespace Tf2StvParserGui
                 string vpk = Path.Combine(root, "custom", "pldx_particles.vpk");
                 if (!File.Exists(vpk)) throw new FileNotFoundException("The included enhanced-particle VPK was not found.", vpk);
                 IList<string> selected = settings.EnhancedParticleFiles.Count == 0 ? (IList<string>)EnhancedParticlesForm.ParticleFiles : settings.EnhancedParticleFiles;
-                ExtractParticleFiles(session.TfDirectory, vpk, profileRoot, selected);
+                ExtractParticleFiles(settings.Tf2Executable, vpk, profileRoot, selected);
             }
 
             if (!String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase))
@@ -944,14 +968,14 @@ namespace Tf2StvParserGui
             CopyDirectory(source, profileRoot);
         }
 
-        private static void ExtractParticleFiles(string tfDirectory, string vpk, string destination, IList<string> files)
+        private static void ExtractParticleFiles(string tf2Executable, string vpk, string destination, IList<string> files)
         {
-            string root = Directory.GetParent(tfDirectory).FullName;
+            string root = Path.GetDirectoryName(tf2Executable);
             string[] tools = new string[]
             {
                 Path.Combine(root, "bin", "vpk.exe"),
                 Path.Combine(root, "bin", "x64", "vpk.exe"),
-                Path.Combine(tfDirectory, "bin", "vpk.exe")
+                Path.Combine(root, "tf", "bin", "vpk.exe")
             };
             string vpkTool = null;
             foreach (string tool in tools) if (File.Exists(tool)) { vpkTool = tool; break; }
@@ -1109,6 +1133,65 @@ namespace Tf2StvParserGui
                 }
             }
             catch { }
+        }
+
+        private static void VerifyRestoredFiles(RecordingProfileSession session)
+        {
+            List<string> problems = new List<string>();
+            if (session.IsolatedCustom)
+            {
+                if (session.OriginalCustomExisted != Directory.Exists(session.TemporaryCustomDirectory))
+                    problems.Add("tf/custom was not returned to its original presence state");
+                if (Directory.Exists(session.OriginalCustomDirectory))
+                    problems.Add("the backup copy of tf/custom is still staged");
+            }
+            else
+            {
+                string profileFolder = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
+                if (session.OriginalProfileFolderExisted != Directory.Exists(profileFolder))
+                    problems.Add("the helper recording-resources folder was not returned to its original state");
+                if (Directory.Exists(session.OriginalProfileFolderDirectory))
+                    problems.Add("the previous helper recording-resources folder is still staged");
+                foreach (string entry in session.TemporaryRootFiles)
+                {
+                    string[] paths = entry.Split(new char[] { '|' }, 2);
+                    if (paths.Length == 2)
+                    {
+                        if (!File.Exists(paths[0]) || File.Exists(paths[1]))
+                            problems.Add(Path.GetFileName(paths[0]) + " was not restored");
+                    }
+                    else if (File.Exists(paths[0])) problems.Add(Path.GetFileName(paths[0]) + " was not removed");
+                }
+            }
+            if (session.ProfileConfigExisted != File.Exists(session.ProfileConfigPath))
+                problems.Add("the prior recording profile CFG was not returned to its original state");
+            if (session.VideoConfigExisted)
+            {
+                if (!FilesMatch(session.VideoConfigPath, session.BackupVideoConfigPath)) problems.Add("video.txt does not match its backup");
+            }
+            else if (File.Exists(session.VideoConfigPath)) problems.Add("temporary video.txt still exists");
+            if (session.ConfigExisted)
+            {
+                if (!FilesMatch(session.ConfigPath, session.BackupConfigPath)) problems.Add("config.cfg does not match its backup");
+            }
+            else if (File.Exists(session.ConfigPath)) problems.Add("temporary config.cfg still exists");
+            if (problems.Count > 0) throw new IOException("Restore verification failed: " + String.Join("; ", problems.ToArray()) + ".");
+        }
+
+        private static bool FilesMatch(string left, string right)
+        {
+            if (!File.Exists(left) || !File.Exists(right)) return false;
+            FileInfo leftInfo = new FileInfo(left);
+            FileInfo rightInfo = new FileInfo(right);
+            if (leftInfo.Length != rightInfo.Length) return false;
+            using (FileStream leftStream = File.OpenRead(left))
+            using (FileStream rightStream = File.OpenRead(right))
+            {
+                int leftByte;
+                while ((leftByte = leftStream.ReadByte()) != -1)
+                    if (leftByte != rightStream.ReadByte()) return false;
+            }
+            return true;
         }
 
         private static void DeleteEmptyDirectory(string path)

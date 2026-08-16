@@ -164,11 +164,16 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('BackupConfigPath', self.profile)
         self.assertIn('config.cfg', self.profile)
         self.assertIn('RestoreDxLevel(session);', self.profile)
+        self.assertIn('VerifyRestoredFiles(session);', self.profile)
+        self.assertIn('FilesMatch(session.ConfigPath, session.BackupConfigPath)', self.profile)
+        self.assertIn('temporary recording resources, including enhanced particles, could not be removed', self.profile)
 
     def test_recording_resources_are_optional_sidecar_assets(self):
         self.assertIn('recording_resources', self.profile)
         self.assertIn('pldx_particles.vpk', self.profile)
         self.assertIn('no_announcer_voices.vpk', self.profile)
+        self.assertIn('ExtractParticleFiles(settings.Tf2Executable', self.profile)
+        self.assertIn('Path.Combine(root, "bin", "vpk.exe")', self.profile)
 
     def test_parser_close_removes_only_helper_owned_recording_temporary_files(self):
         self.assertIn('demos", "tf2fragdemohelper_batch', self.batch)
@@ -178,6 +183,8 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('tf2fragdemohelper_recording.log', self.batch)
         self.assertIn('recording_queue.json', self.batch)
         self.assertIn('exports, source demos, and recorded video/frame folders are never', self.batch)
+        self.assertIn('RecordingProfileManager.IsRestoreComplete(out restoreReason)', self.batch)
+        self.assertIn('Some helper-owned temporary files could not be removed', self.batch)
 
 
 if __name__ == "__main__":

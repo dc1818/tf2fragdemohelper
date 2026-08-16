@@ -47,7 +47,7 @@ ROUND_END_EVENTS = {
 }
 ROUND_ACTIVATION_EVENTS = {
     "teamplay_round_start", "teamplay_restart_round", "teamplay_ready_restart",
-    "teamplay_round_restart_seconds", "round_start",
+    "teamplay_round_restart_seconds", "teamplay_waiting_ends", "round_start",
 }
 ROUND_RESET_EVENTS = {
     "teamplay_waiting_begins",
@@ -907,9 +907,11 @@ def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimel
     `teamplay_team_ready` only means a team has readied. It never opens a
     highlight window. A bare `teamplay_round_active` is also insufficient:
     TF2 emits one during map/warmup initialization. A window opens only when
-    `teamplay_round_active` follows a real round-transition event, then moves
-    to `teamplay_setup_finished` on maps where setup gates real combat.
+    `teamplay_round_active` follows a real round-transition event, including
+    Casual's end-of-waiting transition, then moves to
+    `teamplay_setup_finished` on maps where setup gates real combat.
     """
+    event_list = list(events)
     rounds: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     index = 0
@@ -937,7 +939,7 @@ def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimel
             "countdown_tick": countdown_tick,
         }
 
-    for item in events:
+    for item in event_list:
         name = event_name(item)
         tick = item["tick"]
         fields = event_fields(item)
@@ -1000,6 +1002,15 @@ def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimel
                 current = None
             clear_ready_up()
             pending_activation = None
+    last_tick = max((as_int(item.get("tick")) for item in event_list), default=0)
+    if current is not None and last_tick >= current["live_start_tick"]:
+        # A map change or a manual/demo-support stop can end the file while
+        # the server round is still live. The next numbered demo is a new
+        # stream, so close this file's confirmed interval at its own end.
+        current["end_tick"] = max(current["live_start_tick"] + 1, last_tick + 1)
+        current["end_reason"] = "demo_end_while_event_confirmed_round_active"
+        rounds.append(current)
+
     closed_rounds = [item for item in rounds if item["end_tick"] is not None and item["end_tick"] > item["live_start_tick"]]
     if closed_rounds or timeline is None or not timeline.sample_count:
         return closed_rounds
@@ -1012,7 +1023,7 @@ def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimel
     # reconstructed packet state (or, when available, player_team events).
     team_history = teams or {}
     first_combat_tick: Optional[int] = None
-    for item in events:
+    for item in event_list:
         if event_name(item) != "player_death":
             continue
         fields = event_fields(item)
@@ -1033,7 +1044,7 @@ def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimel
     if first_combat_tick is None:
         return closed_rounds
 
-    last_tick = max((as_int(item.get("tick")) for item in events), default=first_combat_tick)
+    last_tick = max((as_int(item.get("tick")) for item in event_list), default=first_combat_tick)
     return [{
         "round_index": 1,
         "round_active_tick": first_combat_tick,

@@ -102,7 +102,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('-no_texture_stream', self.batch)
         self.assertNotIn('-noConfig', self.batch)
 
-    def test_lawena_style_output_choices_are_exposed(self):
+    def test_movie_output_choices_are_exposed(self):
         self.assertIn('TGA image sequence', self.program)
         self.assertIn('JPG image sequence', self.program)
         self.assertIn('MP4 - standard', self.program)
@@ -117,7 +117,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('FindFfmpegNearHlae', self.batch)
         self.assertIn('Select ffmpeg.exe at the top of the setup window.', self.batch)
 
-    def test_lawena_movie_settings_are_exposed(self):
+    def test_movie_settings_are_exposed(self):
         for label in (
             '"Resolution"', '"DX level"', '"Skybox"', '"HUD"', '"Viewmodels"',
             '"Viewmodel FOV"', '"Maximum-quality graphics profile"',
@@ -126,7 +126,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
             '"Disable crosshair switching"', '"3D player model in HUD"',
         ):
             self.assertIn(label, self.profile)
-        self.assertIn('"98 (Lawena highest)"', self.profile)
+        self.assertIn('"98 (highest)"', self.profile)
         self.assertIn('"Kill notices only"', self.profile)
 
     def test_custom_resources_particles_and_skyboxes_are_supported(self):
@@ -165,8 +165,8 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('config.cfg', self.profile)
         self.assertIn('RestoreDxLevel(session);', self.profile)
 
-    def test_lawena_resources_are_optional_sidecar_assets(self):
-        self.assertIn('lawena_resources', self.profile)
+    def test_recording_resources_are_optional_sidecar_assets(self):
+        self.assertIn('recording_resources', self.profile)
         self.assertIn('pldx_particles.vpk', self.profile)
         self.assertIn('no_announcer_voices.vpk', self.profile)
 

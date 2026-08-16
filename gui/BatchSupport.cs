@@ -250,6 +250,7 @@ namespace Tf2StvParserGui
             string tfName = Path.GetFileName(settings.Tf2Executable);
             if (!String.Equals(tfName, "tf_win64.exe", StringComparison.OrdinalIgnoreCase) && !String.Equals(tfName, "tf.exe", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("The TF2 executable must be tf_win64.exe or tf.exe.");
+            EnsureTf2IsNotRunning(settings.Tf2Executable);
             Directory.CreateDirectory(settings.OutputDirectory);
             if (!Directory.Exists(settings.OutputDirectory))
                 throw new DirectoryNotFoundException("Choose a writable recording output folder.");
@@ -285,6 +286,20 @@ namespace Tf2StvParserGui
                 directory = Path.GetDirectoryName(directory);
             }
             return null;
+        }
+
+        private static void EnsureTf2IsNotRunning(string tf2Executable)
+        {
+            string processName = Path.GetFileNameWithoutExtension(tf2Executable);
+            foreach (Process process in Process.GetProcessesByName(processName))
+            {
+                try
+                {
+                    if (!process.HasExited)
+                        throw new InvalidOperationException("Close TF2 before preparing a recording. This prevents the temporary offline recording profile from touching a running game.");
+                }
+                finally { process.Dispose(); }
+            }
         }
 
         private static void PrepareAndLaunch(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, int fps, HlaeRecordingOutput output, int jpgQuality, HlaeRecordingSettings settings)
@@ -697,7 +712,7 @@ namespace Tf2StvParserGui
                 settings.HlaeExecutable = TextValue(values, "hlae_executable");
                 settings.Tf2Executable = TextValue(values, "tf2_executable");
                 settings.OutputDirectory = TextValue(values, "output_directory");
-                settings.LawenaResourcesDirectory = TextValue(values, "lawena_resources_directory");
+                settings.RecordingResourcesDirectory = TextValue(values, "recording_resources_directory");
                 settings.Resolution = DefaultText(values, "resolution", settings.Resolution);
                 settings.DxLevel = DefaultText(values, "dx_level", settings.DxLevel);
                 settings.Skybox = DefaultText(values, "skybox", settings.Skybox);
@@ -737,7 +752,7 @@ namespace Tf2StvParserGui
                 values["hlae_executable"] = settings.HlaeExecutable;
                 values["tf2_executable"] = settings.Tf2Executable;
                 values["output_directory"] = settings.OutputDirectory;
-                values["lawena_resources_directory"] = settings.LawenaResourcesDirectory;
+                values["recording_resources_directory"] = settings.RecordingResourcesDirectory;
                 values["resolution"] = settings.Resolution;
                 values["dx_level"] = settings.DxLevel;
                 values["skybox"] = settings.Skybox;

@@ -18,9 +18,9 @@ namespace Tf2StvParserGui
         public string HlaeExecutable = "";
         public string Tf2Executable = "";
         public string OutputDirectory = "";
-        public string LawenaResourcesDirectory = "";
+        public string RecordingResourcesDirectory = "";
         public string Resolution = "2560x1440";
-        public string DxLevel = "98 (Lawena highest)";
+        public string DxLevel = "98 (highest)";
         public string Skybox = "Default";
         public string Hud = "Kill notices only";
         public string Viewmodels = "On";
@@ -49,7 +49,7 @@ namespace Tf2StvParserGui
         private readonly TextBox ffmpegBox = new TextBox();
         private readonly TextBox tf2Box = new TextBox();
         private readonly TextBox outputBox = new TextBox();
-        private readonly TextBox lawenaResourcesBox = new TextBox();
+        private readonly TextBox recordingResourcesBox = new TextBox();
         private readonly ComboBox resolution = DropDown();
         private readonly ComboBox dxLevel = DropDown();
         private readonly ComboBox skybox = DropDown();
@@ -84,7 +84,7 @@ namespace Tf2StvParserGui
                 value.HlaeExecutable = hlaeBox.Text.Trim();
                 value.Tf2Executable = tf2Box.Text.Trim();
                 value.OutputDirectory = outputBox.Text.Trim();
-                value.LawenaResourcesDirectory = lawenaResourcesBox.Text.Trim();
+                value.RecordingResourcesDirectory = recordingResourcesBox.Text.Trim();
                 value.Resolution = Convert.ToString(resolution.SelectedItem);
                 value.DxLevel = Convert.ToString(dxLevel.SelectedItem);
                 value.Skybox = Convert.ToString(skybox.SelectedItem);
@@ -116,8 +116,8 @@ namespace Tf2StvParserGui
             initial = source ?? new HlaeRecordingSettings();
             Text = "HLAE recording and movie settings (offline only)";
             StartPosition = FormStartPosition.CenterParent;
-            MinimumSize = new Size(980, 690);
-            Size = new Size(1060, 760);
+            MinimumSize = new Size(1120, 790);
+            Size = new Size(1240, 900);
             Font = new Font("Segoe UI", 9F);
             BackColor = Color.FromArgb(30, 32, 36);
             ForeColor = Color.Gainsboro;
@@ -180,8 +180,8 @@ namespace Tf2StvParserGui
             AddPathRow(layout, 1, "HLAE.exe", hlaeBox, BrowseHlae);
             AddPathRow(layout, 2, "TF2 executable", tf2Box, BrowseTf2);
             AddPathRow(layout, 3, "Recording output", outputBox, BrowseOutput);
-            AddPathRow(layout, 4, "Lawena resources", lawenaResourcesBox, BrowseLawenaResources);
-            Label note = NewLabel("Lawena resources provide the optional skyboxes, recording HUDs, sound suppressors, and PLDX enhanced particles included with this package.");
+            AddPathRow(layout, 4, "Recording resources", recordingResourcesBox, BrowseRecordingResources);
+            Label note = NewLabel("Recording resources provide optional skyboxes, recording HUDs, sound suppressors, and enhanced particles included with this package.");
             note.ForeColor = Color.Silver;
             note.MaximumSize = new Size(700, 0);
             layout.SetColumnSpan(note, 2);
@@ -193,14 +193,14 @@ namespace Tf2StvParserGui
         {
             TabPage page = NewTab("Video and HUD");
             TableLayoutPanel layout = NewGrid(8, 4);
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             page.Controls.Add(layout);
 
             AddChoice(layout, 0, 0, "Resolution", resolution, new string[] { "1280x720", "1920x1080", "2560x1440", "3840x2160" });
-            AddChoice(layout, 0, 2, "DX level", dxLevel, new string[] { "Default", "98 (Lawena highest)", "95", "90", "81", "80" });
+            AddChoice(layout, 0, 2, "DX level", dxLevel, new string[] { "Default", "98 (highest)", "95", "90", "81", "80" });
             AddChoice(layout, 1, 0, "Skybox", skybox, new string[] { "Default" });
             AddChoice(layout, 1, 2, "HUD", hud, new string[] { "Keep current", "Kill notices only", "Medic recording HUD", "Default TF2 HUD" });
             AddChoice(layout, 2, 0, "Viewmodels", viewmodels, new string[] { "On", "Off", "Default" });
@@ -233,7 +233,7 @@ namespace Tf2StvParserGui
             layout.SetColumnSpan(distractions, 4);
             layout.Controls.Add(distractions, 0, 4);
 
-            Label dxNote = NewLabel("DX level is applied only to this HLAE launch. Default avoids the legacy override; 98 matches Lawena's displayed highest option.");
+            Label dxNote = NewLabel("DX level is applied only to this HLAE launch. Default avoids the legacy override; 98 is the highest profile option.");
             dxNote.ForeColor = Color.Silver;
             layout.SetColumnSpan(dxNote, 4);
             layout.Controls.Add(dxNote, 0, 6);
@@ -266,7 +266,7 @@ namespace Tf2StvParserGui
             user.Controls.Add(customResources);
             layout.Controls.Add(user, 0, 1);
 
-            GroupBox builtIns = NewGroup("Lawena recording resources");
+            GroupBox builtIns = NewGroup("Included recording resources");
             FlowLayoutPanel builtInFlow = NewVerticalFlow();
             builtInFlow.Controls.Add(announcer);
             builtInFlow.Controls.Add(applause);
@@ -305,9 +305,9 @@ namespace Tf2StvParserGui
             hlaeBox.Text = initial.HlaeExecutable;
             tf2Box.Text = initial.Tf2Executable;
             outputBox.Text = initial.OutputDirectory;
-            lawenaResourcesBox.Text = String.IsNullOrEmpty(initial.LawenaResourcesDirectory)
-                ? RecordingProfileManager.FindLawenaResources() ?? ""
-                : initial.LawenaResourcesDirectory;
+            recordingResourcesBox.Text = String.IsNullOrEmpty(initial.RecordingResourcesDirectory)
+                ? RecordingProfileManager.FindRecordingResources() ?? ""
+                : initial.RecordingResourcesDirectory;
             Select(resolution, initial.Resolution);
             Select(dxLevel, initial.DxLevel);
             Select(hud, initial.Hud);
@@ -355,7 +355,7 @@ namespace Tf2StvParserGui
         {
             skybox.Items.Clear();
             skybox.Items.Add("Default");
-            string folder = Path.Combine(lawenaResourcesBox.Text.Trim(), "skybox");
+            string folder = Path.Combine(recordingResourcesBox.Text.Trim(), "skybox");
             if (Directory.Exists(folder))
             {
                 List<string> names = new List<string>();
@@ -428,15 +428,15 @@ namespace Tf2StvParserGui
             }
         }
 
-        private void BrowseLawenaResources(object sender, EventArgs e)
+        private void BrowseRecordingResources(object sender, EventArgs e)
         {
             using (FolderBrowserDialog dialog = new FolderBrowserDialog())
             {
-                dialog.Description = "Select the Lawena folder containing custom, hud, and skybox folders";
-                if (Directory.Exists(lawenaResourcesBox.Text)) dialog.SelectedPath = lawenaResourcesBox.Text;
+                dialog.Description = "Select the recording-resources folder containing custom, hud, and skybox folders";
+                if (Directory.Exists(recordingResourcesBox.Text)) dialog.SelectedPath = recordingResourcesBox.Text;
                 if (dialog.ShowDialog(this) == DialogResult.OK)
                 {
-                    lawenaResourcesBox.Text = dialog.SelectedPath;
+                    recordingResourcesBox.Text = dialog.SelectedPath;
                     RefreshSkyboxes(Convert.ToString(skybox.SelectedItem));
                 }
             }
@@ -671,15 +671,13 @@ namespace Tf2StvParserGui
         private static readonly object SessionLock = new object();
         private static RecordingProfileSession activeSession;
 
-        public static string FindLawenaResources()
+        public static string FindRecordingResources()
         {
             string app = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
             string[] candidates = new string[]
             {
-                Path.Combine(app, "lawena_resources"),
-                Path.Combine(app, "lawena"),
-                Path.Combine(Path.GetDirectoryName(app), "lawena_resources"),
-                Path.Combine(Path.GetDirectoryName(app), "lawena")
+                Path.Combine(app, "recording_resources"),
+                Path.Combine(Path.GetDirectoryName(app), "recording_resources")
             };
             foreach (string candidate in candidates)
                 if (Directory.Exists(Path.Combine(candidate, "custom")) && Directory.Exists(Path.Combine(candidate, "skybox"))) return candidate;
@@ -756,7 +754,7 @@ namespace Tf2StvParserGui
                     }
                 }
 
-                InstallLawenaResources(session, settings);
+                InstallRecordingResources(session, settings);
                 File.WriteAllLines(session.ProfileConfigPath, BuildProfileConfig(settings).ToArray(), new UTF8Encoding(false));
                 WriteActivePointer(session, "active");
                 lock (SessionLock) activeSession = session;
@@ -874,15 +872,15 @@ namespace Tf2StvParserGui
             }
         }
 
-        private static void InstallLawenaResources(RecordingProfileSession session, HlaeRecordingSettings settings)
+        private static void InstallRecordingResources(RecordingProfileSession session, HlaeRecordingSettings settings)
         {
             bool needsResources = settings.DisableAnnouncerVoices || settings.DisableApplauseSounds || settings.DisableDominationSounds ||
                 settings.EnhancedParticles || !String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase) ||
                 !String.Equals(settings.Hud, "Keep current", StringComparison.OrdinalIgnoreCase) && !String.Equals(settings.Hud, "Default TF2 HUD", StringComparison.OrdinalIgnoreCase);
             if (!needsResources) return;
-            string root = settings.LawenaResourcesDirectory;
+            string root = settings.RecordingResourcesDirectory;
             if (String.IsNullOrEmpty(root) || !Directory.Exists(root))
-                throw new DirectoryNotFoundException("Select the Lawena resources folder. It must contain custom, hud, and skybox folders.");
+                throw new DirectoryNotFoundException("Select the recording-resources folder. It must contain custom, hud, and skybox folders.");
 
             CopyOptionalVpk(session, root, "no_announcer_voices.vpk", settings.DisableAnnouncerVoices);
             CopyOptionalVpk(session, root, "no_applause_sounds.vpk", settings.DisableApplauseSounds);
@@ -893,7 +891,7 @@ namespace Tf2StvParserGui
             if (settings.EnhancedParticles)
             {
                 string vpk = Path.Combine(root, "custom", "pldx_particles.vpk");
-                if (!File.Exists(vpk)) throw new FileNotFoundException("Lawena's PLDX enhanced particle VPK was not found.", vpk);
+                if (!File.Exists(vpk)) throw new FileNotFoundException("The included enhanced-particle VPK was not found.", vpk);
                 IList<string> selected = settings.EnhancedParticleFiles.Count == 0 ? (IList<string>)EnhancedParticlesForm.ParticleFiles : settings.EnhancedParticleFiles;
                 ExtractParticleFiles(session.TfDirectory, vpk, profileRoot, selected);
             }
@@ -910,7 +908,7 @@ namespace Tf2StvParserGui
         {
             if (!enabled) return;
             string source = Path.Combine(resourcesRoot, "custom", fileName);
-            if (!File.Exists(source)) throw new FileNotFoundException("A selected Lawena sound resource was not found.", source);
+            if (!File.Exists(source)) throw new FileNotFoundException("A selected recording sound resource was not found.", source);
             string destination = Path.Combine(session.TemporaryCustomDirectory, fileName);
             if (!session.IsolatedCustom && File.Exists(destination))
             {
@@ -933,7 +931,7 @@ namespace Tf2StvParserGui
             foreach (string side in sides)
             {
                 string selectedVtf = Path.Combine(source, selected + side + ".vtf");
-                if (!File.Exists(selectedVtf)) throw new FileNotFoundException("The selected Lawena skybox is incomplete.", selectedVtf);
+                if (!File.Exists(selectedVtf)) throw new FileNotFoundException("The selected recording skybox is incomplete.", selectedVtf);
                 foreach (string vmt in Directory.GetFiles(destination, "*" + side + ".vmt"))
                     File.Copy(selectedVtf, Path.ChangeExtension(vmt, ".vtf"), true);
             }
@@ -942,7 +940,7 @@ namespace Tf2StvParserGui
         private static void CopyHud(string resourcesRoot, string profileRoot, string hudName)
         {
             string source = Path.Combine(resourcesRoot, "hud", hudName);
-            if (!Directory.Exists(source)) throw new DirectoryNotFoundException("The selected Lawena HUD was not found: " + source);
+            if (!Directory.Exists(source)) throw new DirectoryNotFoundException("The selected recording HUD was not found: " + source);
             CopyDirectory(source, profileRoot);
         }
 
@@ -960,11 +958,11 @@ namespace Tf2StvParserGui
             if (vpkTool == null) throw new FileNotFoundException("TF2's vpk.exe is required to select enhanced particle files.");
             List<string> arguments = new List<string>();
             arguments.Add("x");
-            arguments.Add(vpk);
+            arguments.Add(Path.GetFullPath(vpk));
             // Source discovers particle systems through this file.  It is part of the PLDX VPK
             // and must accompany even a hand-picked subset of PCFs.
             arguments.Add("particles/particles_manifest.txt");
-            foreach (string file in files) arguments.Add(file.Replace('/', Path.DirectorySeparatorChar));
+            foreach (string file in files) arguments.Add(file);
             ProcessStartInfo info = new ProcessStartInfo();
             info.FileName = vpkTool;
             info.Arguments = JoinArguments(arguments);
@@ -985,6 +983,9 @@ namespace Tf2StvParserGui
                     throw new InvalidOperationException("Could not extract the selected enhanced particles. " + detail);
                 }
             }
+            foreach (string file in files)
+                if (!File.Exists(Path.Combine(destination, file.Replace('/', Path.DirectorySeparatorChar))))
+                    throw new InvalidOperationException("Could not extract the selected enhanced particles. TF2's vpk.exe did not create " + file + ". Verify that vpk.exe is installed with TF2 and that the recording-resources folder is complete.");
         }
 
         private static List<string> BuildProfileConfig(HlaeRecordingSettings settings)

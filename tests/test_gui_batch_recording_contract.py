@@ -144,6 +144,18 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('FindFfmpegNearHlae', self.batch)
         self.assertIn('Select ffmpeg.exe at the top of the setup window.', self.batch)
 
+    def test_encoded_recordings_mux_audio_before_completion(self):
+        self.assertIn('RequiresAudioMux', self.batch)
+        self.assertIn('MuxEncodedMovieAudio', self.batch)
+        self.assertIn('RunAudioMux', self.batch)
+        self.assertIn('VerifyMuxedMedia', self.batch)
+        self.assertIn('audio.wav', self.batch)
+        self.assertIn('File.Replace(muxingPath, videoPath, null)', self.batch)
+        self.assertIn('tracker.MarkAudioMuxed', self.batch)
+        self.assertIn('HLAE + FFmpeg audio mux', self.batch)
+        self.assertIn('video_muxing.mp4', self.batch)
+        self.assertIn('video_muxing.avi', self.batch)
+
     def test_item_schema_field_is_filled_only_for_tf_demos(self):
         self.assertIn('UpdateAutoDetectedItemSchema();', self.program)
         self.assertIn('DetectItemSchemaForSelectedDemos', self.program)

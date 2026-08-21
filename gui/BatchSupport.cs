@@ -50,6 +50,19 @@ namespace Tf2StvParserGui
             return output != HlaeRecordingOutput.TgaSequence && output != HlaeRecordingOutput.JpgSequence;
         }
 
+        public static bool RequiresAudioMux(HlaeRecordingOutput output)
+        {
+            return output == HlaeRecordingOutput.Mp4Standard ||
+                output == HlaeRecordingOutput.Mp4Compatible ||
+                output == HlaeRecordingOutput.Mp4Lossless ||
+                output == HlaeRecordingOutput.AviRaw;
+        }
+
+        public static string MediaFileName(HlaeRecordingOutput output)
+        {
+            return output == HlaeRecordingOutput.AviRaw ? "video.avi" : "video.mp4";
+        }
+
         public static string ExpectedFiles(HlaeRecordingOutput output)
         {
             switch (output)
@@ -57,8 +70,8 @@ namespace Tf2StvParserGui
                 case HlaeRecordingOutput.JpgSequence: return "frame00000.jpg, frame00001.jpg, ...";
                 case HlaeRecordingOutput.Mp4Standard:
                 case HlaeRecordingOutput.Mp4Compatible:
-                case HlaeRecordingOutput.Mp4Lossless: return "video.mp4";
-                case HlaeRecordingOutput.AviRaw: return "video.avi";
+                case HlaeRecordingOutput.Mp4Lossless: return "video.mp4 (audio muxed into the MP4 after verification)";
+                case HlaeRecordingOutput.AviRaw: return "video.avi (audio muxed into the AVI after verification)";
                 default: return "frame00000.tga, frame00001.tga, ...";
             }
         }
@@ -429,6 +442,26 @@ namespace Tf2StvParserGui
                 Transition(capture, "Finalizing", "recording_stopped_at", "");
             }
 
+            public void MarkMuxing(string capture)
+            {
+                Transition(capture, "Muxing", "audio_mux_started_at", "");
+            }
+
+            public void MarkAudioMuxed(string capture, string outputPath, int exitCode)
+            {
+                lock (sync)
+                {
+                    Dictionary<string, object> record;
+                    if (!clips.TryGetValue(capture, out record)) return;
+                    record["audio_muxed"] = true;
+                    record["muxed_output_path"] = outputPath;
+                    record["audio_mux_exit_code"] = exitCode;
+                    record["audio_mux_completed_at"] = DateTime.UtcNow.ToString("o");
+                    root["updated_utc"] = DateTime.UtcNow.ToString("o");
+                    WriteLocked();
+                }
+            }
+
             public void MarkCompleted(string capture, string actualOutputPath, long sizeBytes)
             {
                 lock (sync)
@@ -665,7 +698,7 @@ namespace Tf2StvParserGui
                     activeProfileSession = profile;
                 }
                 queueTracker.SetBatchStatus("Running", "");
-                StartRecordingFinalizer(demos, gameDirectory, settings.Tf2Executable, launchTime, outputDirectory, output, profile, queueTracker);
+                StartRecordingFinalizer(demos, gameDirectory, settings.Tf2Executable, settings.FfmpegExecutable, launchTime, outputDirectory, output, profile, queueTracker);
             }
             catch
             {
@@ -836,13 +869,13 @@ namespace Tf2StvParserGui
             return "echo TF2FRAG_RECORD_END " + captureBaseName + "; " + stop + "; host_framerate 0";
         }
 
-        private static void StartRecordingFinalizer(List<DemoQueue> demos, string gameDirectory, string tf2Executable, DateTime launchTime, string outputDirectory, HlaeRecordingOutput output, RecordingProfileSession profile, RecordingQueueTracker queueTracker)
+        private static void StartRecordingFinalizer(List<DemoQueue> demos, string gameDirectory, string tf2Executable, string ffmpegExecutable, DateTime launchTime, string outputDirectory, HlaeRecordingOutput output, RecordingProfileSession profile, RecordingQueueTracker queueTracker)
         {
             Thread worker = new Thread(delegate()
             {
                 try
                 {
-                    MonitorRecordingSession(demos, gameDirectory, tf2Executable, launchTime, outputDirectory, output, queueTracker);
+                    MonitorRecordingSession(demos, gameDirectory, tf2Executable, ffmpegExecutable, launchTime, outputDirectory, output, queueTracker);
                 }
                 catch (Exception error)
                 {
@@ -868,7 +901,7 @@ namespace Tf2StvParserGui
             worker.Start();
         }
 
-        private static void MonitorRecordingSession(List<DemoQueue> demos, string gameDirectory, string tf2Executable, DateTime launchTime, string outputDirectory, HlaeRecordingOutput output, RecordingQueueTracker tracker)
+        private static void MonitorRecordingSession(List<DemoQueue> demos, string gameDirectory, string tf2Executable, string ffmpegExecutable, DateTime launchTime, string outputDirectory, HlaeRecordingOutput output, RecordingQueueTracker tracker)
         {
             Dictionary<string, Clip> clips = new Dictionary<string, Clip>(StringComparer.OrdinalIgnoreCase);
             foreach (DemoQueue demo in demos)
@@ -882,17 +915,17 @@ namespace Tf2StvParserGui
             {
                 while (!game.HasExited)
                 {
-                    ProcessRecordingLog(logPath, ref processedLineCount, clips, gameDirectory, outputDirectory, output, tracker);
+                    ProcessRecordingLog(logPath, ref processedLineCount, clips, gameDirectory, ffmpegExecutable, outputDirectory, output, tracker);
                     Thread.Sleep(250);
                 }
-                ProcessRecordingLog(logPath, ref processedLineCount, clips, gameDirectory, outputDirectory, output, tracker);
+                ProcessRecordingLog(logPath, ref processedLineCount, clips, gameDirectory, ffmpegExecutable, outputDirectory, output, tracker);
             }
 
             tracker.SetBatchStatus("Finalizing", "TF2 exited; verifying every selected clip.");
             foreach (Clip clip in clips.Values)
             {
                 if (tracker.IsCompleted(clip.CaptureBaseName)) continue;
-                TryFinalizeClip(clip, gameDirectory, outputDirectory, output, tracker, false);
+                TryFinalizeClip(clip, gameDirectory, ffmpegExecutable, outputDirectory, output, tracker, true);
             }
             tracker.FinishAfterProcessExit(true);
         }
@@ -918,7 +951,7 @@ namespace Tf2StvParserGui
             return game;
         }
 
-        private static void ProcessRecordingLog(string logPath, ref int processedLineCount, IDictionary<string, Clip> clips, string gameDirectory, string outputDirectory, HlaeRecordingOutput output, RecordingQueueTracker tracker)
+        private static void ProcessRecordingLog(string logPath, ref int processedLineCount, IDictionary<string, Clip> clips, string gameDirectory, string ffmpegExecutable, string outputDirectory, HlaeRecordingOutput output, RecordingQueueTracker tracker)
         {
             string[] lines;
             try
@@ -947,7 +980,7 @@ namespace Tf2StvParserGui
                 if (!String.IsNullOrEmpty(finalized) && clips.TryGetValue(finalized, out clip))
                 {
                     tracker.MarkFinalizing(finalized);
-                    TryFinalizeClip(clip, gameDirectory, outputDirectory, output, tracker, true);
+                    TryFinalizeClip(clip, gameDirectory, ffmpegExecutable, outputDirectory, output, tracker, true);
                 }
             }
             processedLineCount = lines.Length;
@@ -962,7 +995,7 @@ namespace Tf2StvParserGui
             return whitespace < 0 ? remainder : remainder.Substring(0, whitespace);
         }
 
-        private static void TryFinalizeClip(Clip clip, string gameDirectory, string outputDirectory, HlaeRecordingOutput output, RecordingQueueTracker tracker, bool waitForOutput)
+        private static void TryFinalizeClip(Clip clip, string gameDirectory, string ffmpegExecutable, string outputDirectory, HlaeRecordingOutput output, RecordingQueueTracker tracker, bool waitForOutput)
         {
             if (tracker.IsCompleted(clip.CaptureBaseName)) return;
             try
@@ -975,10 +1008,13 @@ namespace Tf2StvParserGui
                 }
                 else
                 {
-                    outputSize = WaitForStableOutput(clip.OutputPath, waitForOutput ? 20000 : 3000);
+                    outputSize = MuxEncodedMovieAudio(clip, ffmpegExecutable, output, tracker, waitForOutput ? 20000 : 3000);
                 }
                 if (outputSize <= 0) throw new IOException("The output exists but is empty.");
-                tracker.MarkCompleted(clip.CaptureBaseName, clip.OutputPath, outputSize);
+                string actualOutputPath = HlaeRecordingOutputs.RequiresAudioMux(output)
+                    ? Path.Combine(clip.OutputPath, HlaeRecordingOutputs.MediaFileName(output))
+                    : clip.OutputPath;
+                tracker.MarkCompleted(clip.CaptureBaseName, actualOutputPath, outputSize);
                 AppendRecordingDiagnostic(outputDirectory, clip, "Completed", "verified durable output bytes=" + outputSize);
             }
             catch (Exception error)
@@ -986,6 +1022,104 @@ namespace Tf2StvParserGui
                 tracker.MarkFailed(clip.CaptureBaseName, error.Message);
                 AppendRecordingDiagnostic(outputDirectory, clip, "Failed", error.Message);
             }
+        }
+
+        // HLAE's Source screen recorder writes encoded video and audio.wav as
+        // separate streams. Keep both originals until FFmpeg has created and
+        // stabilized one muxed media file, then replace the video atomically.
+        private static long MuxEncodedMovieAudio(Clip clip, string ffmpegExecutable, HlaeRecordingOutput output, RecordingQueueTracker tracker, int waitMilliseconds)
+        {
+            if (!HlaeRecordingOutputs.RequiresAudioMux(output))
+                return WaitForStableOutput(clip.OutputPath, waitMilliseconds);
+            if (String.IsNullOrEmpty(ffmpegExecutable) || !File.Exists(ffmpegExecutable))
+                throw new FileNotFoundException("FFmpeg is required to combine HLAE's video and audio into one final file.", ffmpegExecutable);
+
+            string mediaName = HlaeRecordingOutputs.MediaFileName(output);
+            string videoPath = Path.Combine(clip.OutputPath, mediaName);
+            string audioPath = Path.Combine(clip.OutputPath, "audio.wav");
+            string muxingPath = Path.Combine(clip.OutputPath, "video_muxing" + Path.GetExtension(mediaName));
+            WaitForStableFile(videoPath, waitMilliseconds);
+            WaitForStableFile(audioPath, waitMilliseconds);
+            if (File.Exists(muxingPath))
+                throw new IOException("A previous helper muxing file is still present: " + muxingPath);
+
+            tracker.MarkMuxing(clip.CaptureBaseName);
+            int exitCode = RunAudioMux(ffmpegExecutable, videoPath, audioPath, muxingPath, output);
+            if (exitCode != 0)
+                throw new InvalidOperationException("FFmpeg could not combine the recorded video and audio (exit code " + exitCode + "). The original video and audio.wav were kept.");
+            long muxedSize = WaitForStableFile(muxingPath, waitMilliseconds);
+            VerifyMuxedMedia(ffmpegExecutable, muxingPath);
+
+            // File.Replace never destroys the HLAE video until the new file is
+            // fully available. If this fails, both the original and muxed file
+            // remain for recovery instead of risking a lost clip.
+            try { File.Replace(muxingPath, videoPath, null); }
+            catch (Exception error)
+            {
+                throw new IOException("FFmpeg created a verified combined file but it could not safely replace the original video. Both files were retained: " + error.Message, error);
+            }
+            long finalSize = WaitForStableFile(videoPath, waitMilliseconds);
+            tracker.MarkAudioMuxed(clip.CaptureBaseName, videoPath, exitCode);
+            try { File.Delete(audioPath); }
+            catch { }
+            return finalSize > 0 ? finalSize : muxedSize;
+        }
+
+        private static int RunAudioMux(string ffmpegExecutable, string videoPath, string audioPath, string outputPath, HlaeRecordingOutput output)
+        {
+            string audioCodec = output == HlaeRecordingOutput.AviRaw ? "-c:a pcm_s16le" : "-c:a aac -b:a 192k -movflags +faststart";
+            string arguments = "-y -v error -i " + Quote(videoPath) + " -i " + Quote(audioPath) +
+                " -map 0:v:0 -map 1:a:0 -c:v copy " + audioCodec + " -shortest " + Quote(outputPath);
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = ffmpegExecutable;
+            info.Arguments = arguments;
+            info.WorkingDirectory = Path.GetDirectoryName(outputPath);
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.RedirectStandardError = true;
+            info.RedirectStandardOutput = true;
+            using (Process process = Process.Start(info))
+            {
+                string standardError = process.StandardError.ReadToEnd();
+                process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+                if (process.ExitCode != 0 && !String.IsNullOrWhiteSpace(standardError))
+                    AppendFfmpegFailure(outputPath, standardError);
+                return process.ExitCode;
+            }
+        }
+
+        private static void VerifyMuxedMedia(string ffmpegExecutable, string mediaPath)
+        {
+            ProcessStartInfo info = new ProcessStartInfo();
+            info.FileName = ffmpegExecutable;
+            info.Arguments = "-v error -i " + Quote(mediaPath) + " -map 0:v:0 -map 0:a:0 -t 0.1 -f null -";
+            info.WorkingDirectory = Path.GetDirectoryName(mediaPath);
+            info.UseShellExecute = false;
+            info.CreateNoWindow = true;
+            info.RedirectStandardError = true;
+            info.RedirectStandardOutput = true;
+            using (Process process = Process.Start(info))
+            {
+                string standardError = process.StandardError.ReadToEnd();
+                process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+                if (process.ExitCode != 0)
+                {
+                    AppendFfmpegFailure(mediaPath, standardError);
+                    throw new InvalidDataException("The combined recording did not contain both a readable video stream and audio stream.");
+                }
+            }
+        }
+
+        private static void AppendFfmpegFailure(string mediaPath, string message)
+        {
+            try
+            {
+                string logPath = Path.Combine(Path.GetDirectoryName(mediaPath), "ffmpeg_audio_mux_error.txt");
+                File.WriteAllText(logPath, message ?? "", new UTF8Encoding(false));
+            }
+            catch { }
         }
 
         private static long TransferNativeMovieFiles(string gameDirectory, Clip clip, int waitMilliseconds)
@@ -1030,6 +1164,26 @@ namespace Tf2StvParserGui
             while (DateTime.Now < deadline);
             long finalSize = DirectorySize(outputPath);
             if (finalSize <= 0) throw new FileNotFoundException("HLAE produced no non-empty encoded output in " + outputPath + ".");
+            return finalSize;
+        }
+
+        private static long WaitForStableFile(string path, int waitMilliseconds)
+        {
+            DateTime deadline = DateTime.Now.AddMilliseconds(Math.Max(0, waitMilliseconds));
+            long previousSize = -1;
+            int stableSamples = 0;
+            do
+            {
+                long size = File.Exists(path) ? new FileInfo(path).Length : 0L;
+                if (size > 0 && size == previousSize) stableSamples++;
+                else stableSamples = 0;
+                if (stableSamples >= 3) return size;
+                previousSize = size;
+                Thread.Sleep(500);
+            }
+            while (DateTime.Now < deadline);
+            long finalSize = File.Exists(path) ? new FileInfo(path).Length : 0L;
+            if (finalSize <= 0) throw new FileNotFoundException("Expected non-empty recording file was not produced.", path);
             return finalSize;
         }
 
@@ -1124,6 +1278,9 @@ namespace Tf2StvParserGui
             manifest["fps_semantics"] = "captured_frames_per_demo_second";
             manifest["output_format"] = HlaeRecordingOutputs.DisplayName(output);
             manifest["expected_output_files"] = HlaeRecordingOutputs.ExpectedFiles(output);
+            manifest["encoded_audio_behavior"] = HlaeRecordingOutputs.RequiresAudioMux(output)
+                ? "HLAE video and audio.wav are verified and muxed into one final media file; helpers are removed only after success."
+                : "Image-sequence formats retain their separately captured audio.";
             if (output == HlaeRecordingOutput.JpgSequence) manifest["jpg_quality"] = jpgQuality;
             manifest["lead_in_seconds"] = leadSeconds;
             manifest["outro_seconds"] = outroSeconds;
@@ -1153,15 +1310,22 @@ namespace Tf2StvParserGui
                     record["start_tick"] = clip.StartTick;
                     record["end_tick"] = clip.EndTick;
                     record["attacker_user_id"] = clip.AttackerUserId;
+                    string expectedOutputPath = HlaeRecordingOutputs.RequiresAudioMux(output)
+                        ? Path.Combine(clip.OutputPath, HlaeRecordingOutputs.MediaFileName(output))
+                        : clip.OutputPath;
                     record["output_path"] = clip.OutputPath;
-                    record["expected_output_path"] = clip.OutputPath;
+                    record["expected_output_path"] = expectedOutputPath;
                     record["actual_output_path"] = null;
                     record["native_capture_base"] = clip.CaptureBaseName;
                     record["status"] = "Pending";
                     record["recording_started_at"] = null;
                     record["recording_stopped_at"] = null;
                     record["encoder_exit_code"] = null;
-                    record["encoder_managed_by"] = HlaeRecordingOutputs.RequiresFfmpeg(output) ? "HLAE" : "TF2 startmovie";
+                    record["encoder_managed_by"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? "HLAE + FFmpeg audio mux" :
+                        (HlaeRecordingOutputs.RequiresFfmpeg(output) ? "HLAE" : "TF2 startmovie");
+                    record["audio_muxed"] = false;
+                    record["audio_mux_exit_code"] = null;
+                    record["muxed_output_path"] = null;
                     record["output_verified"] = false;
                     record["output_size_bytes"] = 0;
                     record["completed_at"] = null;
@@ -1349,7 +1513,11 @@ namespace Tf2StvParserGui
                         if (String.Equals(TextValue(record, "status"), "Completed", StringComparison.OrdinalIgnoreCase)) continue;
                         string expected = TextValue(record, "expected_output_path");
                         long size = Directory.Exists(expected) ? DirectorySize(expected) : (File.Exists(expected) ? new FileInfo(expected).Length : 0L);
-                        if (size > 0)
+                        bool muxRequired = String.Equals(TextValue(record, "encoder_managed_by"), "HLAE + FFmpeg audio mux", StringComparison.OrdinalIgnoreCase);
+                        bool muxVerified = false;
+                        try { muxVerified = Convert.ToBoolean(Value(record, "audio_muxed")); }
+                        catch { }
+                        if (size > 0 && (!muxRequired || muxVerified))
                         {
                             record["status"] = "Completed";
                             record["output_verified"] = true;
@@ -1363,7 +1531,9 @@ namespace Tf2StvParserGui
                             allCompleted = false;
                             record["status"] = "Failed";
                             record["output_verified"] = false;
-                            record["failure_reason"] = "The application previously closed before this recording produced a verifiable non-empty output.";
+                            record["failure_reason"] = muxRequired && size > 0
+                                ? "The application closed before the separate HLAE audio and video were verified as one muxed media file. The original files were kept."
+                                : "The application previously closed before this recording produced a verifiable non-empty output.";
                             record["completed_at"] = DateTime.UtcNow.ToString("o");
                         }
                     }
@@ -1422,6 +1592,12 @@ namespace Tf2StvParserGui
                     DeleteOwnedFile(Path.Combine(directory, "recording_manifest.json.tmp"), failures);
                     DeleteOwnedFile(Path.Combine(directory, "recording_finalize.log"), failures);
                     DeleteOwnedFile(Path.Combine(directory, "recording_finalize_error.txt"), failures);
+                    foreach (string clipDirectory in Directory.GetDirectories(directory))
+                    {
+                        DeleteOwnedFile(Path.Combine(clipDirectory, "video_muxing.mp4"), failures);
+                        DeleteOwnedFile(Path.Combine(clipDirectory, "video_muxing.avi"), failures);
+                        DeleteOwnedFile(Path.Combine(clipDirectory, "ffmpeg_audio_mux_error.txt"), failures);
+                    }
                 }
             }
             if (failures.Count > 0)

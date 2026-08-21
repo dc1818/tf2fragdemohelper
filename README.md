@@ -72,13 +72,13 @@ Optional recording assets are loaded from the packaged `recording_resources` fol
 | Output option | Files written | Notes |
 |---|---|---|
 | TGA image sequence | `frame00000.tga`, `frame00001.tga`, … | Lossless frames; no HLAE FFmpeg installation needed; largest storage use. |
-| JPG image sequence | `frame_000001.jpg`, `frame_000002.jpg`, … | Smaller frame sequence; choose quality 1–100 (100 highest, 90 default). Requires HLAE FFmpeg. |
-| MP4 – standard | `video.mp4` | HLAE's standard FFmpeg MP4 preset. |
-| MP4 – compatible | `video.mp4` | HLAE's YUV 4:2:0 preset for broad player/editor compatibility. |
-| MP4 – lossless | `video.mp4` | HLAE's lossless high-file-size MP4 preset. |
-| AVI – raw | `video.avi` | Uncompressed AVI; extremely large. |
+| JPG image sequence | `frame_000001.jpg`, `frame_000002.jpg`, … | Smaller native frame sequence; choose quality 1–100 (100 highest, 90 default). |
+| MP4 – standard | `video.mp4` | HLAE's standard FFmpeg MP4 preset; the helper muxes HLAE's WAV audio into the final MP4. |
+| MP4 – compatible | `video.mp4` | HLAE's YUV 4:2:0 preset for broad player/editor compatibility; final MP4 includes audio. |
+| MP4 – lossless | `video.mp4` | HLAE's lossless high-file-size MP4 preset; final MP4 includes audio. |
+| AVI – raw | `video.avi` | Uncompressed AVI; extremely large; final AVI includes audio. |
 
-The selected FPS is applied both to `host_framerate` and `mirv_streams record fps`, as TF2 requires. TGA is the only option that works without FFmpeg; the GUI checks for HLAE's FFmpeg installation before launching JPG, MP4, or AVI recording.
+The selected FPS is applied both to `host_framerate` and `mirv_streams record fps`, as TF2 requires. HLAE writes encoded video and `audio.wav` separately, so after each MP4/AVI clip the helper waits for both streams to close, uses the selected FFmpeg to mux them without re-encoding video, verifies the combined file has both streams, then removes the WAV only after success. TGA/JPG image sequences remain separate from their captured audio. TGA and JPG use native `startmovie`; MP4 and AVI require FFmpeg.
 
 Recording mode supports current retail `tf_win64.exe` with HLAE 2.189.0 or newer and the x64 `AfxHookSource.dll`, plus legacy `tf.exe` with the 32-bit hook. HLAE's FFmpeg component is required. The launcher is intentionally offline-only: it always supplies `-insecure` and `+sv_lan 1`, generates a config that disables downloads and replaces `connect`/`retry`, and does not expose custom launch arguments. It is for local demo playback only and must never be used to join a server.
 

@@ -269,6 +269,9 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('AppendPortableRecordingIndex', self.batch)
         self.assertIn('clip.FinalOutputPath', self.batch)
         self.assertIn('File.Move(videoPath, clip.FinalOutputPath)', self.batch)
+        self.assertIn('FindEncodedTakeDirectory', self.batch)
+        self.assertIn('Directory.GetDirectories(outputPath, "take*", SearchOption.TopDirectoryOnly)', self.batch)
+        self.assertIn('DeleteEmptyDirectoryTree(clip.OutputPath)', self.batch)
 
     def test_each_selected_clip_has_one_terminal_vdm(self):
         self.assertIn('demo.Clips.Add(clip);\n                result.Add(demo);', self.batch)

@@ -1018,6 +1018,17 @@ namespace Tf2StvParserGui
             catch { }
         }
 
+        private static void DeleteEmptyDirectoryTree(string path)
+        {
+            try
+            {
+                if (!Directory.Exists(path)) return;
+                foreach (string directory in Directory.GetDirectories(path)) DeleteEmptyDirectoryTree(directory);
+                DeleteEmptyDirectory(path);
+            }
+            catch { }
+        }
+
         private static void StageDemosAndWriteVdms(List<DemoQueue> demos, string stagedDirectory, string gameDirectory, string sessionId, int fps, HlaeRecordingOutput output, int jpgQuality)
         {
             for (int index = 0; index < demos.Count; index++)
@@ -1258,7 +1269,7 @@ namespace Tf2StvParserGui
                 if (outputSize <= 0) throw new IOException("The output exists but is empty.");
                 string actualOutputPath = clip.FinalOutputPath;
                 tracker.MarkCompleted(clip.CaptureBaseName, actualOutputPath, outputSize);
-                if (HlaeRecordingOutputs.RequiresAudioMux(output)) DeleteEmptyDirectory(clip.OutputPath);
+                if (HlaeRecordingOutputs.RequiresAudioMux(output)) DeleteEmptyDirectoryTree(clip.OutputPath);
                 AppendRecordingDiagnostic(outputDirectory, clip, "Completed", "verified durable output bytes=" + outputSize);
             }
             catch (Exception error)
@@ -1279,9 +1290,13 @@ namespace Tf2StvParserGui
                 throw new FileNotFoundException("FFmpeg is required to combine HLAE's video and audio into one final file.", ffmpegExecutable);
 
             string mediaName = HlaeRecordingOutputs.MediaFileName(output);
-            string videoPath = Path.Combine(clip.OutputPath, mediaName);
-            string audioPath = Path.Combine(clip.OutputPath, "audio.wav");
-            string muxingPath = Path.Combine(clip.OutputPath, "video_muxing" + Path.GetExtension(mediaName));
+            // HLAE writes each recording into a take0000 (and subsequently
+            // take0001, etc.) subfolder. Older HLAE layouts wrote directly to
+            // the requested folder, so retain that fallback as well.
+            string takeDirectory = FindEncodedTakeDirectory(clip.OutputPath, mediaName);
+            string videoPath = Path.Combine(takeDirectory, mediaName);
+            string audioPath = Path.Combine(takeDirectory, "audio.wav");
+            string muxingPath = Path.Combine(takeDirectory, "video_muxing" + Path.GetExtension(mediaName));
             WaitForStableFile(videoPath, waitMilliseconds);
             WaitForStableFile(audioPath, waitMilliseconds);
             if (File.Exists(muxingPath))
@@ -1313,6 +1328,18 @@ namespace Tf2StvParserGui
             long deliveredSize = WaitForStableFile(clip.FinalOutputPath, waitMilliseconds);
             tracker.MarkAudioMuxed(clip.CaptureBaseName, clip.FinalOutputPath, exitCode);
             return deliveredSize > 0 ? deliveredSize : (finalSize > 0 ? finalSize : muxedSize);
+        }
+
+        private static string FindEncodedTakeDirectory(string outputPath, string mediaName)
+        {
+            string directVideo = Path.Combine(outputPath, mediaName);
+            if (File.Exists(directVideo)) return outputPath;
+            if (!Directory.Exists(outputPath)) return outputPath;
+            string[] directories = Directory.GetDirectories(outputPath, "take*", SearchOption.TopDirectoryOnly);
+            Array.Sort(directories, StringComparer.OrdinalIgnoreCase);
+            foreach (string directory in directories)
+                if (File.Exists(Path.Combine(directory, mediaName))) return directory;
+            return outputPath;
         }
 
         private static int RunAudioMux(string ffmpegExecutable, string videoPath, string audioPath, string outputPath, HlaeRecordingOutput output)

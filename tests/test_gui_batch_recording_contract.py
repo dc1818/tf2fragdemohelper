@@ -273,6 +273,12 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('Directory.GetDirectories(outputPath, "take*", SearchOption.TopDirectoryOnly)', self.batch)
         self.assertIn('DeleteEmptyDirectoryTree(clip.OutputPath)', self.batch)
 
+    def test_recording_checker_reconciles_saved_video_files_and_portable_index(self):
+        self.assertIn('"__k" + RecordingKeyToken(clip.RecordingKey)', self.batch)
+        self.assertIn('VideoWithRecordingKeyExists(recordingKey)', self.batch)
+        self.assertIn('Path.Combine(settings.OutputDirectory, "recording_index.ndjson")', self.batch)
+        self.assertIn('paths.RemoveAll(delegate(string path) { return !OutputStillExists(path); });', self.batch)
+
     def test_each_selected_clip_has_one_terminal_vdm(self):
         self.assertIn('demo.Clips.Add(clip);\n                result.Add(demo);', self.batch)
         self.assertIn('String.IsNullOrEmpty(nextDemo) ? "quit" : "playdemo " + nextDemo', self.batch)

@@ -371,6 +371,7 @@ namespace Tf2StvParserGui
         private static readonly object RecordedClipIndexLock = new object();
         private static bool recordedClipIndexLoaded;
         private static readonly Dictionary<string, List<string>> recordedClipOutputs = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> loadedRecordedClipIndexPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> demoSignatureCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         private static JavaScriptSerializer NewIndexSerializer()
@@ -786,7 +787,8 @@ namespace Tf2StvParserGui
                     clip.Order = clipNumber;
                     string candidateName = String.IsNullOrWhiteSpace(clip.CandidateId) ? "candidate" : clip.CandidateId;
                     string name = BatchCandidateSupport.SafeName(Path.GetFileNameWithoutExtension(clip.DemoName)) +
-                        "__" + BatchCandidateSupport.SafeName(candidateName) + "__t" + clip.StartTick + "-" + clip.EndTick;
+                        "__" + BatchCandidateSupport.SafeName(candidateName) + "__t" + clip.StartTick + "-" + clip.EndTick +
+                        "__k" + RecordingKeyToken(clip.RecordingKey);
                     clip.RecordingIdentifier = name;
                     if (HlaeRecordingOutputs.RequiresAudioMux(output))
                     {
@@ -836,6 +838,11 @@ namespace Tf2StvParserGui
                 identity.Append("|").Append(IntValue(candidate, "clip_end_tick"));
             }
             return HashText(identity.ToString());
+        }
+
+        private static string RecordingKeyToken(string recordingKey)
+        {
+            return String.IsNullOrEmpty(recordingKey) ? "unknown" : recordingKey.Substring(0, Math.Min(24, recordingKey.Length));
         }
 
         private static string DemoContentSignature(string demoPath)
@@ -904,10 +911,12 @@ namespace Tf2StvParserGui
             EnsureRecordedClipIndexLoaded();
             lock (RecordedClipIndexLock)
             {
+                if (VideoWithRecordingKeyExists(recordingKey)) return true;
                 List<string> paths;
                 if (!recordedClipOutputs.TryGetValue(recordingKey, out paths)) return false;
-                foreach (string path in paths)
-                    if (OutputStillExists(path)) return true;
+                paths.RemoveAll(delegate(string path) { return !OutputStillExists(path); });
+                if (paths.Count > 0) return true;
+                recordedClipOutputs.Remove(recordingKey);
                 return false;
             }
         }
@@ -916,21 +925,47 @@ namespace Tf2StvParserGui
         {
             lock (RecordedClipIndexLock)
             {
-                if (recordedClipIndexLoaded) return;
-                recordedClipIndexLoaded = true;
-                string path = RecordedClipIndexPath();
-                if (!File.Exists(path)) return;
-                JavaScriptSerializer serializer = NewIndexSerializer();
-                foreach (string line in File.ReadAllLines(path))
+                if (!recordedClipIndexLoaded)
                 {
-                    try
-                    {
-                        IDictionary entry = serializer.DeserializeObject(line) as IDictionary;
-                        AddRecordedClip(TextValue(entry, "recording_key"), TextValue(entry, "output_path"));
-                    }
-                    catch { }
+                    recordedClipIndexLoaded = true;
+                    LoadRecordedClipIndex(RecordedClipIndexPath());
                 }
+                HlaeRecordingSettings settings = LoadSettings();
+                if (!String.IsNullOrEmpty(settings.OutputDirectory))
+                    LoadRecordedClipIndex(Path.Combine(settings.OutputDirectory, "recording_index.ndjson"));
             }
+        }
+
+        private static void LoadRecordedClipIndex(string path)
+        {
+            if (String.IsNullOrEmpty(path) || loadedRecordedClipIndexPaths.Contains(path) || !File.Exists(path)) return;
+            loadedRecordedClipIndexPaths.Add(path);
+            JavaScriptSerializer serializer = NewIndexSerializer();
+            foreach (string line in File.ReadAllLines(path))
+            {
+                try
+                {
+                    IDictionary entry = serializer.DeserializeObject(line) as IDictionary;
+                    AddRecordedClip(TextValue(entry, "recording_key"), TextValue(entry, "output_path"));
+                }
+                catch { }
+            }
+        }
+
+        private static bool VideoWithRecordingKeyExists(string recordingKey)
+        {
+            try
+            {
+                HlaeRecordingSettings settings = LoadSettings();
+                if (String.IsNullOrEmpty(settings.OutputDirectory)) return false;
+                string videos = Path.Combine(settings.OutputDirectory, "Videos");
+                if (!Directory.Exists(videos)) return false;
+                string token = "__k" + RecordingKeyToken(recordingKey);
+                foreach (string file in Directory.GetFiles(videos, "*", SearchOption.TopDirectoryOnly))
+                    if (Path.GetFileNameWithoutExtension(file).IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0 && OutputStillExists(file)) return true;
+            }
+            catch { }
+            return false;
         }
 
         private static void RegisterRecordedClip(IDictionary record)

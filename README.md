@@ -72,10 +72,9 @@ Recordings are organized for browsing rather than by temporary batch folders:
 ├─ Recording Metadata/
 │  └─ tf2fragdemohelper_batch_.../
 │     └─ recording_manifest.json
-└─ recording_index.ndjson                # one JSON record per completed clip
 ```
 
-The filename/folder identifier combines the demo name, candidate ID, and clip ticks. `recording_index.ndjson` maps that identifier and actual saved path to the source demo, candidate, attacker, ticks, and stable recording key. It is the human-readable counterpart to the built-in already-recorded checker. Names are collision-safe, so no saved output is silently overwritten.
+The filename/folder identifier combines the demo name, candidate ID, clip ticks, and a compact stable key token. The helper keeps its recorded-clip catalog internally and checks that each known saved output still exists. Names are collision-safe, so no saved output is silently overwritten.
 
 The recording setup also provides a reversible high-quality movie profile. It includes common output resolutions; a session-only DX-level selector; maximum-quality graphics; selectable skyboxes and recording HUDs; viewmodels and viewmodel FOV; motion blur; hit-sound, voice, combat-text, crosshair, minimal-HUD, and HUD-player-model controls; selected user custom resources; and sound suppressors. Enhanced-particle replacement is intentionally not installed or exposed; normal TF2/HLAE particle rendering remains active.
 

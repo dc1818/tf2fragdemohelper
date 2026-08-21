@@ -930,9 +930,6 @@ namespace Tf2StvParserGui
                     recordedClipIndexLoaded = true;
                     LoadRecordedClipIndex(RecordedClipIndexPath());
                 }
-                HlaeRecordingSettings settings = LoadSettings();
-                if (!String.IsNullOrEmpty(settings.OutputDirectory))
-                    LoadRecordedClipIndex(Path.Combine(settings.OutputDirectory, "recording_index.ndjson"));
             }
         }
 
@@ -988,37 +985,9 @@ namespace Tf2StvParserGui
                     entry["candidate_id"] = TextValue(record, "candidate_id");
                     entry["recorded_utc"] = DateTime.UtcNow.ToString("o");
                     File.AppendAllText(indexPath, NewIndexSerializer().Serialize(entry) + Environment.NewLine, new UTF8Encoding(false));
-                    AppendPortableRecordingIndex(record, output);
                 }
                 catch { }
             }
-        }
-
-        // The output-root index is for people and portable exports; the Local
-        // AppData index above remains the fast built-in checker cache.
-        private static void AppendPortableRecordingIndex(IDictionary record, string output)
-        {
-            string indexPath = TextValue(record, "recording_index_path");
-            if (String.IsNullOrEmpty(indexPath)) return;
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(indexPath));
-                Dictionary<string, object> entry = new Dictionary<string, object>();
-                entry["recording_identifier"] = TextValue(record, "recording_identifier");
-                entry["recording_key"] = TextValue(record, "recording_key");
-                entry["file_name"] = TextValue(record, "file_name");
-                entry["output_path"] = output;
-                entry["frames_path"] = TextValue(record, "frames_path");
-                entry["audio_path"] = TextValue(record, "audio_path");
-                entry["source_demo"] = TextValue(record, "source_demo");
-                entry["candidate_id"] = TextValue(record, "candidate_id");
-                entry["attacker_user_id"] = IntValue(record, "attacker_user_id");
-                entry["start_tick"] = IntValue(record, "start_tick");
-                entry["end_tick"] = IntValue(record, "end_tick");
-                entry["recorded_utc"] = DateTime.UtcNow.ToString("o");
-                File.AppendAllText(indexPath, NewIndexSerializer().Serialize(entry) + Environment.NewLine, new UTF8Encoding(false));
-            }
-            catch { }
         }
 
         private static void AddRecordedClip(string key, string output)
@@ -1635,7 +1604,6 @@ namespace Tf2StvParserGui
                     record["frames_path"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? null : clip.OutputPath;
                     record["audio_path"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? null : clip.AudioOutputPath;
                     record["file_name"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? Path.GetFileName(clip.FinalOutputPath) : null;
-                    record["recording_index_path"] = Path.Combine(settings.OutputDirectory, "recording_index.ndjson");
                     record["native_capture_base"] = clip.CaptureBaseName;
                     record["status"] = "Pending";
                     record["recording_started_at"] = null;

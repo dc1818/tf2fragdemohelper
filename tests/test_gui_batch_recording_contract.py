@@ -259,24 +259,24 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('MessageBoxButtons.YesNoCancel', self.program)
         self.assertIn('skip those candidates and record only the new ones', self.program)
 
-    def test_recordings_use_browseable_output_folders_and_a_portable_index(self):
+    def test_recordings_use_browseable_output_folders_without_an_output_index(self):
         self.assertIn('"Recording Metadata"', self.batch)
         self.assertIn('"Videos"', self.batch)
         self.assertIn('"Image Sequences"', self.batch)
         self.assertIn('"Frames"', self.batch)
         self.assertIn('"Audio"', self.batch)
-        self.assertIn('recording_index.ndjson', self.batch)
-        self.assertIn('AppendPortableRecordingIndex', self.batch)
+        self.assertNotIn('recording_index.ndjson', self.batch)
+        self.assertNotIn('AppendPortableRecordingIndex', self.batch)
         self.assertIn('clip.FinalOutputPath', self.batch)
         self.assertIn('File.Move(videoPath, clip.FinalOutputPath)', self.batch)
         self.assertIn('FindEncodedTakeDirectory', self.batch)
         self.assertIn('Directory.GetDirectories(outputPath, "take*", SearchOption.TopDirectoryOnly)', self.batch)
         self.assertIn('DeleteEmptyDirectoryTree(clip.OutputPath)', self.batch)
 
-    def test_recording_checker_reconciles_saved_video_files_and_portable_index(self):
+    def test_recording_checker_reconciles_saved_video_files_and_internal_index(self):
         self.assertIn('"__k" + RecordingKeyToken(clip.RecordingKey)', self.batch)
         self.assertIn('VideoWithRecordingKeyExists(recordingKey)', self.batch)
-        self.assertIn('Path.Combine(settings.OutputDirectory, "recording_index.ndjson")', self.batch)
+        self.assertIn('RecordedClipIndexPath()', self.batch)
         self.assertIn('paths.RemoveAll(delegate(string path) { return !OutputStillExists(path); });', self.batch)
 
     def test_each_selected_clip_has_one_terminal_vdm(self):

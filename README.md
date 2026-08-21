@@ -6,7 +6,7 @@ It is built for reviewing long competitive or public STV demos without manually 
 
 ## Current capabilities
 
-- Parses TF2 STV demos with the `demostf/parser` codebase.
+- Parses one or more TF2 STV/POV demos with the `demostf/parser` codebase.
 - Exports the original decoded packet stream as newline-delimited JSON.
 - Writes a compact, named game-event stream for deaths, damage, round transitions, class changes, objectives, and other TF2 events.
 - Excludes setup, waiting, and post-round deaths from highlight candidates.
@@ -15,6 +15,10 @@ It is built for reviewing long competitive or public STV demos without manually 
 - Provides a Windows GUI with drag-and-drop demo selection, export-location selection, progress logging, cancellation, and result-folder opening.
 - Includes a candidate browser with score and text filters plus a per-kill view of classes, teams, weapons, tags, clip ticks, and round-state evidence.
 - The candidate browser can launch the original demo in TF2 at a selectable lead-in before the first event; double-click a candidate or use **Open selected in TF2**.
+- Batch processing uses two strict phases: it parses all selected demos first with bounded automatic CPU/RAM-aware concurrency, then analyzes candidate results concurrently. After both phases complete it creates one combined `frag_candidates.ndjson` whose candidates retain their source demo and export folder.
+- Batch preflight estimates full-export disk usage before parsing, reserves live disk headroom while concurrent jobs run, and stops before launching another job if the drive can no longer safely fit it.
+- Live byte-weighted ETA and benchmark telemetry record per-demo speed, process CPU time, peak working set, system CPU/RAM/disk samples, output expansion, failures, and candidate-analysis cost to CSV/JSON files.
+- The combined candidate browser supports Ctrl-click multi-selection and **Select all visible**, then records selected candidates demo-by-demo through HLAE and generated VDM actions.
 - Streams candidate-debug decisions into the embedded parser terminal, including rejected deaths, POV filtering, grouping windows, building events, and score outcomes.
 
 ## Packet-state analysis
@@ -43,9 +47,57 @@ Class-specific direct-versus-splash confidence, reflects, headshot chains, garde
 4. Open `TF2_STV_Parser_GUI.exe`.
 5. Select or drag in a `.dem` file, choose an export location, then select **Parse STV demo**.
 
-The **Item schema (optional)** field can point directly to `items_game.txt`. Leave it blank for normal TF2 installations; the analyzer automatically follows the source demo path to `tf/scripts/items/items_game.txt`.
+The **Item schema (optional)** field can point directly to `items_game.txt`. Leave it blank when the selected demo is stored inside `tf/demos`: the analyzer then uses that installation's `tf/scripts/items/items_game.txt`. For demos uploaded from any other location, the field remains optional and no schema path is guessed; select `items_game.txt` only if you want schema-based weapon-slot classification.
 
 The first build compiles `parser/src/bin/export_all.rs` into `parser/target/release/export_all.exe` and compiles the Windows Forms GUI.
+
+For benchmark/test output formats, disk-estimation behavior, and ETA methodology, see `BENCHMARK_DATA.md`.
+
+## Batch parsing and offline HLAE recording
+
+Use **Browse demos** to select multiple `.dem` files, or drag several demos onto the parser window. Batch mode first creates all per-demo export folders, then parses multiple demos concurrently. Only after every parse completes does phase 2 begin, where multiple candidate analyses run concurrently. Automatic worker counts are based on logical CPU capacity, currently available physical RAM, actual demo sizes, and a scalable parse I/O ceiling so full packet/state NDJSON writers do not overwhelm storage. A live resource gate can temporarily delay starting another worker if available RAM falls below the reserved headroom or total system CPU usage is already near 95%. After both phases finish, the app writes a batch-level `manifest.json` and combined `frag_candidates.ndjson`. Each combined candidate contains `batch_context` with `demo_order`, `demo_name`, `source_demo`, and `source_export`, allowing one browser to display and queue candidates from every demo.
+
+In the candidate browser, Ctrl-click rows or use **Select all visible**. Set the lead-in, outro, recording FPS, and output type, then choose **Record selected with HLAE**. The recorder sorts candidates by source demo and playback tick, then stages one terminal VDM job per selected clip. TGA/JPG sequences use Source `startmovie`; MP4/AVI outputs use HLAE `mirv_streams`.
+
+Recordings are organized for browsing rather than by temporary batch folders:
+
+```text
+<recording output folder>/
+├─ Videos/                              # flat MP4/AVI files, audio already included
+│  └─ demo__candidate__t100-260.mp4
+├─ Image Sequences/
+│  └─ demo__candidate__t100-260/
+│     ├─ Frames/                         # TGA/JPG frames
+│     └─ Audio/                          # matching WAV audio
+├─ Recording Metadata/
+│  └─ tf2fragdemohelper_batch_.../
+│     └─ recording_manifest.json
+```
+
+The filename/folder identifier combines the demo name, candidate ID, clip ticks, and a compact stable key token. The helper keeps its recorded-clip catalog internally and checks that each known saved output still exists. Names are collision-safe, so no saved output is silently overwritten.
+
+The recording setup also provides a reversible high-quality movie profile. It includes common output resolutions; a session-only DX-level selector; maximum-quality graphics; selectable skyboxes and recording HUDs; viewmodels and viewmodel FOV; motion blur; hit-sound, voice, combat-text, crosshair, minimal-HUD, and HUD-player-model controls; selected user custom resources; and sound suppressors. Enhanced-particle replacement is intentionally not installed or exposed; normal TF2/HLAE particle rendering remains active.
+
+With custom-resource isolation enabled, the app moves the existing `tf/custom` folder into a timestamped backup, creates a temporary recording-only `custom` folder, and restores the original folder after TF2 exits. It also backs up the movie profile CFG, `video.txt`, and the pre-launch DirectX registry value. Closing the parser stops the recording session before restoring. An active-session manifest in Local AppData lets the next parser launch recover files after an interrupted run. If automatic restore cannot finish, the original files remain under `tf/tf2fragdemohelper_backups/<session>` with `RESTORE_REQUIRED.txt` instead of being deleted.
+
+The recorder persists `recording_manifest.json` atomically under **Recording Metadata**. It records pending, recording, finalizing, verified, completed, failed, and cancelled transitions together with expected/actual output paths and non-empty file-size verification. A clip is not marked complete merely because playback reached its end tick: the writer must stop, flush, close, and produce a stable non-empty output. Interrupted batches are reconciled on the next launch without automatically replaying the last clip. Verified clips are also registered by a built-in stable fingerprint (demo content, attacker, and exact kill ticks), so re-importing or reparsing the same demo shows **Recorded** and offers to skip already-made clips. The check only treats a clip as recorded while its saved output still exists at its registered location.
+
+Closing the parser first stops the active offline TF2/HLAE session and waits for finalization, then verifies that the original TF2 files and settings were restored. Only after successful restore verification does it remove helper-owned temporary staging files: copied demos and VDMs, generated recording CFGs, the offline/profile CFGs, temporary recording logs, queue files, and finalizer scratch metadata. Saved video or image-sequence folders, their durable recording manifest, original demos, and parsed export folders (including candidates) are kept.
+
+Optional recording assets are loaded from the packaged `recording_resources` folder selected in the setup dialog; no separate third-party tool folder is required. The maximum-quality CFG is applied from the command line and again at the start of every staged demo, so it takes precedence over a low-graphics gameplay config during recording without permanently replacing that config.
+
+| Output option | Files written | Notes |
+|---|---|---|
+| TGA image sequence | `frame00000.tga`, `frame00001.tga`, … | Lossless frames; no HLAE FFmpeg installation needed; largest storage use. |
+| JPG image sequence | `frame_000001.jpg`, `frame_000002.jpg`, … | Smaller native frame sequence; choose quality 1–100 (100 highest, 90 default). |
+| MP4 – standard | `video.mp4` | HLAE's standard FFmpeg MP4 preset; the helper muxes HLAE's WAV audio into the final MP4. |
+| MP4 – compatible | `video.mp4` | HLAE's YUV 4:2:0 preset for broad player/editor compatibility; final MP4 includes audio. |
+| MP4 – lossless | `video.mp4` | HLAE's lossless high-file-size MP4 preset; final MP4 includes audio. |
+| AVI – raw | `video.avi` | Uncompressed AVI; extremely large; final AVI includes audio. |
+
+The selected FPS is applied both to `host_framerate` and `mirv_streams record fps`, as TF2 requires. HLAE writes encoded video and `audio.wav` separately, so after each MP4/AVI clip the helper waits for both streams to close, uses the selected FFmpeg to mux them without re-encoding video, verifies the combined file has both streams, then removes the WAV only after success. TGA/JPG image sequences remain separate from their captured audio. TGA and JPG use native `startmovie`; MP4 and AVI require FFmpeg.
+
+Recording mode supports current retail `tf_win64.exe` with HLAE 2.189.0 or newer and the x64 `AfxHookSource.dll`, plus legacy `tf.exe` with the 32-bit hook. HLAE's FFmpeg component is required. The launcher is intentionally offline-only: it always supplies `-insecure` and `+sv_lan 1`, generates a config that disables downloads and replaces `connect`/`retry`, and does not expose custom launch arguments. It is for local demo playback only and must never be used to join a server.
 
 ## Export layout
 
@@ -75,7 +127,7 @@ The score is intentionally explainable. `frag_candidates.ndjson` records `score_
 Loose Cannon impact and explosion killfeed variants are normalized as Loose Cannon outcomes for projectile and Double Donk analysis; raw event weapon text remains available in the candidate evidence.
 Projectile matching separates recycled entity-ID lifetimes at removal, so a new projectile cannot inherit an earlier projectile's flight duration or path.
 
-Melee classification does not depend on a complete list of killfeed names. The analyzer locates TF2's current signed `tf/scripts/items/items_game.txt` from the demo path in `manifest.json`, resolves each `weapon_def_index` through inherited schema prefabs, and uses its authoritative `item_slot`. You can also put `items_game.txt` in the export folder, set `TF2_ITEM_SCHEMA`, or run `analyze_frags.py --item-schema PATH EXPORT_FOLDER`. If the current schema is unavailable, Valve's stable `ETFWeaponType` `weapon_id` and then the weapon name remain compatibility fallbacks. Every schema-resolved kill records `weapon_slot` and `weapon_slot_source: "item_schema"`; `frag_summary.json` reports whether the schema loaded and how many item slots were resolved.
+Melee classification does not depend on a complete list of killfeed names. When the demo is in `tf/demos`, the analyzer locates TF2's current signed `tf/scripts/items/items_game.txt`, resolves each `weapon_def_index` through inherited schema prefabs, and uses its authoritative `item_slot`. You can also put `items_game.txt` in the export folder, set `TF2_ITEM_SCHEMA`, or run `analyze_frags.py --item-schema PATH EXPORT_FOLDER`. If the current schema is unavailable, Valve's stable `ETFWeaponType` `weapon_id` and then the weapon name remain compatibility fallbacks. Every schema-resolved kill records `weapon_slot` and `weapon_slot_source: "item_schema"`; `frag_summary.json` reports whether the schema loaded and how many item slots were resolved.
 
 | Signal | Score |
 |---|---:|
@@ -124,7 +176,9 @@ Objective follow-ups are kept as raw event evidence on the candidate. A `teampla
 
 Every kill records its exact original `player_death` event tick in `event_tick` and `point_of_kill_ticks`. Candidate `point_of_kill_ticks` and clip boundaries use the demo/playback tick you can seek to in TF2; `point_of_kill_server_ticks` and `event_tick` preserve the authoritative server tick used for analysis. The exporter preserves both namespaces because they are not interchangeable. Event records also preserve their source packet sequence and position within that packet, so two legitimate same-tick deaths remain distinguishable without inventing a sub-tick timestamp. Two same-tick deaths are still a valid multikill when they have different victims and event indexes. The exporter classifies the demo as STV, POV, or unknown using the header and `dem_usercmd` packet evidence. STV and unknown demos keep all players' candidates. A POV demo is narrowed to the recorded player when the header nickname matches a decoded player event or the parser's `players.json` userinfo roster; the roster fallback handles POV demos that omit usable `player_connect` events. If neither source resolves the nickname, the result is marked and candidates are not silently labeled POV-only.
 
-After an export completes, use **View candidates** in the GUI. To revisit a previous result without parsing again, use **Load parsed export** and select the export folder that contains `manifest.json` and `frag_candidates.ndjson`. The candidate browser replaces the parser screen in the same window; use **Back to parser** to return to the selected demo, export controls, and embedded terminal. The parser log remains available after returning and can be used to trace every accepted/rejected event. The top filter matches player IDs, classes, teams, weapons, and tags; the selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo. The GUI invokes `analyze_frags.py --debug` automatically.
+After an export completes, use **View candidates** in the GUI. To revisit a previous result without parsing again, use **Load parsed export** and select the export folder that contains `manifest.json` and `frag_candidates.ndjson`. The candidate browser replaces the parser screen in the same window; use **Back to parser** to return to the selected demo, export controls, and embedded terminal. The parser log remains available after returning and can be used to trace analysis decisions. The selected candidate shows each kill and its round-state evidence. Team fields are populated from decoded `player_team` events when that information is present in the demo.
+
+The filter accepts plain text and field-specific terms for `map`, `class`, `team`, `demo`, `weapon`, `player`, and `tag`, with either `:` or `=`. Prefix a term with `-` to exclude it; `+` is optional for positive terms. Quoted multi-word values are supported. Positive values within the same field use OR semantics, positive values across different fields use AND semantics, and every negative match excludes the candidate. For example, `+class:demoman +class:soldier -map:cp_steel weapon:"rocket launcher"` matches Demoman or Soldier candidates using that weapon outside `cp_steel`. Field filters inspect their actual candidate metadata rather than falling back to unrelated display text. Changing a filter preserves selection by stable candidate identity, so a different visible row cannot inherit a hidden row's selection.
 
 The selected-candidate view also shows packet-state evidence for each kill: airborne status, projectile match and distance, Über-drop confirmation, reconstructed alive-player counts, recent friendly deaths, player deficit, both Medic charge values, actual Medic deploy follow-ups, and observed respawn ticks when available. Older exports without `state_samples.ndjson` remain compatible and simply skip state-backed tags and points.
 

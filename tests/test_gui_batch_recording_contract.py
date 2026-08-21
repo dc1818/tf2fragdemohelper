@@ -1,0 +1,348 @@
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class GuiBatchRecordingContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.program = (ROOT / "gui" / "Program.cs").read_text(encoding="utf-8")
+        cls.batch = (ROOT / "gui" / "BatchSupport.cs").read_text(encoding="utf-8")
+        cls.profile = (ROOT / "gui" / "RecordingProfile.cs").read_text(encoding="utf-8")
+        cls.benchmark = (ROOT / "gui" / "BenchmarkSupport.cs").read_text(encoding="utf-8")
+        cls.candidate_filter = (ROOT / "gui" / "CandidateFilter.cs").read_text(encoding="utf-8")
+        cls.build = (ROOT / "Build_Parser_GUI.bat").read_text(encoding="utf-8")
+
+    def test_hlae_launcher_is_offline_only(self):
+        self.assertIn('-steam -insecure +sv_lan 1', self.batch)
+        self.assertIn('alias connect', self.batch)
+        self.assertIn('alias retry', self.batch)
+        self.assertNotIn('custom launch arguments', self.program.lower())
+
+    def test_current_and_legacy_tf2_hooks_are_selected(self):
+        self.assertIn('tf_win64.exe', self.batch)
+        self.assertIn('Path.Combine(hlaeDirectory, "x64", "AfxHookSource.dll")', self.batch)
+        self.assertIn('Path.Combine(hlaeDirectory, "AfxHookSource.dll")', self.batch)
+        self.assertIn('-force32bit', self.batch)
+
+    def test_legacy_particle_override_is_not_exposed_or_installed(self):
+        self.assertNotIn('EnhancedParticles', self.profile)
+        self.assertNotIn('pldx_particles.vpk', self.profile)
+        self.assertNotIn('vpk.exe', self.profile)
+
+    def test_recording_dialog_saves_preferences_when_cancelled(self):
+        self.assertIn('dialog.FormClosing += delegate { SaveSettings(dialog.Settings); };', self.batch)
+
+    def test_batch_candidates_keep_source_demo_context(self):
+        self.assertIn('candidate["batch_context"]', self.batch)
+        self.assertIn('batchContext["source_demo"]', self.batch)
+        self.assertIn('batchContext["demo_order"]', self.batch)
+        self.assertIn('grid.MultiSelect = true', self.program)
+        self.assertIn('Select all visible', self.program)
+
+    def test_candidate_actions_require_an_explicit_selection(self):
+        self.assertNotIn('grid.Rows[0].Selected = true', self.program)
+        self.assertIn('ClearCandidateSelection();', self.program)
+        self.assertIn('Shown += delegate', self.program)
+        self.assertIn('grid.CurrentCell = null;', self.program)
+        self.assertIn('recordButton.Enabled = hasSelection;', self.program)
+
+    def test_preview_button_appears_only_for_one_selected_candidate(self):
+        self.assertIn('int selectedCount = grid.SelectedRows.Count;', self.program)
+        self.assertIn('private readonly Button inlinePreviewButton', self.program)
+        self.assertIn('inlinePreviewButton.Visible = selectedCount == 1;', self.program)
+        self.assertIn('Preview Selected Clip in TF2', self.program)
+        self.assertIn('recordingControls.Controls.Add(recordButton);', self.program)
+        self.assertIn('recordingControls.Controls.Add(inlinePreviewButton);', self.program)
+        self.assertNotIn('private void PositionPreviewButton()', self.program)
+
+    def test_candidate_rows_toggle_off_and_double_click_does_not_preview(self):
+        self.assertIn('grid.CellMouseDown += RememberSelectedRowClick;', self.program)
+        self.assertIn('grid.CellClick += ToggleClickedSelectedRow;', self.program)
+        self.assertIn('if (e.RowIndex < 0 || e.RowIndex != clickedSelectedRow) return;', self.program)
+        self.assertIn('grid.Rows[e.RowIndex].Selected = false;', self.program)
+        self.assertNotIn('grid.CellDoubleClick += delegate { LaunchSelectedCandidate(); };', self.program)
+        self.assertNotIn('private readonly Button launchButton', self.program)
+
+    def test_details_pane_scrolls_after_its_handle_exists(self):
+        self.assertIn('details.HandleCreated += delegate { ScrollDetailsToBottom(); };', self.program)
+
+    def test_vdm_queue_records_and_stops_each_clip(self):
+        self.assertIn(r'factory \"SkipAhead\"', self.batch)
+        self.assertIn('mirv_streams record screen settings ', self.batch)
+        self.assertIn('mirv_streams record start', self.batch)
+        self.assertIn('mirv_streams record end', self.batch)
+        self.assertIn('playdemo ', self.batch)
+        self.assertIn('recorderFlushTicks', self.batch)
+        self.assertIn('TF2FRAG_RECORD_START', self.batch)
+        self.assertIn('TF2FRAG_RECORD_END', self.batch)
+        self.assertIn('TF2FRAG_RECORD_FINALIZED', self.batch)
+
+    def test_recorder_is_initialized_and_logged_before_demo_playback(self):
+        self.assertIn('con_logfile tf2fragdemohelper_recording.log', self.batch)
+        self.assertIn('TF2FRAG_RECORDER_INIT', self.batch)
+        self.assertIn('TF2FRAG_RECORDER_READY', self.batch)
+
+    def test_tf2_image_sequences_use_native_startmovie(self):
+        self.assertIn('startmovie " + captureBaseName + " raw', self.batch)
+        self.assertIn('jpeg_quality ', self.batch)
+        self.assertIn('? "endmovie"', self.batch)
+        self.assertIn('clip.CaptureBaseName', self.batch)
+        self.assertIn('TransferNativeMovieFiles', self.batch)
+        self.assertIn('MonitorRecordingSession', self.batch)
+
+    def test_vdm_executes_per_clip_cfg_files_without_nested_quotes(self):
+        self.assertIn('WriteRecordingConfigs(demos, gameDirectory, sessionId', self.batch)
+        self.assertIn('"exec " + clip.StartConfigRelative', self.batch)
+        self.assertIn('"exec " + clip.StopConfigRelative', self.batch)
+        self.assertNotIn('startmovie \\"', self.batch)
+
+    def test_capture_fps_choices_are_fixed_temporal_sample_rates(self):
+        for fps in ('60', '120', '240', '480'):
+            self.assertIn(f'recordingFps.Items.Add("{fps}");', self.program)
+        self.assertIn('int captureFps = Convert.ToInt32(recordingFps.SelectedItem);', self.program)
+        self.assertIn('host_framerate " + fps + "; mirv_streams record fps " + fps', self.batch)
+        self.assertIn('manifest["fps_semantics"] = "captured_frames_per_demo_second";', self.batch)
+
+    def test_grid_starts_with_rank_column_and_no_row_header_column(self):
+        self.assertIn('grid.RowHeadersVisible = false;', self.program)
+        self.assertIn('AddColumn("#", 42);', self.program)
+        self.assertIn('FitCandidateColumnsToContent();', self.program)
+        self.assertIn('column.GetPreferredWidth(DataGridViewAutoSizeColumnMode.AllCells, true)', self.program)
+
+    def test_hlae_launch_matches_tf2_custom_loader_guidance(self):
+        self.assertIn('-customLoader -autoStart -noGui', self.batch)
+        self.assertIn('-afxGame tf', self.batch)
+        self.assertIn('-no_texture_stream', self.batch)
+        self.assertNotIn('-noConfig', self.batch)
+
+    def test_movie_output_choices_are_exposed(self):
+        self.assertIn('TGA Image Sequence', self.program)
+        self.assertIn('JPG Image Sequence', self.program)
+        self.assertIn('MP4 - Standard', self.program)
+        self.assertIn('MP4 - Lossless', self.program)
+        self.assertIn('recordingOutput.SelectedIndex = 2;', self.program)
+        self.assertIn('AVI - Raw', self.program)
+        self.assertIn('afxClassic', self.batch)
+        self.assertIn('afxFfmpegLosslessBest', self.batch)
+        self.assertIn('startmovie " + captureBaseName + " raw', self.batch)
+
+    def test_recording_size_estimate_uses_selected_clip_windows(self):
+        self.assertIn('private readonly Label recordingEstimate', self.program)
+        self.assertIn('Recording size estimate:', self.program)
+        self.assertIn('HlaeRecordingSizeEstimator.Estimate', self.program)
+        self.assertIn('SavedRecordingResolution()', self.batch)
+        self.assertIn('pixels * 3.0 + 18.0', self.batch)
+        self.assertIn('jpgQuality', self.batch)
+        self.assertIn('Mp4Lossless', self.batch)
+        self.assertIn('AviRaw', self.batch)
+
+    def test_ffmpeg_is_discovered_or_selected_before_hlae_launch(self):
+        self.assertIn('AddPathRow(layout, 0, "FFmpeg.exe"', self.profile)
+        self.assertIn('FindFfmpegNearHlae', self.batch)
+        self.assertIn('Select ffmpeg.exe at the top of the setup window.', self.batch)
+
+    def test_encoded_recordings_mux_audio_before_completion(self):
+        self.assertIn('RequiresAudioMux', self.batch)
+        self.assertIn('MuxEncodedMovieAudio', self.batch)
+        self.assertIn('RunAudioMux', self.batch)
+        self.assertIn('VerifyMuxedMedia', self.batch)
+        self.assertIn('audio.wav', self.batch)
+        self.assertIn('File.Replace(muxingPath, videoPath, null)', self.batch)
+        self.assertIn('tracker.MarkAudioMuxed', self.batch)
+        self.assertIn('HLAE + FFmpeg audio mux', self.batch)
+        self.assertIn('video_muxing.mp4', self.batch)
+        self.assertIn('video_muxing.avi', self.batch)
+
+    def test_item_schema_field_is_filled_only_for_tf_demos(self):
+        self.assertIn('UpdateAutoDetectedItemSchema();', self.program)
+        self.assertIn('DetectItemSchemaForSelectedDemos', self.program)
+        self.assertIn('ItemSchemaBesideTfDemos', self.program)
+        self.assertIn('directory.Name, "demos"', self.program)
+        self.assertIn('directory.Parent.Name, "tf"', self.program)
+        self.assertIn('Item schema (optional)', self.program)
+
+    def test_movie_settings_are_exposed(self):
+        for label in (
+            '"Resolution"', '"DX level"', '"Skybox"', '"HUD"', '"Viewmodels"',
+            '"Viewmodel FOV"', '"Maximum-quality graphics profile"',
+            '"Enable motion blur"', '"Disable hit sounds"', '"Disable voice chat"',
+            '"Minimal HUD"', '"Disable combat text"', '"Disable crosshair"',
+            '"Disable crosshair switching"', '"3D player model in HUD"',
+        ):
+            self.assertIn(label, self.profile)
+        self.assertIn('"98 (highest)"', self.profile)
+        self.assertIn('"Kill notices only"', self.profile)
+        self.assertIn('new RowStyle(SizeType.Absolute, 110)', self.profile)
+        self.assertIn('q.AutoScroll = false;', self.profile)
+        self.assertIn('new RowStyle(SizeType.Absolute, 170)', self.profile)
+        self.assertIn('for (int row = 0; row < 4; row++) checks.RowStyles.Add', self.profile)
+
+    def test_custom_resources_and_skyboxes_are_supported(self):
+        self.assertIn('Temporarily isolate custom resources', self.profile)
+        self.assertIn('Disable announcer voices', self.profile)
+        self.assertIn('Disable applause sounds', self.profile)
+        self.assertIn('Disable domination/revenge sounds', self.profile)
+        self.assertIn('InstallSkybox', self.profile)
+        self.assertIn('CopyHud', self.profile)
+
+    def test_bundled_sound_suppressors_are_optional_and_do_not_block_recording(self):
+        self.assertIn('no_announcer_voices.vpk', self.profile)
+        self.assertIn('no_applause_sounds.vpk', self.profile)
+        self.assertIn('no_domination_sounds.vpk', self.profile)
+        self.assertIn('string root = FindRecordingResources();', self.profile)
+        self.assertIn('The bundled recording resources are missing.', self.profile)
+        self.assertIn('ZipFile.ExtractToDirectory', self.profile)
+        self.assertIn('if (!File.Exists(source)) return;', self.profile)
+        self.assertNotIn('A selected recording sound resource was not found.', self.profile)
+
+    def test_recording_resources_are_packaged_and_do_not_require_a_user_path(self):
+        self.assertNotIn('RecordingResourcesDirectory', self.profile)
+        self.assertNotIn('BrowseRecordingResources', self.profile)
+        self.assertNotIn('recording_resources_directory', self.batch)
+        self.assertIn('No separate resources folder is needed.', self.profile)
+        for path in (
+            'recording_resources_archive/resources.part000',
+            'recording_resources_archive/resources.part031',
+        ):
+            self.assertTrue((ROOT / path).exists(), path)
+
+    def test_maximum_graphics_profile_overrides_low_quality_configs(self):
+        for command in (
+            'mat_picmip -1', 'mat_antialias 8', 'mat_forceaniso 16',
+            'mat_hdr_level 2', 'r_lod 0', 'r_rootlod 0',
+            'r_shadowrendertotexture 1', 'r_waterforceexpensive 1',
+        ):
+            self.assertIn(command, self.profile)
+        self.assertIn('+exec tf2fragdemohelper_recording_profile.cfg', self.batch)
+        self.assertIn('"exec tf2fragdemohelper_recording_profile"', self.batch)
+
+    def test_recording_profile_is_reversible_and_crash_recoverable(self):
+        self.assertIn('active_recording_profile.json', self.profile)
+        self.assertIn('Directory.Move(session.TemporaryCustomDirectory, session.OriginalCustomDirectory)', self.profile)
+        self.assertIn('Directory.Move(session.OriginalCustomDirectory, session.TemporaryCustomDirectory)', self.profile)
+        self.assertIn('RecoverInterruptedSession(null);', self.program)
+        self.assertIn('HlaeBatchRecorder.ShutdownActiveRecording();', self.program)
+        self.assertIn('HlaeBatchRecorder.CleanupTemporaryFiles();', self.program)
+        self.assertIn('RecordingProfileManager.Restore(profile, false);', self.batch)
+        self.assertIn('BackupVideoConfigPath', self.profile)
+        self.assertIn('BackupConfigPath', self.profile)
+        self.assertIn('config.cfg', self.profile)
+        self.assertIn('RestoreDxLevel(session);', self.profile)
+        self.assertIn('VerifyRestoredFiles(session);', self.profile)
+        self.assertIn('FilesMatch(session.ConfigPath, session.BackupConfigPath)', self.profile)
+        self.assertIn('The temporary recording resources could not be removed.', self.profile)
+
+    def test_recording_queue_is_durable_and_terminal(self):
+        self.assertIn('recording_manifest.json', self.batch)
+        self.assertIn('manifest["batch_status"] = "Pending";', self.batch)
+        self.assertIn('record["status"] = "Pending";', self.batch)
+        self.assertIn('record["status"] = "Verified";', self.batch)
+        self.assertIn('record["status"] = "Completed";', self.batch)
+        self.assertIn('AtomicWriteText(queuePath, json);', self.batch)
+        self.assertIn('AtomicWriteText(manifestPath, json);', self.batch)
+        self.assertIn('WaitForStableOutput', self.batch)
+        self.assertIn('output_verified', self.batch)
+        self.assertIn('output_size_bytes', self.batch)
+        self.assertIn('RecoverInterruptedRecordings();', self.program)
+        self.assertIn('finalizer.Join(20000)', self.batch)
+
+    def test_completed_candidates_are_registered_and_can_be_skipped(self):
+        self.assertIn('recorded_clip_index.ndjson', self.batch)
+        self.assertIn('CandidateRecordingKey', self.batch)
+        self.assertIn('DemoContentSignature', self.batch)
+        self.assertIn('RegisterRecordedClip(record);', self.batch)
+        self.assertIn('IsCandidateAlreadyRecorded', self.program)
+        self.assertIn('AddColumn("Recorded", 76);', self.program)
+        self.assertIn('MessageBoxButtons.YesNoCancel', self.program)
+        self.assertIn('skip those candidates and record only the new ones', self.program)
+
+    def test_candidate_view_updates_recorded_cells_after_verification(self):
+        self.assertIn('public static event EventHandler RecordedClipVerified;', self.batch)
+        self.assertIn('HlaeBatchRecorder.RecordedClipVerified += OnRecordedClipVerified;', self.program)
+        self.assertIn('HlaeBatchRecorder.RecordedClipVerified -= OnRecordedClipVerified;', self.program)
+        self.assertIn('BeginInvoke(new MethodInvoker(RefreshRecordedCandidateCells))', self.program)
+        self.assertIn('ApplyFilter();', self.program)
+        self.assertIn('DataGridViewContentAlignment.MiddleCenter', self.program)
+        self.assertIn('+recorded:true', self.program)
+        self.assertIn('String.Equals(field, "recorded", StringComparison.OrdinalIgnoreCase)', self.program)
+
+    def test_recordings_use_browseable_output_folders_without_an_output_index(self):
+        self.assertIn('"Recording Metadata"', self.batch)
+        self.assertIn('"Videos"', self.batch)
+        self.assertIn('"Image Sequences"', self.batch)
+        self.assertIn('"Frames"', self.batch)
+        self.assertIn('"Audio"', self.batch)
+        self.assertNotIn('recording_index.ndjson', self.batch)
+        self.assertNotIn('AppendPortableRecordingIndex', self.batch)
+        self.assertIn('clip.FinalOutputPath', self.batch)
+        self.assertIn('File.Move(videoPath, clip.FinalOutputPath)', self.batch)
+        self.assertIn('FindEncodedTakeDirectory', self.batch)
+        self.assertIn('Directory.GetDirectories(outputPath, "take*", SearchOption.TopDirectoryOnly)', self.batch)
+        self.assertIn('DeleteEmptyDirectoryTree(clip.OutputPath)', self.batch)
+
+    def test_recording_checker_reconciles_saved_video_files_and_internal_index(self):
+        self.assertIn('"__k" + RecordingKeyToken(clip.RecordingKey)', self.batch)
+        self.assertIn('VideoWithRecordingKeyExists(recordingKey)', self.batch)
+        self.assertIn('RecordedClipIndexPath()', self.batch)
+        self.assertIn('paths.RemoveAll(delegate(string path) { return !OutputStillExists(path); });', self.batch)
+
+    def test_each_selected_clip_has_one_terminal_vdm(self):
+        self.assertIn('demo.Clips.Add(clip);\n                result.Add(demo);', self.batch)
+        self.assertIn('String.IsNullOrEmpty(nextDemo) ? "quit" : "playdemo " + nextDemo', self.batch)
+        self.assertIn('previousFinalizeTick + 2', self.batch)
+        self.assertNotIn('currentIndex <=', self.batch)
+        self.assertNotIn('nextDemo ?? demo.StagedRelativePath', self.batch)
+
+    def test_outputs_are_unique_and_never_silently_overwritten(self):
+        self.assertIn('UniqueDirectoryPath', self.batch)
+        self.assertIn('"__t" + clip.StartTick + "-" + clip.EndTick', self.batch)
+        self.assertIn('UniqueFilePath', self.batch)
+        self.assertIn('File.Copy(source, destination, false);', self.batch)
+
+    def test_filter_uses_structured_expression_and_stable_candidate_keys(self):
+        self.assertIn('CandidateFilterExpression.Parse(filter)', self.program)
+        self.assertIn('Dictionary<string, List<string>> positives', self.candidate_filter)
+        self.assertIn('foreach (KeyValuePair<string, List<string>> pair in positives)', self.candidate_filter)
+        self.assertIn('CandidateSelectionKey', self.program)
+        self.assertIn('selectedCandidateKeys.Contains(CandidateSelectionKey(candidate))', self.program)
+        self.assertIn('batchContext["map_name"]', self.batch)
+
+    def test_v32_support_files_are_compiled(self):
+        self.assertIn('BenchmarkSupport.cs', self.build)
+        self.assertIn('CandidateFilter.cs', self.build)
+
+    def test_two_phase_scheduler_and_benchmark_outputs_are_present(self):
+        self.assertIn('PHASE 1 OF 2: PARSE ALL DEMOS', self.program)
+        self.assertIn('PHASE 2 OF 2: ANALYZE ALL PARSED DEMOS', self.program)
+        self.assertIn('Task.WhenAll(tasks)', self.program)
+        self.assertIn('PRE_FLIGHT_ESTIMATE.txt', self.program)
+        for name in ('benchmark_summary.json', 'parse_metrics.csv', 'analysis_metrics.csv',
+                     'resource_samples.csv', 'eta_samples.csv', 'failures.csv'):
+            self.assertIn(name, self.benchmark)
+        self.assertIn('batch_run.log', self.program)
+
+    def test_recording_resources_are_optional_sidecar_assets(self):
+        self.assertIn('recording_resources', self.profile)
+        self.assertIn('no_announcer_voices.vpk', self.profile)
+        self.assertIn('InstallSkybox(root, profileRoot, settings.Skybox)', self.profile)
+
+    def test_parser_close_removes_only_helper_owned_recording_temporary_files(self):
+        self.assertIn('demos", "tf2fragdemohelper_batch', self.batch)
+        self.assertIn('demos", "tf2fragdemohelper', self.batch)
+        self.assertIn('cfg", "tf2fragdemohelper_batch', self.batch)
+        self.assertIn('tf2fragdemohelper_offline.cfg', self.batch)
+        self.assertIn('tf2fragdemohelper_recording.log', self.batch)
+        self.assertIn('recording_queue.json', self.batch)
+        self.assertIn('recording_queue.json.tmp', self.batch)
+        self.assertIn('recording_manifest.json.tmp', self.batch)
+        self.assertIn('recording_finalize.log', self.batch)
+        self.assertIn('exports, source demos, and recorded video/frame folders are never', self.batch)
+        self.assertIn('RecordingProfileManager.IsRestoreComplete(out restoreReason)', self.batch)
+        self.assertIn('Some helper-owned temporary files could not be removed', self.batch)
+
+
+if __name__ == "__main__":
+    unittest.main()

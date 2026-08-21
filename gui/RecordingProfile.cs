@@ -1,0 +1,1092 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.IO.Compression;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+namespace Tf2StvParserGui
+{
+    internal sealed class HlaeRecordingSettings
+    {
+        public string FfmpegExecutable = "";
+        public string HlaeExecutable = "";
+        public string Tf2Executable = "";
+        public string OutputDirectory = "";
+        public string Resolution = "2560x1440";
+        public string DxLevel = "98 (highest)";
+        public string Skybox = "Default";
+        public string Hud = "Kill notices only";
+        public string Viewmodels = "On";
+        public int ViewmodelFov = 70;
+        public bool MaximumGraphics = true;
+        public bool MotionBlur = true;
+        public bool DisableHitSounds = true;
+        public bool DisableVoiceChat = true;
+        public bool MinimalHud = true;
+        public bool DisableCombatText = true;
+        public bool DisableCrosshair = true;
+        public bool DisableCrosshairSwitching = true;
+        public bool HudPlayerModel = false;
+        public bool IsolateCustomResources = true;
+        public bool DisableAnnouncerVoices = true;
+        public bool DisableApplauseSounds = true;
+        public bool DisableDominationSounds = true;
+        public readonly List<string> CustomResources = new List<string>();
+    }
+
+    internal sealed class HlaeRecordingSettingsForm : Form
+    {
+        private readonly TextBox hlaeBox = new TextBox();
+        private readonly TextBox ffmpegBox = new TextBox();
+        private readonly TextBox tf2Box = new TextBox();
+        private readonly TextBox outputBox = new TextBox();
+        private readonly ComboBox resolution = DropDown();
+        private readonly ComboBox dxLevel = DropDown();
+        private readonly ComboBox skybox = DropDown();
+        private readonly ComboBox hud = DropDown();
+        private readonly ComboBox viewmodels = DropDown();
+        private readonly NumericUpDown viewmodelFov = new NumericUpDown();
+        private readonly CheckBox maximumGraphics = Check("Maximum-quality graphics profile");
+        private readonly CheckBox motionBlur = Check("Enable motion blur");
+        private readonly CheckBox disableHitSounds = Check("Disable hit sounds");
+        private readonly CheckBox disableVoiceChat = Check("Disable voice chat");
+        private readonly CheckBox minimalHud = Check("Minimal HUD");
+        private readonly CheckBox disableCombatText = Check("Disable combat text");
+        private readonly CheckBox disableCrosshair = Check("Disable crosshair");
+        private readonly CheckBox disableCrosshairSwitching = Check("Disable crosshair switching");
+        private readonly CheckBox hudPlayerModel = Check("3D player model in HUD");
+        private readonly CheckBox isolateCustom = Check("Temporarily isolate custom resources");
+        private readonly CheckBox announcer = Check("Disable announcer voices");
+        private readonly CheckBox applause = Check("Disable applause sounds");
+        private readonly CheckBox domination = Check("Disable domination/revenge sounds");
+        private readonly CheckedListBox customResources = new CheckedListBox();
+        private readonly HlaeRecordingSettings initial;
+
+        public HlaeRecordingSettings Settings
+        {
+            get
+            {
+                HlaeRecordingSettings value = new HlaeRecordingSettings();
+                value.FfmpegExecutable = ffmpegBox.Text.Trim();
+                value.HlaeExecutable = hlaeBox.Text.Trim();
+                value.Tf2Executable = tf2Box.Text.Trim();
+                value.OutputDirectory = outputBox.Text.Trim();
+                value.Resolution = Convert.ToString(resolution.SelectedItem);
+                value.DxLevel = Convert.ToString(dxLevel.SelectedItem);
+                value.Skybox = Convert.ToString(skybox.SelectedItem);
+                value.Hud = Convert.ToString(hud.SelectedItem);
+                value.Viewmodels = Convert.ToString(viewmodels.SelectedItem);
+                value.ViewmodelFov = (int)viewmodelFov.Value;
+                value.MaximumGraphics = maximumGraphics.Checked;
+                value.MotionBlur = motionBlur.Checked;
+                value.DisableHitSounds = disableHitSounds.Checked;
+                value.DisableVoiceChat = disableVoiceChat.Checked;
+                value.MinimalHud = minimalHud.Checked;
+                value.DisableCombatText = disableCombatText.Checked;
+                value.DisableCrosshair = disableCrosshair.Checked;
+                value.DisableCrosshairSwitching = disableCrosshairSwitching.Checked;
+                value.HudPlayerModel = hudPlayerModel.Checked;
+                value.IsolateCustomResources = isolateCustom.Checked;
+                value.DisableAnnouncerVoices = announcer.Checked;
+                value.DisableApplauseSounds = applause.Checked;
+                value.DisableDominationSounds = domination.Checked;
+                foreach (object item in customResources.CheckedItems) value.CustomResources.Add(Convert.ToString(item));
+                return value;
+            }
+        }
+
+        public HlaeRecordingSettingsForm(HlaeRecordingSettings source)
+        {
+            initial = source ?? new HlaeRecordingSettings();
+            Text = "HLAE recording and movie settings (offline only)";
+            StartPosition = FormStartPosition.CenterParent;
+            MinimumSize = new Size(1120, 790);
+            Size = new Size(1240, 900);
+            Font = new Font("Segoe UI", 9F);
+            BackColor = Color.FromArgb(30, 32, 36);
+            ForeColor = Color.Gainsboro;
+
+            TableLayoutPanel root = new TableLayoutPanel();
+            root.Dock = DockStyle.Fill;
+            root.Padding = new Padding(12);
+            root.RowCount = 3;
+            root.ColumnCount = 1;
+            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 45));
+            Controls.Add(root);
+
+            TabControl tabs = new TabControl();
+            tabs.Dock = DockStyle.Fill;
+            tabs.TabPages.Add(BuildPathsTab());
+            tabs.TabPages.Add(BuildVisualsTab());
+            tabs.TabPages.Add(BuildResourcesTab());
+            root.Controls.Add(tabs, 0, 0);
+
+            Label safety = new Label();
+            safety.Text = "Recording is offline-only (-insecure, sv_lan 1). Your TF2 custom content, config.cfg, video.txt, movie profile, and DX level are backed up before launch and restored after TF2 exits or the parser closes.";
+            safety.AutoSize = true;
+            safety.ForeColor = Color.LightGreen;
+            safety.Margin = new Padding(4, 8, 3, 2);
+            root.Controls.Add(safety, 0, 1);
+
+            FlowLayoutPanel buttons = new FlowLayoutPanel();
+            buttons.Dock = DockStyle.Fill;
+            buttons.FlowDirection = FlowDirection.RightToLeft;
+            Button ok = new Button();
+            ok.Text = "Prepare and launch";
+            ok.Width = 150;
+            ok.Height = 30;
+            ok.DialogResult = DialogResult.OK;
+            Button cancel = new Button();
+            cancel.Text = "Cancel";
+            cancel.Width = 90;
+            cancel.Height = 30;
+            cancel.DialogResult = DialogResult.Cancel;
+            buttons.Controls.Add(ok);
+            buttons.Controls.Add(cancel);
+            root.Controls.Add(buttons, 0, 2);
+            AcceptButton = ok;
+            CancelButton = cancel;
+
+            LoadValues();
+        }
+
+        private TabPage BuildPathsTab()
+        {
+            TabPage page = NewTab("Paths");
+            TableLayoutPanel layout = NewGrid(5, 3);
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
+            page.Controls.Add(layout);
+            AddPathRow(layout, 0, "FFmpeg.exe", ffmpegBox, BrowseFfmpeg);
+            AddPathRow(layout, 1, "HLAE.exe", hlaeBox, BrowseHlae);
+            AddPathRow(layout, 2, "TF2 executable", tf2Box, BrowseTf2);
+            AddPathRow(layout, 3, "Recording output", outputBox, BrowseOutput);
+            Label note = NewLabel("Recording resources are included with this package: recording HUDs, skyboxes, and optional sound suppressors. No separate resources folder is needed.");
+            note.ForeColor = Color.Silver;
+            note.MaximumSize = new Size(700, 0);
+            layout.SetColumnSpan(note, 2);
+            layout.Controls.Add(note, 1, 4);
+            return page;
+        }
+
+        private TabPage BuildVisualsTab()
+        {
+            TabPage page = NewTab("Video and HUD");
+            TableLayoutPanel layout = NewGrid(7, 4);
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            layout.RowStyles.Clear();
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 110));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 170));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            page.Controls.Add(layout);
+
+            AddChoice(layout, 0, 0, "Resolution", resolution, new string[] { "1280x720", "1920x1080", "2560x1440", "3840x2160" });
+            AddChoice(layout, 0, 2, "DX level", dxLevel, new string[] { "Default", "98 (highest)", "95", "90", "81", "80" });
+            AddChoice(layout, 1, 0, "Skybox", skybox, new string[] { "Default" });
+            AddChoice(layout, 1, 2, "HUD", hud, new string[] { "Keep current", "Kill notices only", "Medic recording HUD", "Default TF2 HUD" });
+            AddChoice(layout, 2, 0, "Viewmodels", viewmodels, new string[] { "On", "Off", "Default" });
+            layout.Controls.Add(NewLabel("Viewmodel FOV"), 2, 2);
+            viewmodelFov.Minimum = 1;
+            viewmodelFov.Maximum = 179;
+            viewmodelFov.Width = 80;
+            layout.Controls.Add(viewmodelFov, 3, 2);
+
+            GroupBox quality = NewGroup("Graphics");
+            FlowLayoutPanel q = NewVerticalFlow();
+            q.AutoScroll = false;
+            q.Controls.Add(maximumGraphics);
+            q.Controls.Add(motionBlur);
+            quality.Controls.Add(q);
+            layout.SetColumnSpan(quality, 2);
+            layout.Controls.Add(quality, 0, 3);
+
+            GroupBox distractions = NewGroup("Additional settings");
+            TableLayoutPanel checks = NewGrid(4, 2);
+            checks.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            checks.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            checks.RowStyles.Clear();
+            for (int row = 0; row < 4; row++) checks.RowStyles.Add(new RowStyle(SizeType.Absolute, 31));
+            checks.Controls.Add(disableHitSounds, 0, 0);
+            checks.Controls.Add(disableCombatText, 1, 0);
+            checks.Controls.Add(disableVoiceChat, 0, 1);
+            checks.Controls.Add(disableCrosshair, 1, 1);
+            checks.Controls.Add(minimalHud, 0, 2);
+            checks.Controls.Add(disableCrosshairSwitching, 1, 2);
+            checks.Controls.Add(hudPlayerModel, 0, 3);
+            checks.Dock = DockStyle.Fill;
+            distractions.Controls.Add(checks);
+            layout.SetColumnSpan(distractions, 4);
+            layout.Controls.Add(distractions, 0, 4);
+
+            Label dxNote = NewLabel("DX level is applied only to this HLAE launch. Default avoids the legacy override; 98 is the highest profile option.");
+            dxNote.ForeColor = Color.Silver;
+            layout.SetColumnSpan(dxNote, 4);
+            layout.Controls.Add(dxNote, 0, 6);
+            return page;
+        }
+
+        private TabPage BuildResourcesTab()
+        {
+            TabPage page = NewTab("Recording resources");
+            TableLayoutPanel layout = NewGrid(4, 2);
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+            layout.RowStyles.Clear();
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            page.Controls.Add(layout);
+
+            isolateCustom.AutoSize = true;
+            isolateCustom.Margin = new Padding(4, 8, 4, 4);
+            layout.SetColumnSpan(isolateCustom, 2);
+            layout.Controls.Add(isolateCustom, 0, 0);
+
+            GroupBox user = NewGroup("User custom resources to keep during recording");
+            customResources.Dock = DockStyle.Fill;
+            customResources.CheckOnClick = true;
+            customResources.BackColor = Color.FromArgb(24, 26, 29);
+            customResources.ForeColor = Color.Gainsboro;
+            user.Controls.Add(customResources);
+            layout.Controls.Add(user, 0, 1);
+
+            GroupBox builtIns = NewGroup("Included recording resources");
+            FlowLayoutPanel builtInFlow = NewVerticalFlow();
+            builtInFlow.Controls.Add(announcer);
+            builtInFlow.Controls.Add(applause);
+            builtInFlow.Controls.Add(domination);
+            builtIns.Controls.Add(builtInFlow);
+            layout.Controls.Add(builtIns, 1, 1);
+
+            Label note = NewLabel("When isolation is enabled, the app moves your current tf/custom folder to a timestamped backup, creates a temporary recording folder containing only the checked resources, then moves your original folder back after TF2 closes.");
+            note.ForeColor = Color.Silver;
+            note.MaximumSize = new Size(850, 0);
+            layout.SetColumnSpan(note, 2);
+            layout.Controls.Add(note, 0, 2);
+
+            FlowLayoutPanel actions = new FlowLayoutPanel();
+            actions.Dock = DockStyle.Fill;
+            Button refresh = SmallButton("Refresh list", delegate { PopulateCustomResources(); });
+            Button all = SmallButton("All", delegate { SetAllCustomResources(true); });
+            Button none = SmallButton("None", delegate { SetAllCustomResources(false); });
+            actions.Controls.Add(refresh);
+            actions.Controls.Add(all);
+            actions.Controls.Add(none);
+            layout.SetColumnSpan(actions, 2);
+            layout.Controls.Add(actions, 0, 3);
+            return page;
+        }
+
+        private void LoadValues()
+        {
+            ffmpegBox.Text = initial.FfmpegExecutable;
+            hlaeBox.Text = initial.HlaeExecutable;
+            tf2Box.Text = initial.Tf2Executable;
+            outputBox.Text = initial.OutputDirectory;
+            Select(resolution, initial.Resolution);
+            Select(dxLevel, initial.DxLevel);
+            Select(hud, initial.Hud);
+            Select(viewmodels, initial.Viewmodels);
+            viewmodelFov.Value = Math.Max(viewmodelFov.Minimum, Math.Min(viewmodelFov.Maximum, initial.ViewmodelFov));
+            maximumGraphics.Checked = initial.MaximumGraphics;
+            motionBlur.Checked = initial.MotionBlur;
+            disableHitSounds.Checked = initial.DisableHitSounds;
+            disableVoiceChat.Checked = initial.DisableVoiceChat;
+            minimalHud.Checked = initial.MinimalHud;
+            disableCombatText.Checked = initial.DisableCombatText;
+            disableCrosshair.Checked = initial.DisableCrosshair;
+            disableCrosshairSwitching.Checked = initial.DisableCrosshairSwitching;
+            hudPlayerModel.Checked = initial.HudPlayerModel;
+            isolateCustom.Checked = initial.IsolateCustomResources;
+            announcer.Checked = initial.DisableAnnouncerVoices;
+            applause.Checked = initial.DisableApplauseSounds;
+            domination.Checked = initial.DisableDominationSounds;
+            RefreshSkyboxes(initial.Skybox);
+            PopulateCustomResources();
+        }
+
+        private void PopulateCustomResources()
+        {
+            HashSet<string> checkedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (object item in customResources.CheckedItems) checkedNames.Add(Convert.ToString(item));
+            if (customResources.Items.Count == 0)
+                foreach (string name in initial.CustomResources) checkedNames.Add(name);
+            customResources.Items.Clear();
+            string tfDirectory = TfGameDirectory(tf2Box.Text);
+            string custom = String.IsNullOrEmpty(tfDirectory) ? "" : Path.Combine(tfDirectory, "custom");
+            if (!Directory.Exists(custom)) return;
+            List<string> names = new List<string>();
+            foreach (string directory in Directory.GetDirectories(custom)) names.Add(Path.GetFileName(directory));
+            foreach (string file in Directory.GetFiles(custom, "*.vpk")) names.Add(Path.GetFileName(file));
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in names) customResources.Items.Add(name, checkedNames.Contains(name));
+        }
+
+        private void RefreshSkyboxes(string selected)
+        {
+            skybox.Items.Clear();
+            skybox.Items.Add("Default");
+            string root = RecordingProfileManager.FindRecordingResources();
+            string folder = String.IsNullOrEmpty(root) ? "" : Path.Combine(root, "skybox");
+            if (Directory.Exists(folder))
+            {
+                List<string> names = new List<string>();
+                foreach (string file in Directory.GetFiles(folder, "*up.vtf"))
+                {
+                    string name = Path.GetFileName(file);
+                    names.Add(name.Substring(0, name.Length - "up.vtf".Length));
+                }
+                names.Sort(StringComparer.OrdinalIgnoreCase);
+                foreach (string name in names) if (!skybox.Items.Contains(name)) skybox.Items.Add(name);
+            }
+            Select(skybox, selected);
+        }
+
+        private void BrowseHlae(object sender, EventArgs e)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Filter = "HLAE (HLAE.exe)|HLAE.exe|Executable (*.exe)|*.exe";
+                if (File.Exists(hlaeBox.Text)) dialog.FileName = hlaeBox.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    hlaeBox.Text = dialog.FileName;
+                    if (!File.Exists(ffmpegBox.Text)) ffmpegBox.Text = HlaeBatchRecorder.FindFfmpegNearHlae(dialog.FileName) ?? "";
+                }
+            }
+        }
+
+        private void BrowseFfmpeg(object sender, EventArgs e)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Filter = "FFmpeg (ffmpeg.exe)|ffmpeg.exe|Executable (*.exe)|*.exe";
+                if (File.Exists(ffmpegBox.Text)) dialog.FileName = ffmpegBox.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK) ffmpegBox.Text = dialog.FileName;
+            }
+        }
+
+        private void BrowseTf2(object sender, EventArgs e)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Filter = "Team Fortress 2|tf_win64.exe;tf.exe|Executable (*.exe)|*.exe";
+                if (File.Exists(tf2Box.Text)) dialog.FileName = tf2Box.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK)
+                {
+                    tf2Box.Text = dialog.FileName;
+                    PopulateCustomResources();
+                }
+            }
+        }
+
+        private void BrowseOutput(object sender, EventArgs e)
+        {
+            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
+            {
+                if (Directory.Exists(outputBox.Text)) dialog.SelectedPath = outputBox.Text;
+                if (dialog.ShowDialog(this) == DialogResult.OK) outputBox.Text = dialog.SelectedPath;
+            }
+        }
+
+        private void SetAllCustomResources(bool selected)
+        {
+            for (int index = 0; index < customResources.Items.Count; index++) customResources.SetItemChecked(index, selected);
+        }
+
+        private static string TfGameDirectory(string executable)
+        {
+            if (!File.Exists(executable)) return null;
+            string root = Path.GetDirectoryName(executable);
+            string tf = Path.Combine(root, "tf");
+            return Directory.Exists(tf) ? tf : null;
+        }
+
+        private static void AddPathRow(TableLayoutPanel layout, int row, string labelText, TextBox box, EventHandler browse)
+        {
+            layout.Controls.Add(NewLabel(labelText), 0, row);
+            box.Dock = DockStyle.Fill;
+            box.Margin = new Padding(3, 6, 3, 3);
+            layout.Controls.Add(box, 1, row);
+            Button button = new Button();
+            button.Text = "Browse";
+            button.Width = 95;
+            button.Margin = new Padding(3, 5, 3, 3);
+            button.Click += browse;
+            layout.Controls.Add(button, 2, row);
+        }
+
+        private static void AddChoice(TableLayoutPanel layout, int row, int column, string label, ComboBox box, string[] values)
+        {
+            layout.Controls.Add(NewLabel(label), column, row);
+            foreach (string value in values) box.Items.Add(value);
+            box.Dock = DockStyle.Fill;
+            box.Margin = new Padding(3, 5, 12, 3);
+            layout.Controls.Add(box, column + 1, row);
+        }
+
+        private static void Select(ComboBox box, string value)
+        {
+            int index = box.Items.IndexOf(value);
+            box.SelectedIndex = index >= 0 ? index : 0;
+        }
+
+        private static TabPage NewTab(string text)
+        {
+            TabPage page = new TabPage(text);
+            page.BackColor = Color.FromArgb(30, 32, 36);
+            page.ForeColor = Color.Gainsboro;
+            page.Padding = new Padding(10);
+            return page;
+        }
+
+        private static TableLayoutPanel NewGrid(int rows, int columns)
+        {
+            TableLayoutPanel layout = new TableLayoutPanel();
+            layout.Dock = DockStyle.Fill;
+            layout.RowCount = rows;
+            layout.ColumnCount = columns;
+            layout.Padding = new Padding(6);
+            return layout;
+        }
+
+        private static FlowLayoutPanel NewVerticalFlow()
+        {
+            FlowLayoutPanel panel = new FlowLayoutPanel();
+            panel.Dock = DockStyle.Fill;
+            panel.FlowDirection = FlowDirection.TopDown;
+            panel.WrapContents = false;
+            panel.AutoScroll = true;
+            return panel;
+        }
+
+        private static GroupBox NewGroup(string text)
+        {
+            GroupBox group = new GroupBox();
+            group.Text = text;
+            group.Dock = DockStyle.Fill;
+            group.ForeColor = Color.Gainsboro;
+            group.Padding = new Padding(8);
+            return group;
+        }
+
+        private static Button SmallButton(string text, EventHandler handler)
+        {
+            Button button = new Button();
+            button.Text = text;
+            button.Width = 95;
+            button.Height = 30;
+            button.Click += handler;
+            return button;
+        }
+
+        private static ComboBox DropDown()
+        {
+            ComboBox box = new ComboBox();
+            box.DropDownStyle = ComboBoxStyle.DropDownList;
+            return box;
+        }
+
+        private static CheckBox Check(string text)
+        {
+            CheckBox box = new CheckBox();
+            box.Text = text;
+            box.AutoSize = true;
+            box.Margin = new Padding(5, 5, 5, 3);
+            return box;
+        }
+
+        private static Label NewLabel(string text)
+        {
+            Label label = new Label();
+            label.Text = text;
+            label.AutoSize = true;
+            label.Margin = new Padding(3, 9, 3, 3);
+            return label;
+        }
+    }
+
+    internal sealed class RecordingProfileSession
+    {
+        public string SessionId;
+        public string TfDirectory;
+        public string BackupDirectory;
+        public string OriginalCustomDirectory;
+        public string TemporaryCustomDirectory;
+        public string ProfileConfigPath;
+        public string BackupProfileConfigPath;
+        public bool OriginalCustomExisted;
+        public bool ProfileConfigExisted;
+        public bool IsolatedCustom;
+        public readonly List<string> TemporaryRootFiles = new List<string>();
+        public string OriginalProfileFolderDirectory;
+        public bool OriginalProfileFolderExisted;
+        public string VideoConfigPath;
+        public string BackupVideoConfigPath;
+        public bool VideoConfigExisted;
+        public string ConfigPath;
+        public string BackupConfigPath;
+        public bool ConfigExisted;
+        public bool DxLevelWasApplied;
+        public bool OriginalDxLevelExisted;
+        public object OriginalDxLevel;
+        public int RestoreStarted;
+    }
+
+    internal static class RecordingProfileManager
+    {
+        private const string ProfileFolderName = "tf2fragdemohelper_recording";
+        private const string ProfileConfigName = "tf2fragdemohelper_recording_profile.cfg";
+        private const string ResourceArchiveDirectoryName = "recording_resources_archive";
+        private const string ResourceCacheVersion = "bundled_resources_v1";
+        private static readonly object SessionLock = new object();
+        private static readonly object ResourceLock = new object();
+        private static RecordingProfileSession activeSession;
+
+        public static string FindRecordingResources()
+        {
+            string app = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
+            string[] candidates = new string[]
+            {
+                Path.Combine(app, "recording_resources"),
+                Path.Combine(Path.GetDirectoryName(app), "recording_resources")
+            };
+            foreach (string candidate in candidates)
+                if (Directory.Exists(Path.Combine(candidate, "custom"))) return candidate;
+            lock (ResourceLock)
+            {
+                string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "TF2FragDemoHelper", ResourceCacheVersion);
+                if (Directory.Exists(Path.Combine(cache, "custom"))) return cache;
+                string archiveDirectory = Path.Combine(app, ResourceArchiveDirectoryName);
+                if (!Directory.Exists(archiveDirectory)) return null;
+                string[] parts = Directory.GetFiles(archiveDirectory, "resources.part*");
+                if (parts.Length == 0) return null;
+                Array.Sort(parts, StringComparer.OrdinalIgnoreCase);
+                if (Directory.Exists(cache)) Directory.Delete(cache, true);
+                Directory.CreateDirectory(cache);
+                string archive = Path.Combine(cache, "resources.zip");
+                try
+                {
+                    using (FileStream output = new FileStream(archive, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        foreach (string part in parts)
+                        using (FileStream input = new FileStream(part, FileMode.Open, FileAccess.Read, FileShare.Read)) input.CopyTo(output);
+                    }
+                    ZipFile.ExtractToDirectory(archive, cache);
+                    File.Delete(archive);
+                    return Directory.Exists(Path.Combine(cache, "custom")) ? cache : null;
+                }
+                catch
+                {
+                    try { if (File.Exists(archive)) File.Delete(archive); }
+                    catch { }
+                    return null;
+                }
+            }
+        }
+
+        public static RecordingProfileSession Apply(string gameDirectory, string sessionId, HlaeRecordingSettings settings)
+        {
+            lock (SessionLock)
+            {
+                if (activeSession != null)
+                    throw new InvalidOperationException("A recording profile is already active. Finish or close the current TF2 recording session first.");
+            }
+            if (File.Exists(ActivePointerPath())) RecoverInterruptedSession(null);
+            if (File.Exists(ActivePointerPath()))
+                throw new InvalidOperationException("A previous recording profile still needs recovery. Check active_recording_profile.json in Local AppData and the backup path recorded inside it before starting another recording.");
+            RecordingProfileSession session = new RecordingProfileSession();
+            session.SessionId = sessionId;
+            session.TfDirectory = gameDirectory;
+            session.BackupDirectory = Path.Combine(gameDirectory, "tf2fragdemohelper_backups", sessionId);
+            session.OriginalCustomDirectory = Path.Combine(session.BackupDirectory, "custom_original");
+            session.TemporaryCustomDirectory = Path.Combine(gameDirectory, "custom");
+            session.ProfileConfigPath = Path.Combine(gameDirectory, "cfg", ProfileConfigName);
+            session.BackupProfileConfigPath = Path.Combine(session.BackupDirectory, ProfileConfigName);
+            session.OriginalProfileFolderDirectory = Path.Combine(session.BackupDirectory, "custom_profile_original");
+            session.VideoConfigPath = Path.Combine(gameDirectory, "cfg", "video.txt");
+            session.BackupVideoConfigPath = Path.Combine(session.BackupDirectory, "video.txt");
+            session.ConfigPath = Path.Combine(gameDirectory, "cfg", "config.cfg");
+            session.BackupConfigPath = Path.Combine(session.BackupDirectory, "config.cfg");
+            session.IsolatedCustom = settings.IsolateCustomResources;
+            Directory.CreateDirectory(session.BackupDirectory);
+            WriteActivePointer(session, "preparing");
+
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(session.ProfileConfigPath));
+                if (File.Exists(session.ProfileConfigPath))
+                {
+                    session.ProfileConfigExisted = true;
+                    File.Move(session.ProfileConfigPath, session.BackupProfileConfigPath);
+                    WriteActivePointer(session, "preparing");
+                }
+
+                session.VideoConfigExisted = File.Exists(session.VideoConfigPath);
+                if (session.VideoConfigExisted) File.Copy(session.VideoConfigPath, session.BackupVideoConfigPath, true);
+                session.ConfigExisted = File.Exists(session.ConfigPath);
+                if (session.ConfigExisted) File.Copy(session.ConfigPath, session.BackupConfigPath, true);
+                CaptureDxLevel(session, settings.DxLevel);
+                WriteActivePointer(session, "preparing");
+
+                if (session.IsolatedCustom)
+                {
+                    session.OriginalCustomExisted = Directory.Exists(session.TemporaryCustomDirectory);
+                    if (session.OriginalCustomExisted) Directory.Move(session.TemporaryCustomDirectory, session.OriginalCustomDirectory);
+                    Directory.CreateDirectory(session.TemporaryCustomDirectory);
+                    WriteActivePointer(session, "preparing");
+                    foreach (string resource in settings.CustomResources)
+                    {
+                        string source = Path.Combine(session.OriginalCustomDirectory, Path.GetFileName(resource));
+                        string destination = Path.Combine(session.TemporaryCustomDirectory, Path.GetFileName(resource));
+                        if (Directory.Exists(source)) CopyDirectory(source, destination);
+                        else if (File.Exists(source)) File.Copy(source, destination, true);
+                    }
+                }
+                else
+                {
+                    Directory.CreateDirectory(session.TemporaryCustomDirectory);
+                    string profileFolder = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
+                    if (Directory.Exists(profileFolder))
+                    {
+                        session.OriginalProfileFolderExisted = true;
+                        Directory.Move(profileFolder, session.OriginalProfileFolderDirectory);
+                        WriteActivePointer(session, "preparing");
+                    }
+                }
+
+                InstallRecordingResources(session, settings);
+                File.WriteAllLines(session.ProfileConfigPath, BuildProfileConfig(settings).ToArray(), new UTF8Encoding(false));
+                WriteActivePointer(session, "active");
+                lock (SessionLock) activeSession = session;
+                return session;
+            }
+            catch
+            {
+                Restore(session, false);
+                throw;
+            }
+        }
+
+        public static void Restore(RecordingProfileSession session, bool showErrors)
+        {
+            if (session == null || Interlocked.CompareExchange(ref session.RestoreStarted, 1, 0) != 0) return;
+            try
+            {
+                if (session.IsolatedCustom)
+                {
+                    if (Directory.Exists(session.TemporaryCustomDirectory)) Directory.Delete(session.TemporaryCustomDirectory, true);
+                    if (Directory.Exists(session.TemporaryCustomDirectory))
+                        throw new IOException("The temporary TF2 custom folder still exists after removal.");
+                    if (session.OriginalCustomExisted && Directory.Exists(session.OriginalCustomDirectory))
+                        Directory.Move(session.OriginalCustomDirectory, session.TemporaryCustomDirectory);
+                }
+                else
+                {
+                    string profileFolder = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
+                    if (Directory.Exists(profileFolder)) Directory.Delete(profileFolder, true);
+                    if (Directory.Exists(profileFolder))
+                        throw new IOException("The temporary recording resources could not be removed.");
+                    foreach (string entry in session.TemporaryRootFiles)
+                    {
+                        string[] paths = entry.Split(new char[] { '|' }, 2);
+                        if (File.Exists(paths[0])) File.Delete(paths[0]);
+                        if (paths.Length == 2 && File.Exists(paths[1])) File.Move(paths[1], paths[0]);
+                    }
+                    if (session.OriginalProfileFolderExisted && Directory.Exists(session.OriginalProfileFolderDirectory))
+                        Directory.Move(session.OriginalProfileFolderDirectory, profileFolder);
+                }
+
+                if (File.Exists(session.ProfileConfigPath)) File.Delete(session.ProfileConfigPath);
+                if (session.ProfileConfigExisted && File.Exists(session.BackupProfileConfigPath))
+                    File.Move(session.BackupProfileConfigPath, session.ProfileConfigPath);
+                if (session.VideoConfigExisted && File.Exists(session.BackupVideoConfigPath))
+                    File.Copy(session.BackupVideoConfigPath, session.VideoConfigPath, true);
+                else if (!session.VideoConfigExisted && File.Exists(session.VideoConfigPath)) File.Delete(session.VideoConfigPath);
+                if (File.Exists(session.BackupVideoConfigPath)) File.Delete(session.BackupVideoConfigPath);
+                if (session.ConfigExisted && File.Exists(session.BackupConfigPath))
+                    File.Copy(session.BackupConfigPath, session.ConfigPath, true);
+                else if (!session.ConfigExisted && File.Exists(session.ConfigPath)) File.Delete(session.ConfigPath);
+                VerifyRestoredFiles(session);
+                if (File.Exists(session.BackupConfigPath)) File.Delete(session.BackupConfigPath);
+                RestoreDxLevel(session);
+                DeleteEmptyDirectory(session.BackupDirectory);
+                DeleteEmptyDirectory(Path.GetDirectoryName(session.BackupDirectory));
+                if (File.Exists(ActivePointerPath())) File.Delete(ActivePointerPath());
+                lock (SessionLock) if (Object.ReferenceEquals(activeSession, session)) activeSession = null;
+            }
+            catch (Exception error)
+            {
+                session.RestoreStarted = 0;
+                try { File.WriteAllText(Path.Combine(session.BackupDirectory, "RESTORE_REQUIRED.txt"), error.ToString(), new UTF8Encoding(false)); }
+                catch { }
+                if (showErrors)
+                    MessageBox.Show("TF2 recording files could not be fully restored. Your original files remain in:\r\n" + session.BackupDirectory + "\r\n\r\n" + error.Message,
+                        "TF2 Frag Demo Helper restore warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        public static void RestoreActiveSession(bool showErrors)
+        {
+            RecordingProfileSession session;
+            lock (SessionLock) session = activeSession;
+            if (session != null) Restore(session, showErrors);
+            else RecoverInterruptedSession(showErrors ? Form.ActiveForm : null);
+        }
+
+        public static bool IsRestoreComplete(out string reason)
+        {
+            lock (SessionLock)
+            {
+                if (activeSession != null)
+                {
+                    reason = "The recording profile is still active.";
+                    return false;
+                }
+            }
+            if (File.Exists(ActivePointerPath()))
+            {
+                reason = "The recording-profile recovery marker still exists.";
+                return false;
+            }
+            reason = "";
+            return true;
+        }
+
+        public static void RecoverInterruptedSession(IWin32Window owner)
+        {
+            string pointer = ActivePointerPath();
+            if (!File.Exists(pointer)) return;
+            try
+            {
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                IDictionary values = serializer.DeserializeObject(File.ReadAllText(pointer)) as IDictionary;
+                if (values == null) return;
+                RecordingProfileSession session = new RecordingProfileSession();
+                session.SessionId = Text(values, "session_id");
+                session.TfDirectory = Text(values, "tf_directory");
+                session.BackupDirectory = Text(values, "backup_directory");
+                session.OriginalCustomDirectory = Text(values, "original_custom_directory");
+                session.TemporaryCustomDirectory = Path.Combine(session.TfDirectory, "custom");
+                session.ProfileConfigPath = Path.Combine(session.TfDirectory, "cfg", ProfileConfigName);
+                session.BackupProfileConfigPath = Path.Combine(session.BackupDirectory, ProfileConfigName);
+                session.OriginalProfileFolderDirectory = Path.Combine(session.BackupDirectory, "custom_profile_original");
+                session.VideoConfigPath = Path.Combine(session.TfDirectory, "cfg", "video.txt");
+                session.BackupVideoConfigPath = Path.Combine(session.BackupDirectory, "video.txt");
+                session.ConfigPath = Path.Combine(session.TfDirectory, "cfg", "config.cfg");
+                session.BackupConfigPath = Path.Combine(session.BackupDirectory, "config.cfg");
+                session.OriginalCustomExisted = Bool(values, "original_custom_existed");
+                session.ProfileConfigExisted = Bool(values, "profile_config_existed");
+                session.IsolatedCustom = Bool(values, "isolated_custom");
+                session.OriginalProfileFolderExisted = Bool(values, "original_profile_folder_existed");
+                session.VideoConfigExisted = Bool(values, "video_config_existed");
+                session.ConfigExisted = Bool(values, "config_existed");
+                session.DxLevelWasApplied = Bool(values, "dx_level_was_applied");
+                session.OriginalDxLevelExisted = Bool(values, "original_dx_level_existed");
+                session.OriginalDxLevel = values.Contains("original_dx_level") ? values["original_dx_level"] : null;
+                IList rootFiles = values.Contains("temporary_root_files") ? values["temporary_root_files"] as IList : null;
+                if (rootFiles != null) foreach (object file in rootFiles) session.TemporaryRootFiles.Add(Convert.ToString(file));
+                lock (SessionLock) activeSession = session;
+                Restore(session, owner != null);
+            }
+            catch (Exception error)
+            {
+                if (owner != null)
+                    MessageBox.Show(owner, "An interrupted recording profile needs manual recovery.\r\n\r\n" + error.Message,
+                        "TF2 Frag Demo Helper restore warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private static void InstallRecordingResources(RecordingProfileSession session, HlaeRecordingSettings settings)
+        {
+            bool needsResources = settings.DisableAnnouncerVoices || settings.DisableApplauseSounds || settings.DisableDominationSounds ||
+                !String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase) ||
+                !String.Equals(settings.Hud, "Keep current", StringComparison.OrdinalIgnoreCase) && !String.Equals(settings.Hud, "Default TF2 HUD", StringComparison.OrdinalIgnoreCase);
+            if (!needsResources) return;
+            string root = FindRecordingResources();
+            if (String.IsNullOrEmpty(root) || !Directory.Exists(root))
+                throw new DirectoryNotFoundException("The bundled recording resources are missing. Reinstall the complete TF2 Frag Demo Helper package.");
+
+            CopyOptionalVpk(session, root, "no_announcer_voices.vpk", settings.DisableAnnouncerVoices);
+            CopyOptionalVpk(session, root, "no_applause_sounds.vpk", settings.DisableApplauseSounds);
+            CopyOptionalVpk(session, root, "no_domination_sounds.vpk", settings.DisableDominationSounds);
+
+            string profileRoot = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
+            Directory.CreateDirectory(profileRoot);
+            if (!String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase))
+                InstallSkybox(root, profileRoot, settings.Skybox);
+            if (String.Equals(settings.Hud, "Kill notices only", StringComparison.OrdinalIgnoreCase))
+                CopyHud(root, profileRoot, "hud_killnotices");
+            else if (String.Equals(settings.Hud, "Medic recording HUD", StringComparison.OrdinalIgnoreCase))
+                CopyHud(root, profileRoot, "hud_medic");
+        }
+
+        private static void CopyOptionalVpk(RecordingProfileSession session, string resourcesRoot, string fileName, bool enabled)
+        {
+            if (!enabled) return;
+            string source = Path.Combine(resourcesRoot, "custom", fileName);
+            if (!File.Exists(source))
+            {
+                string bundledRoot = FindRecordingResources();
+                if (!String.IsNullOrEmpty(bundledRoot)) source = Path.Combine(bundledRoot, "custom", fileName);
+            }
+            // Sound suppression is cosmetic. A missing optional VPK must never
+            // prevent offline recording or leave the user's TF2 files altered.
+            if (!File.Exists(source)) return;
+            string destination = Path.Combine(session.TemporaryCustomDirectory, fileName);
+            if (!session.IsolatedCustom && File.Exists(destination))
+            {
+                string backup = Path.Combine(session.BackupDirectory, "root_" + fileName);
+                File.Move(destination, backup);
+                session.TemporaryRootFiles.Add(destination + "|" + backup);
+            }
+            else session.TemporaryRootFiles.Add(destination);
+            File.Copy(source, destination, true);
+            WriteActivePointer(session, "preparing");
+        }
+
+        private static void InstallSkybox(string resourcesRoot, string profileRoot, string selected)
+        {
+            string source = Path.Combine(resourcesRoot, "skybox");
+            string destination = Path.Combine(profileRoot, "materials", "skybox");
+            Directory.CreateDirectory(destination);
+            foreach (string vmt in Directory.GetFiles(source, "*.vmt")) File.Copy(vmt, Path.Combine(destination, Path.GetFileName(vmt)), true);
+            string[] sides = new string[] { "bk", "dn", "ft", "lf", "rt", "up" };
+            foreach (string side in sides)
+            {
+                string selectedVtf = Path.Combine(source, selected + side + ".vtf");
+                if (!File.Exists(selectedVtf)) throw new FileNotFoundException("The selected recording skybox is incomplete.", selectedVtf);
+                foreach (string vmt in Directory.GetFiles(destination, "*" + side + ".vmt"))
+                    File.Copy(selectedVtf, Path.ChangeExtension(vmt, ".vtf"), true);
+            }
+        }
+
+        private static void CopyHud(string resourcesRoot, string profileRoot, string hudName)
+        {
+            string source = Path.Combine(resourcesRoot, "hud", hudName);
+            if (!Directory.Exists(source))
+            {
+                string bundledRoot = FindRecordingResources();
+                if (!String.IsNullOrEmpty(bundledRoot)) source = Path.Combine(bundledRoot, "hud", hudName);
+            }
+            if (!Directory.Exists(source)) throw new DirectoryNotFoundException("The selected recording HUD was not found: " + source);
+            CopyDirectory(source, profileRoot);
+        }
+
+        private static List<string> BuildProfileConfig(HlaeRecordingSettings settings)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("// Temporary movie profile generated by TF2 Frag Demo Helper.");
+            lines.Add("sv_cheats 1");
+            lines.Add("fps_max 0");
+            if (settings.MaximumGraphics)
+            {
+                lines.AddRange(new string[]
+                {
+                    "cl_burninggibs 1", "cl_detaildist 8096", "cl_detailfade 0", "cl_maxrenderable_dist 8096",
+                    "cl_new_impact_effects 1", "cl_phys_props_max 1024", "cl_ragdoll_collide 1", "lod_transitiondist 6400",
+                    "mat_aaquality 2", "mat_antialias 8", "mat_bumpmap 1", "mat_compressedtextures 1",
+                    "mat_envmapsize 512", "mat_envmaptgasize 512", "mat_forceaniso 16", "mat_hdr_level 2",
+                    "mat_parallaxmap 1", "mat_picmip -1", "mat_postprocess_x 8", "mat_postprocess_y 8",
+                    "mat_reducefillrate 0", "mat_software_aa_quality 2", "mat_software_aa_strength 2", "mat_specular 1",
+                    "mat_vsync 0", "mat_wateroverlaysize 512", "mp_decals 4096", "mp_usehwmmodels 1", "mp_usehwmvcds 1",
+                    "r_avglight 3", "r_decals 4096", "r_eyeglintlodpixels 4", "r_lod 0", "r_maxmodeldecal 4096",
+                    "r_radiosity 3", "r_rainradius 2250", "r_rainsplashpercentage 100", "r_rootlod 0",
+                    "r_shadowmaxrendered 1024", "r_shadowrendertotexture 1", "r_shadows 1", "r_waterdrawreflection 1",
+                    "r_waterdrawrefraction 1", "r_waterforceexpensive 1", "r_waterforcereflectentities 1", "r_pixelfog 1",
+                    "mat_viewportscale 1", "mat_viewportupscale 1", "mat_queue_mode -1", "r_threaded_particles 1",
+                    "r_threaded_renderables 1", "r_threaded_client_shadow_manager 1"
+                });
+            }
+            lines.Add("mat_motion_blur_enabled " + (settings.MotionBlur ? "1" : "0"));
+            lines.Add("mat_motion_blur_forward_enabled " + (settings.MotionBlur ? "1" : "0"));
+            lines.Add("mat_motion_blur_strength " + (settings.MotionBlur ? "1" : "0"));
+            if (String.Equals(settings.Viewmodels, "On", StringComparison.OrdinalIgnoreCase)) lines.Add("r_drawviewmodel 1");
+            else if (String.Equals(settings.Viewmodels, "Off", StringComparison.OrdinalIgnoreCase)) lines.Add("r_drawviewmodel 0");
+            lines.Add("viewmodel_fov_demo " + settings.ViewmodelFov);
+            lines.Add("hud_combattext " + (settings.DisableCombatText ? "0" : "1"));
+            lines.Add("hud_combattext_healing " + (settings.DisableCombatText ? "0" : "1"));
+            lines.Add("tf_dingalingaling " + (settings.DisableHitSounds ? "0" : "1"));
+            lines.Add("tf_dingalingaling_lasthit " + (settings.DisableHitSounds ? "0" : "1"));
+            lines.Add("voice_enable " + (settings.DisableVoiceChat ? "0" : "1"));
+            lines.Add("cl_hud_minmode " + (settings.MinimalHud ? "1" : "0"));
+            lines.Add("cl_hud_playerclass_playermodel_showed_confirm_dialog 1");
+            lines.Add("cl_hud_playerclass_use_playermodel " + (settings.HudPlayerModel ? "1" : "0"));
+            lines.Add("crosshair " + (settings.DisableCrosshair ? "0" : "1"));
+            if (settings.DisableCrosshairSwitching)
+            {
+                lines.Add("alias cl_crosshair_file \"\"");
+                lines.Add("alias cl_crosshair_scale \"\"");
+                lines.Add("alias cl_crosshair_red \"\"");
+                lines.Add("alias cl_crosshair_green \"\"");
+                lines.Add("alias cl_crosshair_blue \"\"");
+                lines.Add("alias crosshair \"\"");
+            }
+            lines.Add("cl_showfps 0");
+            lines.Add("net_graph 0");
+            lines.Add("hud_saytext_time 0");
+            lines.Add("engine_no_focus_sleep 0");
+            lines.Add("snd_mute_losefocus 0");
+            lines.Add("echo TF2FRAG_MOVIE_PROFILE_READY");
+            return lines;
+        }
+
+        private static void WriteActivePointer(RecordingProfileSession session, string state)
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            Dictionary<string, object> values = new Dictionary<string, object>();
+            values["state"] = state;
+            values["session_id"] = session.SessionId;
+            values["tf_directory"] = session.TfDirectory;
+            values["backup_directory"] = session.BackupDirectory;
+            values["original_custom_directory"] = session.OriginalCustomDirectory;
+            values["original_custom_existed"] = session.OriginalCustomExisted;
+            values["profile_config_existed"] = session.ProfileConfigExisted;
+            values["isolated_custom"] = session.IsolatedCustom;
+            values["original_profile_folder_existed"] = session.OriginalProfileFolderExisted;
+            values["video_config_existed"] = session.VideoConfigExisted;
+            values["config_existed"] = session.ConfigExisted;
+            values["dx_level_was_applied"] = session.DxLevelWasApplied;
+            values["original_dx_level_existed"] = session.OriginalDxLevelExisted;
+            values["original_dx_level"] = session.OriginalDxLevel;
+            values["temporary_root_files"] = session.TemporaryRootFiles.ToArray();
+            Directory.CreateDirectory(Path.GetDirectoryName(ActivePointerPath()));
+            File.WriteAllText(ActivePointerPath(), serializer.Serialize(values), new UTF8Encoding(false));
+        }
+
+        private static string ActivePointerPath()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TF2FragDemoHelper", "active_recording_profile.json");
+        }
+
+        private static void CopyDirectory(string source, string destination)
+        {
+            Directory.CreateDirectory(destination);
+            foreach (string file in Directory.GetFiles(source)) File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), true);
+            foreach (string directory in Directory.GetDirectories(source)) CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+        }
+
+        private static void CaptureDxLevel(RecordingProfileSession session, string selected)
+        {
+            session.DxLevelWasApplied = !String.IsNullOrEmpty(selected) && !selected.StartsWith("Default", StringComparison.OrdinalIgnoreCase);
+            if (!session.DxLevelWasApplied) return;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Source\tf\Settings", false))
+                {
+                    if (key == null) return;
+                    session.OriginalDxLevel = key.GetValue("DXLevel_V1", null);
+                    session.OriginalDxLevelExisted = session.OriginalDxLevel != null;
+                }
+            }
+            catch { }
+        }
+
+        private static void RestoreDxLevel(RecordingProfileSession session)
+        {
+            if (!session.DxLevelWasApplied) return;
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(@"Software\Valve\Source\tf\Settings"))
+                {
+                    if (session.OriginalDxLevelExisted) key.SetValue("DXLevel_V1", session.OriginalDxLevel);
+                    else key.DeleteValue("DXLevel_V1", false);
+                }
+            }
+            catch { }
+        }
+
+        private static void VerifyRestoredFiles(RecordingProfileSession session)
+        {
+            List<string> problems = new List<string>();
+            if (session.IsolatedCustom)
+            {
+                if (session.OriginalCustomExisted != Directory.Exists(session.TemporaryCustomDirectory))
+                    problems.Add("tf/custom was not returned to its original presence state");
+                if (Directory.Exists(session.OriginalCustomDirectory))
+                    problems.Add("the backup copy of tf/custom is still staged");
+            }
+            else
+            {
+                string profileFolder = Path.Combine(session.TemporaryCustomDirectory, ProfileFolderName);
+                if (session.OriginalProfileFolderExisted != Directory.Exists(profileFolder))
+                    problems.Add("the helper recording-resources folder was not returned to its original state");
+                if (Directory.Exists(session.OriginalProfileFolderDirectory))
+                    problems.Add("the previous helper recording-resources folder is still staged");
+                foreach (string entry in session.TemporaryRootFiles)
+                {
+                    string[] paths = entry.Split(new char[] { '|' }, 2);
+                    if (paths.Length == 2)
+                    {
+                        if (!File.Exists(paths[0]) || File.Exists(paths[1]))
+                            problems.Add(Path.GetFileName(paths[0]) + " was not restored");
+                    }
+                    else if (File.Exists(paths[0])) problems.Add(Path.GetFileName(paths[0]) + " was not removed");
+                }
+            }
+            if (session.ProfileConfigExisted != File.Exists(session.ProfileConfigPath))
+                problems.Add("the prior recording profile CFG was not returned to its original state");
+            if (session.VideoConfigExisted)
+            {
+                if (!FilesMatch(session.VideoConfigPath, session.BackupVideoConfigPath)) problems.Add("video.txt does not match its backup");
+            }
+            else if (File.Exists(session.VideoConfigPath)) problems.Add("temporary video.txt still exists");
+            if (session.ConfigExisted)
+            {
+                if (!FilesMatch(session.ConfigPath, session.BackupConfigPath)) problems.Add("config.cfg does not match its backup");
+            }
+            else if (File.Exists(session.ConfigPath)) problems.Add("temporary config.cfg still exists");
+            if (problems.Count > 0) throw new IOException("Restore verification failed: " + String.Join("; ", problems.ToArray()) + ".");
+        }
+
+        private static bool FilesMatch(string left, string right)
+        {
+            if (!File.Exists(left) || !File.Exists(right)) return false;
+            FileInfo leftInfo = new FileInfo(left);
+            FileInfo rightInfo = new FileInfo(right);
+            if (leftInfo.Length != rightInfo.Length) return false;
+            using (FileStream leftStream = File.OpenRead(left))
+            using (FileStream rightStream = File.OpenRead(right))
+            {
+                int leftByte;
+                while ((leftByte = leftStream.ReadByte()) != -1)
+                    if (leftByte != rightStream.ReadByte()) return false;
+            }
+            return true;
+        }
+
+        private static void DeleteEmptyDirectory(string path)
+        {
+            if (Directory.Exists(path) && Directory.GetFileSystemEntries(path).Length == 0) Directory.Delete(path);
+        }
+
+        private static string Text(IDictionary values, string key)
+        {
+            return values != null && values.Contains(key) && values[key] != null ? Convert.ToString(values[key]) : "";
+        }
+
+        private static bool Bool(IDictionary values, string key)
+        {
+            try { return values != null && values.Contains(key) && Convert.ToBoolean(values[key]); }
+            catch { return false; }
+        }
+    }
+}

@@ -188,6 +188,27 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('InstallSkybox', self.profile)
         self.assertIn('CopyHud', self.profile)
 
+    def test_bundled_sound_suppressors_are_optional_and_do_not_block_recording(self):
+        self.assertIn('no_announcer_voices.vpk', self.profile)
+        self.assertIn('no_applause_sounds.vpk', self.profile)
+        self.assertIn('no_domination_sounds.vpk', self.profile)
+        self.assertIn('string root = FindRecordingResources();', self.profile)
+        self.assertIn('The bundled recording resources are missing.', self.profile)
+        self.assertIn('ZipFile.ExtractToDirectory', self.profile)
+        self.assertIn('if (!File.Exists(source)) return;', self.profile)
+        self.assertNotIn('A selected recording sound resource was not found.', self.profile)
+
+    def test_recording_resources_are_packaged_and_do_not_require_a_user_path(self):
+        self.assertNotIn('RecordingResourcesDirectory', self.profile)
+        self.assertNotIn('BrowseRecordingResources', self.profile)
+        self.assertNotIn('recording_resources_directory', self.batch)
+        self.assertIn('No separate resources folder is needed.', self.profile)
+        for path in (
+            'recording_resources_archive/resources.part000',
+            'recording_resources_archive/resources.part031',
+        ):
+            self.assertTrue((ROOT / path).exists(), path)
+
     def test_maximum_graphics_profile_overrides_low_quality_configs(self):
         for command in (
             'mat_picmip -1', 'mat_antialias 8', 'mat_forceaniso 16',

@@ -1608,7 +1608,6 @@ namespace Tf2StvParserGui
                 settings.HlaeExecutable = TextValue(values, "hlae_executable");
                 settings.Tf2Executable = TextValue(values, "tf2_executable");
                 settings.OutputDirectory = TextValue(values, "output_directory");
-                settings.RecordingResourcesDirectory = TextValue(values, "recording_resources_directory");
                 settings.Resolution = DefaultText(values, "resolution", settings.Resolution);
                 settings.DxLevel = DefaultText(values, "dx_level", settings.DxLevel);
                 settings.Skybox = DefaultText(values, "skybox", settings.Skybox);
@@ -1646,7 +1645,6 @@ namespace Tf2StvParserGui
                 values["hlae_executable"] = settings.HlaeExecutable;
                 values["tf2_executable"] = settings.Tf2Executable;
                 values["output_directory"] = settings.OutputDirectory;
-                values["recording_resources_directory"] = settings.RecordingResourcesDirectory;
                 values["resolution"] = settings.Resolution;
                 values["dx_level"] = settings.DxLevel;
                 values["skybox"] = settings.Skybox;

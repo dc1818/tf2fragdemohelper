@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.IO.Compression;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -17,7 +18,6 @@ namespace Tf2StvParserGui
         public string HlaeExecutable = "";
         public string Tf2Executable = "";
         public string OutputDirectory = "";
-        public string RecordingResourcesDirectory = "";
         public string Resolution = "2560x1440";
         public string DxLevel = "98 (highest)";
         public string Skybox = "Default";
@@ -46,7 +46,6 @@ namespace Tf2StvParserGui
         private readonly TextBox ffmpegBox = new TextBox();
         private readonly TextBox tf2Box = new TextBox();
         private readonly TextBox outputBox = new TextBox();
-        private readonly TextBox recordingResourcesBox = new TextBox();
         private readonly ComboBox resolution = DropDown();
         private readonly ComboBox dxLevel = DropDown();
         private readonly ComboBox skybox = DropDown();
@@ -78,7 +77,6 @@ namespace Tf2StvParserGui
                 value.HlaeExecutable = hlaeBox.Text.Trim();
                 value.Tf2Executable = tf2Box.Text.Trim();
                 value.OutputDirectory = outputBox.Text.Trim();
-                value.RecordingResourcesDirectory = recordingResourcesBox.Text.Trim();
                 value.Resolution = Convert.ToString(resolution.SelectedItem);
                 value.DxLevel = Convert.ToString(dxLevel.SelectedItem);
                 value.Skybox = Convert.ToString(skybox.SelectedItem);
@@ -163,7 +161,7 @@ namespace Tf2StvParserGui
         private TabPage BuildPathsTab()
         {
             TabPage page = NewTab("Paths");
-            TableLayoutPanel layout = NewGrid(6, 3);
+            TableLayoutPanel layout = NewGrid(5, 3);
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 175));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
@@ -172,12 +170,11 @@ namespace Tf2StvParserGui
             AddPathRow(layout, 1, "HLAE.exe", hlaeBox, BrowseHlae);
             AddPathRow(layout, 2, "TF2 executable", tf2Box, BrowseTf2);
             AddPathRow(layout, 3, "Recording output", outputBox, BrowseOutput);
-            AddPathRow(layout, 4, "Recording resources", recordingResourcesBox, BrowseRecordingResources);
-            Label note = NewLabel("Recording resources provide optional skyboxes, recording HUDs, and sound suppressors included with this package.");
+            Label note = NewLabel("Recording resources are included with this package: recording HUDs, skyboxes, and optional sound suppressors. No separate resources folder is needed.");
             note.ForeColor = Color.Silver;
             note.MaximumSize = new Size(700, 0);
             layout.SetColumnSpan(note, 2);
-            layout.Controls.Add(note, 1, 5);
+            layout.Controls.Add(note, 1, 4);
             return page;
         }
 
@@ -246,7 +243,7 @@ namespace Tf2StvParserGui
 
         private TabPage BuildResourcesTab()
         {
-            TabPage page = NewTab("Custom resources and particles");
+            TabPage page = NewTab("Recording resources");
             TableLayoutPanel layout = NewGrid(4, 2);
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
@@ -303,9 +300,6 @@ namespace Tf2StvParserGui
             hlaeBox.Text = initial.HlaeExecutable;
             tf2Box.Text = initial.Tf2Executable;
             outputBox.Text = initial.OutputDirectory;
-            recordingResourcesBox.Text = String.IsNullOrEmpty(initial.RecordingResourcesDirectory)
-                ? RecordingProfileManager.FindRecordingResources() ?? ""
-                : initial.RecordingResourcesDirectory;
             Select(resolution, initial.Resolution);
             Select(dxLevel, initial.DxLevel);
             Select(hud, initial.Hud);
@@ -349,7 +343,8 @@ namespace Tf2StvParserGui
         {
             skybox.Items.Clear();
             skybox.Items.Add("Default");
-            string folder = Path.Combine(recordingResourcesBox.Text.Trim(), "skybox");
+            string root = RecordingProfileManager.FindRecordingResources();
+            string folder = String.IsNullOrEmpty(root) ? "" : Path.Combine(root, "skybox");
             if (Directory.Exists(folder))
             {
                 List<string> names = new List<string>();
@@ -408,20 +403,6 @@ namespace Tf2StvParserGui
             {
                 if (Directory.Exists(outputBox.Text)) dialog.SelectedPath = outputBox.Text;
                 if (dialog.ShowDialog(this) == DialogResult.OK) outputBox.Text = dialog.SelectedPath;
-            }
-        }
-
-        private void BrowseRecordingResources(object sender, EventArgs e)
-        {
-            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
-            {
-                dialog.Description = "Select the recording-resources folder containing custom, hud, and skybox folders";
-                if (Directory.Exists(recordingResourcesBox.Text)) dialog.SelectedPath = recordingResourcesBox.Text;
-                if (dialog.ShowDialog(this) == DialogResult.OK)
-                {
-                    recordingResourcesBox.Text = dialog.SelectedPath;
-                    RefreshSkyboxes(Convert.ToString(skybox.SelectedItem));
-                }
             }
         }
 
@@ -573,7 +554,10 @@ namespace Tf2StvParserGui
     {
         private const string ProfileFolderName = "tf2fragdemohelper_recording";
         private const string ProfileConfigName = "tf2fragdemohelper_recording_profile.cfg";
+        private const string ResourceArchiveDirectoryName = "recording_resources_archive";
+        private const string ResourceCacheVersion = "bundled_resources_v1";
         private static readonly object SessionLock = new object();
+        private static readonly object ResourceLock = new object();
         private static RecordingProfileSession activeSession;
 
         public static string FindRecordingResources()
@@ -585,8 +569,38 @@ namespace Tf2StvParserGui
                 Path.Combine(Path.GetDirectoryName(app), "recording_resources")
             };
             foreach (string candidate in candidates)
-                if (Directory.Exists(Path.Combine(candidate, "custom")) && Directory.Exists(Path.Combine(candidate, "skybox"))) return candidate;
-            return null;
+                if (Directory.Exists(Path.Combine(candidate, "custom"))) return candidate;
+            lock (ResourceLock)
+            {
+                string cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "TF2FragDemoHelper", ResourceCacheVersion);
+                if (Directory.Exists(Path.Combine(cache, "custom"))) return cache;
+                string archiveDirectory = Path.Combine(app, ResourceArchiveDirectoryName);
+                if (!Directory.Exists(archiveDirectory)) return null;
+                string[] parts = Directory.GetFiles(archiveDirectory, "resources.part*");
+                if (parts.Length == 0) return null;
+                Array.Sort(parts, StringComparer.OrdinalIgnoreCase);
+                if (Directory.Exists(cache)) Directory.Delete(cache, true);
+                Directory.CreateDirectory(cache);
+                string archive = Path.Combine(cache, "resources.zip");
+                try
+                {
+                    using (FileStream output = new FileStream(archive, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        foreach (string part in parts)
+                        using (FileStream input = new FileStream(part, FileMode.Open, FileAccess.Read, FileShare.Read)) input.CopyTo(output);
+                    }
+                    ZipFile.ExtractToDirectory(archive, cache);
+                    File.Delete(archive);
+                    return Directory.Exists(Path.Combine(cache, "custom")) ? cache : null;
+                }
+                catch
+                {
+                    try { if (File.Exists(archive)) File.Delete(archive); }
+                    catch { }
+                    return null;
+                }
+            }
         }
 
         public static RecordingProfileSession Apply(string gameDirectory, string sessionId, HlaeRecordingSettings settings)
@@ -807,9 +821,9 @@ namespace Tf2StvParserGui
                 !String.Equals(settings.Skybox, "Default", StringComparison.OrdinalIgnoreCase) ||
                 !String.Equals(settings.Hud, "Keep current", StringComparison.OrdinalIgnoreCase) && !String.Equals(settings.Hud, "Default TF2 HUD", StringComparison.OrdinalIgnoreCase);
             if (!needsResources) return;
-            string root = settings.RecordingResourcesDirectory;
+            string root = FindRecordingResources();
             if (String.IsNullOrEmpty(root) || !Directory.Exists(root))
-                throw new DirectoryNotFoundException("Select the recording-resources folder. It must contain custom, hud, and skybox folders.");
+                throw new DirectoryNotFoundException("The bundled recording resources are missing. Reinstall the complete TF2 Frag Demo Helper package.");
 
             CopyOptionalVpk(session, root, "no_announcer_voices.vpk", settings.DisableAnnouncerVoices);
             CopyOptionalVpk(session, root, "no_applause_sounds.vpk", settings.DisableApplauseSounds);
@@ -829,7 +843,14 @@ namespace Tf2StvParserGui
         {
             if (!enabled) return;
             string source = Path.Combine(resourcesRoot, "custom", fileName);
-            if (!File.Exists(source)) throw new FileNotFoundException("A selected recording sound resource was not found.", source);
+            if (!File.Exists(source))
+            {
+                string bundledRoot = FindRecordingResources();
+                if (!String.IsNullOrEmpty(bundledRoot)) source = Path.Combine(bundledRoot, "custom", fileName);
+            }
+            // Sound suppression is cosmetic. A missing optional VPK must never
+            // prevent offline recording or leave the user's TF2 files altered.
+            if (!File.Exists(source)) return;
             string destination = Path.Combine(session.TemporaryCustomDirectory, fileName);
             if (!session.IsolatedCustom && File.Exists(destination))
             {
@@ -861,6 +882,11 @@ namespace Tf2StvParserGui
         private static void CopyHud(string resourcesRoot, string profileRoot, string hudName)
         {
             string source = Path.Combine(resourcesRoot, "hud", hudName);
+            if (!Directory.Exists(source))
+            {
+                string bundledRoot = FindRecordingResources();
+                if (!String.IsNullOrEmpty(bundledRoot)) source = Path.Combine(bundledRoot, "hud", hudName);
+            }
             if (!Directory.Exists(source)) throw new DirectoryNotFoundException("The selected recording HUD was not found: " + source);
             CopyDirectory(source, profileRoot);
         }

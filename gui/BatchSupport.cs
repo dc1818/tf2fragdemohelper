@@ -393,7 +393,12 @@ namespace Tf2StvParserGui
             public int EndTick;
             public int AttackerUserId;
             public bool FocusAttacker;
+            // OutputPath is the HLAE work location for encoded clips and the
+            // visible Frames folder for native image sequences.
             public string OutputPath;
+            public string FinalOutputPath;
+            public string AudioOutputPath;
+            public string RecordingIdentifier;
             public string CaptureBaseName;
             public string StartConfigRelative;
             public string StopConfigRelative;
@@ -668,7 +673,7 @@ namespace Tf2StvParserGui
 
             string sessionId = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             string stagedDirectory = Path.Combine(gameDirectory, "demos", "tf2fragdemohelper_batch", sessionId);
-            string outputDirectory = Path.Combine(settings.OutputDirectory, "tf2fragdemohelper_batch_" + sessionId);
+            string outputDirectory = Path.Combine(settings.OutputDirectory, "Recording Metadata", "tf2fragdemohelper_batch_" + sessionId);
             Directory.CreateDirectory(stagedDirectory);
             Directory.CreateDirectory(outputDirectory);
             RecordingProfileSession profile = null;
@@ -677,7 +682,7 @@ namespace Tf2StvParserGui
                 profile = RecordingProfileManager.Apply(gameDirectory, sessionId, settings);
                 WriteOfflineConfig(gameDirectory);
 
-                List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory, sessionId);
+                List<DemoQueue> demos = BuildQueue(selectedCandidates, fallbackDemoPath, leadSeconds, outroSeconds, outputDirectory, settings.OutputDirectory, sessionId, output);
                 if (demos.Count == 0) throw new InvalidOperationException("None of the selected candidates had a valid source demo and playback tick.");
                 StageDemosAndWriteVdms(demos, stagedDirectory, gameDirectory, sessionId, fps, output, jpgQuality);
                 RecordingQueueTracker queueTracker = WriteQueueManifest(demos, outputDirectory, leadSeconds, outroSeconds, fps, output, jpgQuality, settings);
@@ -723,7 +728,7 @@ namespace Tf2StvParserGui
             }
         }
 
-        private static List<DemoQueue> BuildQueue(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, string outputDirectory, string sessionId)
+        private static List<DemoQueue> BuildQueue(IList<IDictionary> selectedCandidates, string fallbackDemoPath, decimal leadSeconds, decimal outroSeconds, string metadataDirectory, string recordingsDirectory, string sessionId, HlaeRecordingOutput output)
         {
             List<DemoQueue> result = new List<DemoQueue>();
             int appearanceOrder = 0;
@@ -780,10 +785,23 @@ namespace Tf2StvParserGui
                     clipNumber++;
                     clip.Order = clipNumber;
                     string candidateName = String.IsNullOrWhiteSpace(clip.CandidateId) ? "candidate" : clip.CandidateId;
-                    string name = clipNumber.ToString("D3") + "_" +
-                        BatchCandidateSupport.SafeName(Path.GetFileNameWithoutExtension(clip.DemoName)) + "_" +
-                        BatchCandidateSupport.SafeName(candidateName) + "_ticks_" + clip.StartTick + "-" + clip.EndTick;
-                    clip.OutputPath = UniqueDirectoryPath(Path.Combine(outputDirectory, name));
+                    string name = BatchCandidateSupport.SafeName(Path.GetFileNameWithoutExtension(clip.DemoName)) +
+                        "__" + BatchCandidateSupport.SafeName(candidateName) + "__t" + clip.StartTick + "-" + clip.EndTick;
+                    clip.RecordingIdentifier = name;
+                    if (HlaeRecordingOutputs.RequiresAudioMux(output))
+                    {
+                        clip.OutputPath = UniqueDirectoryPath(Path.Combine(metadataDirectory, "working", name));
+                        clip.FinalOutputPath = UniqueFilePath(Path.Combine(recordingsDirectory, "Videos", name + Path.GetExtension(HlaeRecordingOutputs.MediaFileName(output))));
+                        Directory.CreateDirectory(Path.GetDirectoryName(clip.FinalOutputPath));
+                    }
+                    else
+                    {
+                        string sequenceRoot = UniqueDirectoryPath(Path.Combine(recordingsDirectory, "Image Sequences", name));
+                        clip.OutputPath = Path.Combine(sequenceRoot, "Frames");
+                        clip.AudioOutputPath = Path.Combine(sequenceRoot, "Audio");
+                        clip.FinalOutputPath = clip.OutputPath;
+                        Directory.CreateDirectory(clip.AudioOutputPath);
+                    }
                     clip.CaptureBaseName = "tf2frag_" + sessionId + "_" + clipNumber.ToString("D3");
                     Directory.CreateDirectory(clip.OutputPath);
                 }
@@ -935,9 +953,37 @@ namespace Tf2StvParserGui
                     entry["candidate_id"] = TextValue(record, "candidate_id");
                     entry["recorded_utc"] = DateTime.UtcNow.ToString("o");
                     File.AppendAllText(indexPath, NewIndexSerializer().Serialize(entry) + Environment.NewLine, new UTF8Encoding(false));
+                    AppendPortableRecordingIndex(record, output);
                 }
                 catch { }
             }
+        }
+
+        // The output-root index is for people and portable exports; the Local
+        // AppData index above remains the fast built-in checker cache.
+        private static void AppendPortableRecordingIndex(IDictionary record, string output)
+        {
+            string indexPath = TextValue(record, "recording_index_path");
+            if (String.IsNullOrEmpty(indexPath)) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(indexPath));
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["recording_identifier"] = TextValue(record, "recording_identifier");
+                entry["recording_key"] = TextValue(record, "recording_key");
+                entry["file_name"] = TextValue(record, "file_name");
+                entry["output_path"] = output;
+                entry["frames_path"] = TextValue(record, "frames_path");
+                entry["audio_path"] = TextValue(record, "audio_path");
+                entry["source_demo"] = TextValue(record, "source_demo");
+                entry["candidate_id"] = TextValue(record, "candidate_id");
+                entry["attacker_user_id"] = IntValue(record, "attacker_user_id");
+                entry["start_tick"] = IntValue(record, "start_tick");
+                entry["end_tick"] = IntValue(record, "end_tick");
+                entry["recorded_utc"] = DateTime.UtcNow.ToString("o");
+                File.AppendAllText(indexPath, NewIndexSerializer().Serialize(entry) + Environment.NewLine, new UTF8Encoding(false));
+            }
+            catch { }
         }
 
         private static void AddRecordedClip(string key, string output)
@@ -961,6 +1007,15 @@ namespace Tf2StvParserGui
                 return Directory.GetFiles(path, "*", SearchOption.AllDirectories).Length > 0;
             }
             catch { return false; }
+        }
+
+        private static void DeleteEmptyDirectory(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path) && Directory.GetFileSystemEntries(path).Length == 0) Directory.Delete(path);
+            }
+            catch { }
         }
 
         private static void StageDemosAndWriteVdms(List<DemoQueue> demos, string stagedDirectory, string gameDirectory, string sessionId, int fps, HlaeRecordingOutput output, int jpgQuality)
@@ -1201,10 +1256,9 @@ namespace Tf2StvParserGui
                     outputSize = MuxEncodedMovieAudio(clip, ffmpegExecutable, output, tracker, waitForOutput ? 20000 : 3000);
                 }
                 if (outputSize <= 0) throw new IOException("The output exists but is empty.");
-                string actualOutputPath = HlaeRecordingOutputs.RequiresAudioMux(output)
-                    ? Path.Combine(clip.OutputPath, HlaeRecordingOutputs.MediaFileName(output))
-                    : clip.OutputPath;
+                string actualOutputPath = clip.FinalOutputPath;
                 tracker.MarkCompleted(clip.CaptureBaseName, actualOutputPath, outputSize);
+                if (HlaeRecordingOutputs.RequiresAudioMux(output)) DeleteEmptyDirectory(clip.OutputPath);
                 AppendRecordingDiagnostic(outputDirectory, clip, "Completed", "verified durable output bytes=" + outputSize);
             }
             catch (Exception error)
@@ -1249,10 +1303,16 @@ namespace Tf2StvParserGui
                 throw new IOException("FFmpeg created a verified combined file but it could not safely replace the original video. Both files were retained: " + error.Message, error);
             }
             long finalSize = WaitForStableFile(videoPath, waitMilliseconds);
-            tracker.MarkAudioMuxed(clip.CaptureBaseName, videoPath, exitCode);
             try { File.Delete(audioPath); }
             catch { }
-            return finalSize > 0 ? finalSize : muxedSize;
+            try { File.Move(videoPath, clip.FinalOutputPath); }
+            catch (Exception error)
+            {
+                throw new IOException("The verified video could not be placed in the Videos folder. The original file was kept in its working folder: " + error.Message, error);
+            }
+            long deliveredSize = WaitForStableFile(clip.FinalOutputPath, waitMilliseconds);
+            tracker.MarkAudioMuxed(clip.CaptureBaseName, clip.FinalOutputPath, exitCode);
+            return deliveredSize > 0 ? deliveredSize : (finalSize > 0 ? finalSize : muxedSize);
         }
 
         private static int RunAudioMux(string ffmpegExecutable, string videoPath, string audioPath, string outputPath, HlaeRecordingOutput output)
@@ -1329,7 +1389,10 @@ namespace Tf2StvParserGui
             foreach (string source in files)
             {
                 string suffix = Path.GetFileName(source).Substring(clip.CaptureBaseName.Length);
-                string destination = UniqueFilePath(Path.Combine(clip.OutputPath, "frame" + suffix));
+                bool audio = String.Equals(Path.GetExtension(source), ".wav", StringComparison.OrdinalIgnoreCase);
+                string destination = audio
+                    ? UniqueFilePath(Path.Combine(clip.AudioOutputPath, clip.RecordingIdentifier + ".wav"))
+                    : UniqueFilePath(Path.Combine(clip.OutputPath, "frame" + suffix));
                 File.Copy(source, destination, false);
                 totalBytes += new FileInfo(destination).Length;
                 File.Delete(source);
@@ -1502,12 +1565,15 @@ namespace Tf2StvParserGui
                     record["start_tick"] = clip.StartTick;
                     record["end_tick"] = clip.EndTick;
                     record["attacker_user_id"] = clip.AttackerUserId;
-                    string expectedOutputPath = HlaeRecordingOutputs.RequiresAudioMux(output)
-                        ? Path.Combine(clip.OutputPath, HlaeRecordingOutputs.MediaFileName(output))
-                        : clip.OutputPath;
-                    record["output_path"] = clip.OutputPath;
-                    record["expected_output_path"] = expectedOutputPath;
+                    record["recording_identifier"] = clip.RecordingIdentifier;
+                    record["output_path"] = clip.FinalOutputPath;
+                    record["expected_output_path"] = clip.FinalOutputPath;
                     record["actual_output_path"] = null;
+                    record["working_path"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? clip.OutputPath : null;
+                    record["frames_path"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? null : clip.OutputPath;
+                    record["audio_path"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? null : clip.AudioOutputPath;
+                    record["file_name"] = HlaeRecordingOutputs.RequiresAudioMux(output) ? Path.GetFileName(clip.FinalOutputPath) : null;
+                    record["recording_index_path"] = Path.Combine(settings.OutputDirectory, "recording_index.ndjson");
                     record["native_capture_base"] = clip.CaptureBaseName;
                     record["status"] = "Pending";
                     record["recording_started_at"] = null;
@@ -1681,7 +1747,9 @@ namespace Tf2StvParserGui
         {
             HlaeRecordingSettings settings = LoadSettings();
             if (settings == null || String.IsNullOrEmpty(settings.OutputDirectory) || !Directory.Exists(settings.OutputDirectory)) return;
-            foreach (string directory in Directory.GetDirectories(settings.OutputDirectory, "tf2fragdemohelper_batch_*"))
+            string metadataRoot = Path.Combine(settings.OutputDirectory, "Recording Metadata");
+            if (!Directory.Exists(metadataRoot)) return;
+            foreach (string directory in Directory.GetDirectories(metadataRoot, "tf2fragdemohelper_batch_*"))
             {
                 string manifestPath = Path.Combine(directory, "recording_manifest.json");
                 if (!File.Exists(manifestPath)) continue;
@@ -1782,19 +1850,21 @@ namespace Tf2StvParserGui
             }
             if (settings != null && !String.IsNullOrEmpty(settings.OutputDirectory) && Directory.Exists(settings.OutputDirectory))
             {
-                foreach (string directory in Directory.GetDirectories(settings.OutputDirectory, "tf2fragdemohelper_batch_*"))
+                string metadataRoot = Path.Combine(settings.OutputDirectory, "Recording Metadata");
+                if (Directory.Exists(metadataRoot)) foreach (string directory in Directory.GetDirectories(metadataRoot, "tf2fragdemohelper_batch_*"))
                 {
                     DeleteOwnedFile(Path.Combine(directory, "recording_queue.json"), failures);
                     DeleteOwnedFile(Path.Combine(directory, "recording_queue.json.tmp"), failures);
                     DeleteOwnedFile(Path.Combine(directory, "recording_manifest.json.tmp"), failures);
                     DeleteOwnedFile(Path.Combine(directory, "recording_finalize.log"), failures);
                     DeleteOwnedFile(Path.Combine(directory, "recording_finalize_error.txt"), failures);
-                    foreach (string clipDirectory in Directory.GetDirectories(directory))
+                    foreach (string clipDirectory in Directory.GetDirectories(directory, "*", SearchOption.AllDirectories))
                     {
                         DeleteOwnedFile(Path.Combine(clipDirectory, "video_muxing.mp4"), failures);
                         DeleteOwnedFile(Path.Combine(clipDirectory, "video_muxing.avi"), failures);
                         DeleteOwnedFile(Path.Combine(clipDirectory, "ffmpeg_audio_mux_error.txt"), failures);
                     }
+                    DeleteEmptyDirectory(Path.Combine(directory, "working"));
                 }
             }
             if (failures.Count > 0)

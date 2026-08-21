@@ -57,13 +57,31 @@ For benchmark/test output formats, disk-estimation behavior, and ETA methodology
 
 Use **Browse demos** to select multiple `.dem` files, or drag several demos onto the parser window. Batch mode first creates all per-demo export folders, then parses multiple demos concurrently. Only after every parse completes does phase 2 begin, where multiple candidate analyses run concurrently. Automatic worker counts are based on logical CPU capacity, currently available physical RAM, actual demo sizes, and a scalable parse I/O ceiling so full packet/state NDJSON writers do not overwhelm storage. A live resource gate can temporarily delay starting another worker if available RAM falls below the reserved headroom or total system CPU usage is already near 95%. After both phases finish, the app writes a batch-level `manifest.json` and combined `frag_candidates.ndjson`. Each combined candidate contains `batch_context` with `demo_order`, `demo_name`, `source_demo`, and `source_export`, allowing one browser to display and queue candidates from every demo.
 
-In the candidate browser, Ctrl-click rows or use **Select all visible**. Set the lead-in, outro, recording FPS, and output type, then choose **Record selected with HLAE**. The recorder sorts candidates by source demo and playback tick, then stages one terminal VDM job per selected clip. TGA/JPG sequences use Source `startmovie`; MP4/AVI outputs use HLAE `mirv_streams`. Every clip receives a unique output folder, so a later clip cannot overwrite an earlier result.
+In the candidate browser, Ctrl-click rows or use **Select all visible**. Set the lead-in, outro, recording FPS, and output type, then choose **Record selected with HLAE**. The recorder sorts candidates by source demo and playback tick, then stages one terminal VDM job per selected clip. TGA/JPG sequences use Source `startmovie`; MP4/AVI outputs use HLAE `mirv_streams`.
+
+Recordings are organized for browsing rather than by temporary batch folders:
+
+```text
+<recording output folder>/
+├─ Videos/                              # flat MP4/AVI files, audio already included
+│  └─ demo__candidate__t100-260.mp4
+├─ Image Sequences/
+│  └─ demo__candidate__t100-260/
+│     ├─ Frames/                         # TGA/JPG frames
+│     └─ Audio/                          # matching WAV audio
+├─ Recording Metadata/
+│  └─ tf2fragdemohelper_batch_.../
+│     └─ recording_manifest.json
+└─ recording_index.ndjson                # one JSON record per completed clip
+```
+
+The filename/folder identifier combines the demo name, candidate ID, and clip ticks. `recording_index.ndjson` maps that identifier and actual saved path to the source demo, candidate, attacker, ticks, and stable recording key. It is the human-readable counterpart to the built-in already-recorded checker. Names are collision-safe, so no saved output is silently overwritten.
 
 The recording setup also provides a reversible high-quality movie profile. It includes common output resolutions; a session-only DX-level selector; maximum-quality graphics; selectable skyboxes and recording HUDs; viewmodels and viewmodel FOV; motion blur; hit-sound, voice, combat-text, crosshair, minimal-HUD, and HUD-player-model controls; selected user custom resources; and sound suppressors. Enhanced-particle replacement is intentionally not installed or exposed; normal TF2/HLAE particle rendering remains active.
 
 With custom-resource isolation enabled, the app moves the existing `tf/custom` folder into a timestamped backup, creates a temporary recording-only `custom` folder, and restores the original folder after TF2 exits. It also backs up the movie profile CFG, `video.txt`, and the pre-launch DirectX registry value. Closing the parser stops the recording session before restoring. An active-session manifest in Local AppData lets the next parser launch recover files after an interrupted run. If automatic restore cannot finish, the original files remain under `tf/tf2fragdemohelper_backups/<session>` with `RESTORE_REQUIRED.txt` instead of being deleted.
 
-The recorder persists `recording_manifest.json` atomically beside the outputs. It records pending, recording, finalizing, verified, completed, failed, and cancelled transitions together with expected/actual output paths and non-empty file-size verification. A clip is not marked complete merely because playback reached its end tick: the writer must stop, flush, close, and produce a stable non-empty output. Interrupted batches are reconciled on the next launch without automatically replaying the last clip. Verified clips are also registered by a built-in stable fingerprint (demo content, attacker, and exact kill ticks), so re-importing or reparsing the same demo shows **Recorded** and offers to skip already-made clips. The check only treats a clip as recorded while its saved output still exists at its registered location.
+The recorder persists `recording_manifest.json` atomically under **Recording Metadata**. It records pending, recording, finalizing, verified, completed, failed, and cancelled transitions together with expected/actual output paths and non-empty file-size verification. A clip is not marked complete merely because playback reached its end tick: the writer must stop, flush, close, and produce a stable non-empty output. Interrupted batches are reconciled on the next launch without automatically replaying the last clip. Verified clips are also registered by a built-in stable fingerprint (demo content, attacker, and exact kill ticks), so re-importing or reparsing the same demo shows **Recorded** and offers to skip already-made clips. The check only treats a clip as recorded while its saved output still exists at its registered location.
 
 Closing the parser first stops the active offline TF2/HLAE session and waits for finalization, then verifies that the original TF2 files and settings were restored. Only after successful restore verification does it remove helper-owned temporary staging files: copied demos and VDMs, generated recording CFGs, the offline/profile CFGs, temporary recording logs, queue files, and finalizer scratch metadata. Saved video or image-sequence folders, their durable recording manifest, original demos, and parsed export folders (including candidates) are kept.
 

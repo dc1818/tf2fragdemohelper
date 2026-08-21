@@ -228,6 +228,16 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('RecoverInterruptedRecordings();', self.program)
         self.assertIn('finalizer.Join(20000)', self.batch)
 
+    def test_completed_candidates_are_registered_and_can_be_skipped(self):
+        self.assertIn('recorded_clip_index.ndjson', self.batch)
+        self.assertIn('CandidateRecordingKey', self.batch)
+        self.assertIn('DemoContentSignature', self.batch)
+        self.assertIn('RegisterRecordedClip(record);', self.batch)
+        self.assertIn('IsCandidateAlreadyRecorded', self.program)
+        self.assertIn('AddColumn("Recorded", 76);', self.program)
+        self.assertIn('MessageBoxButtons.YesNoCancel', self.program)
+        self.assertIn('skip those candidates and record only the new ones', self.program)
+
     def test_each_selected_clip_has_one_terminal_vdm(self):
         self.assertIn('demo.Clips.Add(clip);\n                result.Add(demo);', self.batch)
         self.assertIn('String.IsNullOrEmpty(nextDemo) ? "quit" : "playdemo " + nextDemo', self.batch)

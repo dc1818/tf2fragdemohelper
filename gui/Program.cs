@@ -1652,6 +1652,7 @@ namespace Tf2StvParserGui
             AddColumn("Team", 72);
             AddColumn("Demo", 170);
             AddColumn("Map", 170);
+            AddColumn("Recorded", 76);
             AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 400);
             grid.SelectionChanged += ShowSelectedCandidate;
@@ -1782,6 +1783,7 @@ namespace Tf2StvParserGui
                     DisplayValue(candidate, "attacker_team"),
                     BatchCandidateSupport.CandidateDemoName(candidate, demoPath),
                     mapName,
+                    HlaeBatchRecorder.IsCandidateAlreadyRecorded(candidate, demoPath) ? "Recorded" : "",
                     JoinValues(killTicks),
                     JoinCandidateTags(Value(candidate, "tags")));
                 grid.Rows[row].Tag = candidate;
@@ -2298,6 +2300,30 @@ namespace Tf2StvParserGui
                 if (candidate != null) selected.Add(candidate);
             }
             selected.Reverse();
+            List<IDictionary> alreadyRecorded = new List<IDictionary>();
+            foreach (IDictionary candidate in selected)
+            {
+                if (HlaeBatchRecorder.IsCandidateAlreadyRecorded(candidate, demoPath)) alreadyRecorded.Add(candidate);
+            }
+            if (alreadyRecorded.Count > 0)
+            {
+                DialogResult choice = MessageBox.Show(this,
+                    alreadyRecorded.Count + " selected candidate(s) already have a verified recording on disk.\r\n\r\n" +
+                    "Yes: skip those candidates and record only the new ones.\r\n" +
+                    "No: record all selected candidates again.\r\n" +
+                    "Cancel: do not start recording.",
+                    "Existing recordings found", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1);
+                if (choice == DialogResult.Cancel) return;
+                if (choice == DialogResult.Yes)
+                {
+                    selected.RemoveAll(delegate(IDictionary candidate) { return HlaeBatchRecorder.IsCandidateAlreadyRecorded(candidate, demoPath); });
+                    if (selected.Count == 0)
+                    {
+                        MessageBox.Show(this, "All selected candidates already have a verified recording on disk.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
+                }
+            }
             try
             {
                 if (String.IsNullOrEmpty(tf2Executable) && selected.Count > 0)

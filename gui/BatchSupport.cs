@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -367,6 +368,18 @@ namespace Tf2StvParserGui
         private static DateTime activeLaunchTime;
         private static RecordingProfileSession activeProfileSession;
         private static Thread activeFinalizerThread;
+        private static readonly object RecordedClipIndexLock = new object();
+        private static bool recordedClipIndexLoaded;
+        private static readonly Dictionary<string, List<string>> recordedClipOutputs = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> demoSignatureCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private static JavaScriptSerializer NewIndexSerializer()
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = Int32.MaxValue;
+            serializer.RecursionLimit = 256;
+            return serializer;
+        }
 
         private sealed class Clip
         {
@@ -384,6 +397,8 @@ namespace Tf2StvParserGui
             public string CaptureBaseName;
             public string StartConfigRelative;
             public string StopConfigRelative;
+            public string RecordingKey;
+            public string DemoContentSignature;
         }
 
         private sealed class DemoQueue
@@ -477,6 +492,7 @@ namespace Tf2StvParserGui
                     record["status"] = "Completed";
                     record["completed_at"] = DateTime.UtcNow.ToString("o");
                     WriteLocked();
+                    RegisterRecordedClip(record);
                 }
             }
 
@@ -737,6 +753,8 @@ namespace Tf2StvParserGui
                 clip.CandidateId = TextValue(candidate, "candidate_id");
                 clip.DemoPath = demoPath;
                 clip.DemoName = demo.DemoName;
+                clip.DemoContentSignature = DemoContentSignature(demoPath);
+                clip.RecordingKey = CandidateRecordingKey(candidate, demoPath, clip.DemoContentSignature);
                 clip.DemoOrder = demo.DemoOrder;
                 clip.StartTick = Math.Max(0, firstTick - (int)Math.Round((double)leadSeconds * TickRate));
                 clip.EndTick = Math.Max(clip.StartTick + 1, lastTick + (int)Math.Round((double)outroSeconds * TickRate));
@@ -771,6 +789,178 @@ namespace Tf2StvParserGui
                 }
             }
             return result;
+        }
+
+        // This key deliberately excludes the clip lead-in/out and output format.  A candidate
+        // is the same moment when it comes from the same demo content, attacker, and kill ticks.
+        // That makes the completed-recording check survive re-parsing and copied demo paths.
+        public static bool IsCandidateAlreadyRecorded(IDictionary candidate, string fallbackDemoPath)
+        {
+            string demoPath = BatchCandidateSupport.CandidateDemoPath(candidate, fallbackDemoPath);
+            return IsRecordingKeyRegistered(CandidateRecordingKey(candidate, demoPath, DemoContentSignature(demoPath)));
+        }
+
+        private static string CandidateRecordingKey(IDictionary candidate, string demoPath, string demoSignature)
+        {
+            StringBuilder identity = new StringBuilder();
+            identity.Append("v1|");
+            identity.Append(String.IsNullOrEmpty(demoSignature) ? CanonicalDemoPath(demoPath) : demoSignature);
+            identity.Append("|").Append(IntValue(candidate, "attacker_user_id"));
+            IList ticks = Value(candidate, "point_of_kill_ticks") as IList;
+            if (ticks != null && ticks.Count > 0)
+            {
+                for (int index = 0; index < ticks.Count; index++)
+                    identity.Append("|").Append(Convert.ToString(ticks[index]));
+            }
+            else
+            {
+                identity.Append("|").Append(IntValue(candidate, "clip_start_tick"));
+                identity.Append("|").Append(IntValue(candidate, "clip_end_tick"));
+            }
+            return HashText(identity.ToString());
+        }
+
+        private static string DemoContentSignature(string demoPath)
+        {
+            if (String.IsNullOrEmpty(demoPath) || !File.Exists(demoPath)) return "";
+            string canonical = CanonicalDemoPath(demoPath);
+            FileInfo info = new FileInfo(demoPath);
+            string cacheKey = canonical + "|" + info.Length + "|" + info.LastWriteTimeUtc.Ticks;
+            lock (RecordedClipIndexLock)
+            {
+                string cached;
+                if (demoSignatureCache.TryGetValue(cacheKey, out cached)) return cached;
+            }
+            try
+            {
+                const int sampleBytes = 65536;
+                byte[] buffer = new byte[sampleBytes];
+                using (MemoryStream sample = new MemoryStream())
+                using (FileStream stream = new FileStream(demoPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    int read = stream.Read(buffer, 0, buffer.Length);
+                    if (read > 0) sample.Write(buffer, 0, read);
+                    if (info.Length > sampleBytes)
+                    {
+                        stream.Seek(Math.Max(sampleBytes, info.Length - sampleBytes), SeekOrigin.Begin);
+                        read = stream.Read(buffer, 0, buffer.Length);
+                        if (read > 0) sample.Write(buffer, 0, read);
+                    }
+                    byte[] length = Encoding.UTF8.GetBytes(info.Length.ToString());
+                    sample.Write(length, 0, length.Length);
+                    string signature;
+                    using (SHA256 hash = SHA256.Create()) { signature = info.Length + ":" + Hex(hash.ComputeHash(sample.ToArray())); }
+                    lock (RecordedClipIndexLock) demoSignatureCache[cacheKey] = signature;
+                    return signature;
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static string CanonicalDemoPath(string path)
+        {
+            try { return Path.GetFullPath(path ?? "").Trim().ToLowerInvariant(); }
+            catch { return path ?? ""; }
+        }
+
+        private static string HashText(string value)
+        {
+            using (SHA256 hash = SHA256.Create()) return Hex(hash.ComputeHash(Encoding.UTF8.GetBytes(value ?? "")));
+        }
+
+        private static string Hex(byte[] value)
+        {
+            StringBuilder text = new StringBuilder(value.Length * 2);
+            for (int index = 0; index < value.Length; index++) text.Append(value[index].ToString("x2"));
+            return text.ToString();
+        }
+
+        private static string RecordedClipIndexPath()
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TF2FragDemoHelper", "recorded_clip_index.ndjson");
+        }
+
+        private static bool IsRecordingKeyRegistered(string recordingKey)
+        {
+            if (String.IsNullOrEmpty(recordingKey)) return false;
+            EnsureRecordedClipIndexLoaded();
+            lock (RecordedClipIndexLock)
+            {
+                List<string> paths;
+                if (!recordedClipOutputs.TryGetValue(recordingKey, out paths)) return false;
+                foreach (string path in paths)
+                    if (OutputStillExists(path)) return true;
+                return false;
+            }
+        }
+
+        private static void EnsureRecordedClipIndexLoaded()
+        {
+            lock (RecordedClipIndexLock)
+            {
+                if (recordedClipIndexLoaded) return;
+                recordedClipIndexLoaded = true;
+                string path = RecordedClipIndexPath();
+                if (!File.Exists(path)) return;
+                JavaScriptSerializer serializer = NewIndexSerializer();
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    try
+                    {
+                        IDictionary entry = serializer.DeserializeObject(line) as IDictionary;
+                        AddRecordedClip(TextValue(entry, "recording_key"), TextValue(entry, "output_path"));
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        private static void RegisterRecordedClip(IDictionary record)
+        {
+            string key = TextValue(record, "recording_key");
+            string output = TextValue(record, "actual_output_path");
+            if (String.IsNullOrEmpty(key) || !OutputStillExists(output)) return;
+            EnsureRecordedClipIndexLoaded();
+            lock (RecordedClipIndexLock)
+            {
+                AddRecordedClip(key, output);
+                try
+                {
+                    string indexPath = RecordedClipIndexPath();
+                    Directory.CreateDirectory(Path.GetDirectoryName(indexPath));
+                    Dictionary<string, object> entry = new Dictionary<string, object>();
+                    entry["recording_key"] = key;
+                    entry["output_path"] = output;
+                    entry["source_demo"] = TextValue(record, "source_demo");
+                    entry["candidate_id"] = TextValue(record, "candidate_id");
+                    entry["recorded_utc"] = DateTime.UtcNow.ToString("o");
+                    File.AppendAllText(indexPath, NewIndexSerializer().Serialize(entry) + Environment.NewLine, new UTF8Encoding(false));
+                }
+                catch { }
+            }
+        }
+
+        private static void AddRecordedClip(string key, string output)
+        {
+            if (String.IsNullOrEmpty(key) || String.IsNullOrEmpty(output)) return;
+            List<string> paths;
+            if (!recordedClipOutputs.TryGetValue(key, out paths))
+            {
+                paths = new List<string>();
+                recordedClipOutputs[key] = paths;
+            }
+            if (!paths.Contains(output)) paths.Add(output);
+        }
+
+        private static bool OutputStillExists(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) return new FileInfo(path).Length > 0;
+                if (!Directory.Exists(path)) return false;
+                return Directory.GetFiles(path, "*", SearchOption.AllDirectories).Length > 0;
+            }
+            catch { return false; }
         }
 
         private static void StageDemosAndWriteVdms(List<DemoQueue> demos, string stagedDirectory, string gameDirectory, string sessionId, int fps, HlaeRecordingOutput output, int jpgQuality)
@@ -1307,6 +1497,8 @@ namespace Tf2StvParserGui
                     record["demo_order"] = demo.DemoOrder;
                     record["source_demo"] = demo.DemoPath;
                     record["candidate_id"] = clip.CandidateId;
+                    record["recording_key"] = clip.RecordingKey;
+                    record["demo_content_signature"] = clip.DemoContentSignature;
                     record["start_tick"] = clip.StartTick;
                     record["end_tick"] = clip.EndTick;
                     record["attacker_user_id"] = clip.AttackerUserId;
@@ -1510,7 +1702,11 @@ namespace Tf2StvParserGui
                     {
                         IDictionary record = item as IDictionary;
                         if (record == null) continue;
-                        if (String.Equals(TextValue(record, "status"), "Completed", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (String.Equals(TextValue(record, "status"), "Completed", StringComparison.OrdinalIgnoreCase))
+                        {
+                            RegisterRecordedClip(record);
+                            continue;
+                        }
                         string expected = TextValue(record, "expected_output_path");
                         long size = Directory.Exists(expected) ? DirectorySize(expected) : (File.Exists(expected) ? new FileInfo(expected).Length : 0L);
                         bool muxRequired = String.Equals(TextValue(record, "encoder_managed_by"), "HLAE + FFmpeg audio mux", StringComparison.OrdinalIgnoreCase);
@@ -1525,6 +1721,7 @@ namespace Tf2StvParserGui
                             record["output_size_bytes"] = size;
                             record["verified_at"] = DateTime.UtcNow.ToString("o");
                             record["completed_at"] = DateTime.UtcNow.ToString("o");
+                            RegisterRecordedClip(record);
                         }
                         else
                         {

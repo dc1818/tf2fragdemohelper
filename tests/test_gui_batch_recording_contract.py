@@ -259,6 +259,16 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('MessageBoxButtons.YesNoCancel', self.program)
         self.assertIn('skip those candidates and record only the new ones', self.program)
 
+    def test_candidate_view_updates_recorded_cells_after_verification(self):
+        self.assertIn('public static event EventHandler RecordedClipVerified;', self.batch)
+        self.assertIn('HlaeBatchRecorder.RecordedClipVerified += OnRecordedClipVerified;', self.program)
+        self.assertIn('HlaeBatchRecorder.RecordedClipVerified -= OnRecordedClipVerified;', self.program)
+        self.assertIn('BeginInvoke(new MethodInvoker(RefreshRecordedCandidateCells))', self.program)
+        self.assertIn('ApplyFilter();', self.program)
+        self.assertIn('DataGridViewContentAlignment.MiddleCenter', self.program)
+        self.assertIn('+recorded:true', self.program)
+        self.assertIn('String.Equals(field, "recorded", StringComparison.OrdinalIgnoreCase)', self.program)
+
     def test_recordings_use_browseable_output_folders_without_an_output_index(self):
         self.assertIn('"Recording Metadata"', self.batch)
         self.assertIn('"Videos"', self.batch)

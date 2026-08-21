@@ -374,6 +374,8 @@ namespace Tf2StvParserGui
         private static readonly HashSet<string> loadedRecordedClipIndexPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> demoSignatureCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        public static event EventHandler RecordedClipVerified;
+
         private static JavaScriptSerializer NewIndexSerializer()
         {
             JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -988,6 +990,8 @@ namespace Tf2StvParserGui
                 }
                 catch { }
             }
+            EventHandler handler = RecordedClipVerified;
+            if (handler != null) handler(null, EventArgs.Empty);
         }
 
         private static void AddRecordedClip(string key, string output)

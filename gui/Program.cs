@@ -1446,6 +1446,8 @@ namespace Tf2StvParserGui
             ForeColor = Color.Gainsboro;
             BuildPage();
             LoadCandidates();
+            HlaeBatchRecorder.RecordedClipVerified += OnRecordedClipVerified;
+            FormClosed += delegate { HlaeBatchRecorder.RecordedClipVerified -= OnRecordedClipVerified; };
             Shown += delegate
             {
                 BeginInvoke(new MethodInvoker(delegate
@@ -1491,7 +1493,7 @@ namespace Tf2StvParserGui
             filterControls.FlowDirection = FlowDirection.LeftToRight;
             filterControls.WrapContents = false;
             Label filterLabel = new Label();
-            filterLabel.Text = "Filter (field-specific: +class:demoman -map:cp_steel; combine multiple filters)";
+            filterLabel.Text = "Filter (field-specific: +class:demoman -map:cp_steel +recorded:true; combine multiple filters)";
             filterLabel.AutoSize = true;
             filterLabel.Margin = new Padding(3, 9, 4, 2);
             filterControls.Controls.Add(filterLabel);
@@ -1678,8 +1680,11 @@ namespace Tf2StvParserGui
         private void AddColumn(string name, int width)
         {
             DataGridViewTextBoxColumn column = new DataGridViewTextBoxColumn();
+            column.Name = name;
             column.HeaderText = name;
             column.Width = width;
+            if (String.Equals(name, "Recorded", StringComparison.OrdinalIgnoreCase))
+                column.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
             column.SortMode = DataGridViewColumnSortMode.NotSortable;
             grid.Columns.Add(column);
         }
@@ -1809,6 +1814,24 @@ namespace Tf2StvParserGui
             UpdateCandidateActionAvailability();
         }
 
+        private void OnRecordedClipVerified(object sender, EventArgs e)
+        {
+            if (IsDisposed || Disposing) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(new MethodInvoker(RefreshRecordedCandidateCells)); }
+                catch { }
+                return;
+            }
+            RefreshRecordedCandidateCells();
+        }
+
+        private void RefreshRecordedCandidateCells()
+        {
+            if (IsDisposed || Disposing) return;
+            ApplyFilter();
+        }
+
         private string CandidateSelectionKey(IDictionary candidate)
         {
             return BatchCandidateSupport.CandidateDemoPath(candidate, demoPath) + "|" +
@@ -1822,6 +1845,7 @@ namespace Tf2StvParserGui
             if (String.IsNullOrWhiteSpace(filter)) return true;
             string demoName = BatchCandidateSupport.CandidateDemoName(candidate, fallbackDemoPath);
             string demoPathValue = BatchCandidateSupport.CandidateDemoPath(candidate, fallbackDemoPath);
+            bool recorded = HlaeBatchRecorder.IsCandidateAlreadyRecorded(candidate, fallbackDemoPath);
             string searchText = String.Join(" ", new string[]
             {
                 record.SearchText ?? "",
@@ -1831,19 +1855,28 @@ namespace Tf2StvParserGui
                 TextValue(candidate, "attacker_class"),
                 TextValue(candidate, "attacker_team"),
                 TextValue(candidate, "attacker_user_id"),
-                JoinCandidateTags(Value(candidate, "tags"))
+                JoinCandidateTags(Value(candidate, "tags")),
+                recorded ? "recorded" : "unrecorded"
             });
             CandidateFilterExpression expression = CandidateFilterExpression.Parse(filter);
             return expression.Matches(
                 delegate(string field, string value)
                 {
-                    return CandidateFieldMatches(candidate, mapName, fallbackDemoPath, field, value, searchText);
+                    return CandidateFieldMatches(candidate, mapName, fallbackDemoPath, field, value, searchText, recorded);
                 },
                 delegate(string value) { return ContainsFilterValue(searchText, value); });
         }
 
-        private static bool CandidateFieldMatches(IDictionary candidate, string mapName, string fallbackDemoPath, string field, string value, string searchText)
+        private static bool CandidateFieldMatches(IDictionary candidate, string mapName, string fallbackDemoPath, string field, string value, string searchText, bool recorded)
         {
+            if (String.Equals(field, "recorded", StringComparison.OrdinalIgnoreCase))
+            {
+                string wanted = (value ?? "").Trim().ToLowerInvariant();
+                if (wanted == "true" || wanted == "yes" || wanted == "1" || wanted == "recorded") return recorded;
+                if (wanted == "false" || wanted == "no" || wanted == "0" || wanted == "unrecorded") return !recorded;
+                return false;
+            }
+
             if (String.Equals(field, "map", StringComparison.OrdinalIgnoreCase))
                 return ContainsFilterValue(mapName, value);
 

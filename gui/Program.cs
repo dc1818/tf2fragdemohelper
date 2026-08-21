@@ -1684,7 +1684,10 @@ namespace Tf2StvParserGui
             column.HeaderText = name;
             column.Width = width;
             if (String.Equals(name, "Recorded", StringComparison.OrdinalIgnoreCase))
+            {
                 column.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+                column.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            }
             column.SortMode = DataGridViewColumnSortMode.NotSortable;
             grid.Columns.Add(column);
         }

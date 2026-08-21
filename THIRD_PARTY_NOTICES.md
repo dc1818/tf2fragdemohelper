@@ -1,9 +1,9 @@
 # Third-party notices
 
-TF2 Frag Demo Helper ships the recording resources it uses in the
-`recording_resources` folder. It does not ship, install, or execute a separate
-third-party recording application.
+TF2 Frag Demo Helper does not bundle optional HUD, skybox, sound-replacement, or
+particle assets. Users who add optional recording resources are responsible for
+following the licenses and redistribution terms for those files.
 
-Some bundled recording assets were originally sourced from the Lawena Recording
-Tool project. Attribution and upstream licensing information:
-https://github.com/quanticc/lawena-recording-tool
+The application does not bundle or install a separate third-party recording
+application. HLAE and FFmpeg are user-supplied tools selected at runtime and
+remain subject to their own licenses.

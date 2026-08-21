@@ -206,6 +206,54 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(context["analysis_scope"], "pov_player_only")
         self.assertEqual(context["pov_player_user_id"], 7)
 
+    def test_pov_scope_rejects_non_pov_and_out_of_round_deaths_before_candidate_work(self):
+        events = [
+            {"tick": 50, "event_type": "player_death", "event": {"attacker": 1, "user_id": 3, "weapon": "grenadelauncher"}},
+            {"tick": 90, "event_type": "teamplay_waiting_ends", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 150, "event_type": "player_death", "event": {"attacker": 2, "user_id": 3, "weapon": "rocketlauncher"}},
+            {"tick": 160, "event_type": "player_death", "event": {"attacker": 1, "user_id": 4, "weapon": "grenadelauncher"}},
+            {"tick": 300, "event_type": "teamplay_round_win", "event": {"team": 3}},
+            {"tick": 350, "event_type": "player_death", "event": {"attacker": 1, "user_id": 5, "weapon": "grenadelauncher"}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        profile = {}
+        deaths = ANALYZER.normalized_deaths(
+            events,
+            ANALYZER.LiveRoundIndex(rounds),
+            {}, {}, {},
+            {"analysis_scope": "pov_player_only", "pov_player_user_id": 1},
+            profile=profile,
+        )
+
+        self.assertEqual([(death["attacker_user_id"], death["event_tick"]) for death in deaths], [(1, 160)])
+        self.assertEqual(profile["death_rejections"]["outside_live_round"], 2)
+        self.assertEqual(profile["death_rejections"]["not_pov_attacker"], 1)
+
+    def test_stv_all_players_keeps_every_attacker_inside_live_round_but_rejects_outside(self):
+        events = [
+            {"tick": 50, "event_type": "player_death", "event": {"attacker": 8, "user_id": 3, "weapon": "scattergun"}},
+            {"tick": 90, "event_type": "teamplay_waiting_ends", "event": {}},
+            {"tick": 100, "event_type": "teamplay_round_active", "event": {}},
+            {"tick": 150, "event_type": "player_death", "event": {"attacker": 2, "user_id": 3, "weapon": "rocketlauncher"}},
+            {"tick": 160, "event_type": "player_death", "event": {"attacker": 7, "user_id": 4, "weapon": "grenadelauncher"}},
+            {"tick": 300, "event_type": "teamplay_round_win", "event": {"team": 3}},
+            {"tick": 350, "event_type": "player_death", "event": {"attacker": 9, "user_id": 5, "weapon": "scattergun"}},
+        ]
+        rounds = ANALYZER.build_rounds(events)
+        profile = {}
+        deaths = ANALYZER.normalized_deaths(
+            events,
+            ANALYZER.LiveRoundIndex(rounds),
+            {}, {}, {},
+            {"analysis_scope": "all_players", "pov_player_user_id": None},
+            profile=profile,
+        )
+
+        self.assertEqual([(death["attacker_user_id"], death["event_tick"]) for death in deaths], [(2, 150), (7, 160)])
+        self.assertEqual(profile["death_rejections"]["outside_live_round"], 2)
+        self.assertEqual(profile["death_rejections"].get("not_pov_attacker", 0), 0)
+
     def test_multikill_window_is_measured_first_to_last(self):
         # Each adjacent gap is under four seconds, but all three kills do not
         # belong to one four-second sequence.

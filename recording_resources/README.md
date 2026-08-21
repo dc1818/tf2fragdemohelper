@@ -1,12 +1,8 @@
 # Recording resources
 
-The packaged build places optional recording resources in this folder:
+Optional recording resources are not bundled. To use your own resources, place
+them under folders such as `custom/`, `hud/`, and `skybox/`, then select the
+folder that directly contains those folders in the HLAE recording dialog.
 
-- `custom/` — sound suppressors and the PLDX enhanced-particle VPK
-- `hud/` — kill-notice and medic recording HUDs
-- `skybox/` — selectable skyboxes
-
-In the HLAE recording dialog, select the folder that directly contains these `custom`, `hud`, and `skybox` folders.
-
-See `THIRD_PARTY_NOTICES.md` in the package for asset attribution and licensing.
-No separate `third_party` folder is required or used at runtime.
+Enhanced-particle installation is not implemented or exposed. The recorder uses
+TF2/HLAE's normal particle rendering and never modifies particle archives.

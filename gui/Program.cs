@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,6 +21,7 @@ namespace Tf2StvParserGui
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             RecordingProfileManager.RecoverInterruptedSession(null);
+            HlaeBatchRecorder.RecoverInterruptedRecordings();
             MainForm main = new MainForm();
             main.FormClosing += delegate
             {
@@ -46,7 +48,11 @@ namespace Tf2StvParserGui
         private readonly Label status = new Label();
         private TableLayoutPanel parserLayout;
         private CandidateViewerForm candidateViewer;
-        private Process activeProcess;
+        private readonly object activeProcessesLock = new object();
+        private readonly HashSet<Process> activeProcesses = new HashSet<Process>();
+        private readonly object batchLogFileLock = new object();
+        private string batchLogFilePath;
+        private CancellationTokenSource batchCancellation;
         private bool busy;
         private string lastExport;
         private readonly List<string> selectedDemos = new List<string>();
@@ -136,7 +142,7 @@ namespace Tf2StvParserGui
             browseSchema.Click += BrowseSchema;
             parserLayout.Controls.Add(browseSchema, 2, 2);
 
-            Label note = Label("Select one or more demos. Batch parsing runs them in order and creates one combined candidate list. Weapon slots use TF2's current items_game.txt when available.");
+            Label note = Label("Select one or more demos. Batch mode parses all demos first with automatic CPU/RAM-aware concurrency, then analyzes all parsed demos concurrently and creates one combined candidate list. Weapon slots use TF2's current items_game.txt when available.");
             note.MaximumSize = new Size(850, 0);
             note.ForeColor = Color.Silver;
             parserLayout.SetColumnSpan(note, 3);
@@ -210,46 +216,131 @@ namespace Tf2StvParserGui
                 ? Path.Combine(outputBox.Text.Trim(), "tf2_demo_batch_export_" + timestamp)
                 : Path.Combine(outputBox.Text.Trim(), Path.GetFileNameWithoutExtension(demos[0]) + "_export_" + timestamp);
             Directory.CreateDirectory(lastExport);
+
+            // Capture UI values before worker tasks begin. Worker threads should not read controls.
+            string itemSchemaPath = String.IsNullOrWhiteSpace(schemaBox.Text) ? "" : schemaBox.Text.Trim();
+            List<BatchExportEntry> batchExports = BuildBatchExportEntries(demos, batch, lastExport);
+            BenchmarkHistory benchmarkHistory = BenchmarkHistory.Load();
+            ResourcePlan resourcePlan = ResourcePlan.Create(demos, benchmarkHistory);
+            DiskPreflightEstimate diskEstimate = benchmarkHistory.EstimateDisk(batchExports, lastExport);
+            try
+            {
+                File.WriteAllText(Path.Combine(lastExport, "PRE_FLIGHT_ESTIMATE.txt"),
+                    resourcePlan.Describe() + "\r\n" + diskEstimate.Describe(), new UTF8Encoding(false));
+            }
+            catch { }
+
+            if (!diskEstimate.HasEstimatedOutputSpace)
+            {
+                MessageBox.Show(this,
+                    "There is not enough free disk space for the estimated parsed output.\r\n\r\n" +
+                    diskEstimate.Describe() +
+                    "\r\nChoose an output drive with more free space before starting. The estimate is intentionally conservative and improves as benchmark history is collected.",
+                    "Insufficient disk space", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            if (!diskEstimate.HasSafeSpace)
+            {
+                DialogResult proceed = MessageBox.Show(this,
+                    "The batch probably fits, but the recommended safety headroom is not available. Running close to full can still cause OS error 112 if a demo expands more than expected.\r\n\r\n" +
+                    diskEstimate.Describe() +
+                    "\r\nContinue anyway?",
+                    "Low disk headroom", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (proceed != DialogResult.Yes) return;
+            }
+            else if (batch)
+            {
+                double predictedParseSeconds = resourcePlan.HistoricalParseSecondsPerGiB > 0.0
+                    ? (diskEstimate.TotalInputBytes / BenchmarkFormatting.GiB) * resourcePlan.HistoricalParseSecondsPerGiB / Math.Max(1, resourcePlan.ParseWorkers)
+                    : -1.0;
+                double predictedAnalysisSeconds = resourcePlan.HistoricalAnalysisSecondsPerGiB > 0.0
+                    ? (diskEstimate.EstimatedParseOutputBytes / BenchmarkFormatting.GiB) * resourcePlan.HistoricalAnalysisSecondsPerGiB / Math.Max(1, resourcePlan.AnalysisWorkers)
+                    : -1.0;
+                string historicalEta = predictedParseSeconds >= 0.0 && predictedAnalysisSeconds >= 0.0
+                    ? "Historical batch ETA: about " + BenchmarkFormatting.Duration(predictedParseSeconds + predictedAnalysisSeconds) + "\r\n"
+                    : "Historical batch ETA: calibrating; live ETA will appear after completed jobs and improve on later runs.\r\n";
+                DialogResult startBatch = MessageBox.Show(this,
+                    diskEstimate.Describe() + "\r\n" +
+                    "Automatic parse workers: " + resourcePlan.ParseWorkers + "\r\n" +
+                    "Automatic analysis workers: " + resourcePlan.AnalysisWorkers + "\r\n" +
+                    historicalEta +
+                    "\r\nStart this batch?",
+                    "Batch preflight", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                if (startBatch != DialogResult.Yes) return;
+            }
+
             busy = true;
             parseButton.Enabled = false;
             cancelButton.Enabled = true;
             openButton.Enabled = false;
             candidatesButton.Enabled = false;
             log.Clear();
-            progress.Style = ProgressBarStyle.Marquee;
-            status.Text = "Parsing " + demos.Count + " demo" + (demos.Count == 1 ? "" : "s") + "...";
+            progress.Style = ProgressBarStyle.Continuous;
+            progress.Minimum = 0;
+            progress.Maximum = 100;
+            progress.Value = 0;
+            status.Text = "Phase 1 of 2: preparing to parse " + demos.Count + " demo" + (demos.Count == 1 ? "" : "s") + "...";
             status.ForeColor = Color.Gainsboro;
+
+            CancellationTokenSource cancellation = new CancellationTokenSource();
+            batchCancellation = cancellation;
+            CancellationTokenSource samplerCancellation = new CancellationTokenSource();
+            BenchmarkSession benchmark = new BenchmarkSession(lastExport, batchExports, resourcePlan, diskEstimate, benchmarkHistory);
+            batchLogFilePath = Path.Combine(benchmark.DirectoryPath, "batch_run.log");
+            Task samplerTask = Task.Run(() => benchmark.SampleResourcesAsync(GetActiveProcessCount, samplerCancellation.Token));
+            int candidateCount = 0;
+
             Append("Inputs: " + demos.Count + " demo(s)\r\nExport: " + lastExport + "\r\n\r\n");
+            Append(resourcePlan.Describe());
+            Append("\r\n" + diskEstimate.Describe());
+            Append("Benchmark/test data: " + benchmark.DirectoryPath + "\r\n");
+            Append("Persistent calibration history: " + benchmarkHistory.HistoryPath + "\r\n");
+            Append("\r\nPHASE 1 OF 2: PARSE ALL DEMOS\r\n");
+            Append("Up to " + resourcePlan.ParseWorkers + " parser worker(s) will run concurrently.\r\n\r\n");
+
             try
             {
-                List<BatchExportEntry> batchExports = new List<BatchExportEntry>();
-                for (int index = 0; index < demos.Count; index++)
-                {
-                    string demo = demos[index];
-                    string exportDirectory = batch
-                        ? Path.Combine(lastExport, (index + 1).ToString("D3") + "_" + SafeFileName(Path.GetFileNameWithoutExtension(demo)) + "_export")
-                        : lastExport;
-                    Directory.CreateDirectory(exportDirectory);
-                    status.Text = "Parsing demo " + (index + 1) + " of " + demos.Count + ": " + Path.GetFileName(demo);
-                    Append("\r\n[" + (index + 1) + "/" + demos.Count + "] Input: " + demo + "\r\nExport: " + exportDirectory + "\r\n");
-                    await RunWorker(parser, Quote(demo) + " " + Quote(exportDirectory));
-                    status.Text = "Ranking candidates for demo " + (index + 1) + " of " + demos.Count + "...";
-                    Append("Running frag analysis...\r\n");
-                    await RunFragAnalysis(exportDirectory);
-                    batchExports.Add(new BatchExportEntry(index + 1, demo, exportDirectory));
-                }
+                await RunParsePhaseAsync(batchExports, parser, resourcePlan, diskEstimate, benchmark, cancellation.Token);
+
+                cancellation.Token.ThrowIfCancellationRequested();
+                Append("\r\nPHASE 1 COMPLETE: all " + demos.Count + " demo(s) parsed.\r\n");
+                Append("\r\nPHASE 2 OF 2: ANALYZE ALL PARSED DEMOS\r\n");
+                Append("Up to " + resourcePlan.AnalysisWorkers + " analyzer worker(s) will run concurrently.\r\n\r\n");
+
+                await RunAnalysisPhaseAsync(batchExports, itemSchemaPath, resourcePlan, diskEstimate, benchmark, cancellation.Token);
+
+                cancellation.Token.ThrowIfCancellationRequested();
+                Append("\r\nPHASE 2 COMPLETE: all " + demos.Count + " demo(s) analyzed.\r\n");
+
                 if (batch)
                 {
-                    int count = BatchCandidateSupport.WriteCombinedExport(lastExport, batchExports);
-                    Append("\r\nCombined " + count + " candidates from " + demos.Count + " demos into " + Path.Combine(lastExport, "frag_candidates.ndjson") + ".\r\n");
+                    status.Text = "Combining candidate results...";
+                    candidateCount = BatchCandidateSupport.WriteCombinedExport(lastExport, batchExports);
+                    Append("\r\nCombined " + candidateCount + " candidates from " + demos.Count + " demos into " + Path.Combine(lastExport, "frag_candidates.ndjson") + ".\r\n");
                 }
-                progress.Style = ProgressBarStyle.Continuous;
+                else
+                {
+                    candidateCount = BenchmarkFormatting.CountNonEmptyLines(Path.Combine(lastExport, "frag_candidates.ndjson"));
+                }
+
                 progress.Value = 100;
                 status.Text = batch ? "Batch export and combined candidate analysis complete." : "Export and frag analysis complete.";
                 status.ForeColor = Color.LightGreen;
                 openButton.Enabled = true;
                 candidatesButton.Enabled = true;
+                benchmark.Complete("success", candidateCount, batchExports, resourcePlan, diskEstimate, "");
                 Append("\r\nSUCCESS: Export and frag analysis complete. Use View candidates to inspect and batch-record ranked clips.\r\n");
+                Append("Benchmark data was written to: " + benchmark.DirectoryPath + "\r\n");
+            }
+            catch (OperationCanceledException)
+            {
+                progress.Style = ProgressBarStyle.Continuous;
+                status.Text = "Cancelled. Completed exports were left on disk.";
+                status.ForeColor = Color.Goldenrod;
+                openButton.Enabled = Directory.Exists(lastExport);
+                benchmark.Complete("cancelled", candidateCount, batchExports, resourcePlan, diskEstimate, "Cancelled by user or batch cancellation.");
+                Append("\r\nCANCELLED: active parser/analyzer workers were stopped. Completed export folders were preserved.\r\n");
+                Append("Partial benchmark data was preserved in: " + benchmark.DirectoryPath + "\r\n");
             }
             catch (Exception ex)
             {
@@ -257,73 +348,438 @@ namespace Tf2StvParserGui
                 progress.Value = 0;
                 status.Text = "Failed: " + ex.Message;
                 status.ForeColor = Color.OrangeRed;
-                openButton.Enabled = Directory.Exists(outputBox.Text);
+                openButton.Enabled = Directory.Exists(lastExport);
+                benchmark.Complete("failed", candidateCount, batchExports, resourcePlan, diskEstimate, ex.ToString());
                 Append("\r\nERROR: " + ex.Message + "\r\n");
+                Append("Partial benchmark data was preserved in: " + benchmark.DirectoryPath + "\r\n");
             }
             finally
             {
+                RequestStopActiveWorkers(false);
+                samplerCancellation.Cancel();
+                try { samplerTask.Wait(); } catch { }
+                samplerCancellation.Dispose();
+                benchmark.Dispose();
+                batchLogFilePath = null;
+                if (batchCancellation == cancellation) batchCancellation = null;
+                cancellation.Dispose();
                 busy = false;
                 parseButton.Enabled = true;
                 cancelButton.Enabled = false;
             }
         }
 
-        private Task RunWorker(string fileName, string arguments)
+        private static List<BatchExportEntry> BuildBatchExportEntries(IList<string> demos, bool batch, string exportRoot)
         {
-            return Task.Run(delegate
+            List<BatchExportEntry> entries = new List<BatchExportEntry>();
+            for (int index = 0; index < demos.Count; index++)
             {
-                ProcessStartInfo info = new ProcessStartInfo();
-                info.FileName = fileName;
-                info.Arguments = arguments;
-                info.WorkingDirectory = root;
-                info.UseShellExecute = false;
-                info.CreateNoWindow = true;
-                info.RedirectStandardOutput = true;
-                info.RedirectStandardError = true;
-                Process process = new Process();
-                process.StartInfo = info;
-                process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) Append(e.Data + "\r\n"); };
-                process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) Append(e.Data + "\r\n"); };
-                activeProcess = process;
-                process.Start();
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-                process.WaitForExit();
-                int code = process.ExitCode;
-                activeProcess = null;
-                process.Dispose();
-                if (code != 0) throw new InvalidOperationException("Parser exited with code " + code + ". See the log.");
-            });
+                string demo = demos[index];
+                string exportDirectory = batch
+                    ? Path.Combine(exportRoot, (index + 1).ToString("D3") + "_" + SafeFileName(Path.GetFileNameWithoutExtension(demo)) + "_export")
+                    : exportRoot;
+                Directory.CreateDirectory(exportDirectory);
+                entries.Add(new BatchExportEntry(index + 1, demo, exportDirectory));
+            }
+            return entries;
         }
 
-        private async Task RunFragAnalysis(string exportDirectory)
+        private async Task RunParsePhaseAsync(IList<BatchExportEntry> entries, string parser,
+            ResourcePlan resourcePlan, DiskPreflightEstimate diskEstimate, BenchmarkSession benchmark,
+            CancellationToken cancellationToken)
+        {
+            Stopwatch phaseWatch = Stopwatch.StartNew();
+            int workerCount = resourcePlan.ParseWorkers;
+            List<double> weights = new List<double>();
+            foreach (BatchExportEntry entry in entries)
+                weights.Add(Math.Max(1.0, (double)BenchmarkFormatting.FileSize(entry.DemoPath)));
+            PhaseEtaTracker etaTracker = new PhaseEtaTracker(1, weights, resourcePlan.HistoricalParseSecondsPerGiB, workerCount);
+            etaTracker.Start();
+            benchmark.SetPhase(1, entries.Count, workerCount);
+            EtaSnapshot initialEta = etaTracker.InitialSnapshot();
+            benchmark.RecordEta(initialEta);
+            Append("Phase 1 " + initialEta.ShortText() + "\r\n");
+
+            ulong diskReserve = Math.Max(4UL * 1024UL * 1024UL * 1024UL,
+                Math.Min(16UL * 1024UL * 1024UL * 1024UL, diskEstimate.SafetyHeadroomBytes / 4UL));
+            try
+            {
+                using (SemaphoreSlim limiter = new SemaphoreSlim(workerCount, workerCount))
+                using (AdaptiveResourceGate resourceGate = new AdaptiveResourceGate(resourcePlan.ReservedMemoryBytes))
+                using (AdaptiveDiskGate diskGate = new AdaptiveDiskGate(lastExport, diskReserve))
+                {
+                    List<Task> tasks = new List<Task>();
+                    foreach (BatchExportEntry entry in entries)
+                    {
+                        BatchExportEntry captured = entry;
+                        tasks.Add(RunParseJobAsync(captured, parser, limiter, resourceGate, diskGate, resourcePlan, diskEstimate,
+                            etaTracker, benchmark, workerCount, cancellationToken));
+                    }
+                    await Task.WhenAll(tasks);
+                }
+            }
+            finally
+            {
+                phaseWatch.Stop();
+                benchmark.SetPhaseWallTime(1, phaseWatch.Elapsed.TotalSeconds);
+                Append("Phase 1 wall time: " + phaseWatch.Elapsed.TotalSeconds.ToString("0.0") + " seconds.\r\n");
+            }
+        }
+
+        private async Task RunParseJobAsync(BatchExportEntry entry, string parser, SemaphoreSlim limiter,
+            AdaptiveResourceGate resourceGate, AdaptiveDiskGate diskGate, ResourcePlan resourcePlan, DiskPreflightEstimate diskEstimate,
+            PhaseEtaTracker etaTracker, BenchmarkSession benchmark, int workerLimit, CancellationToken cancellationToken)
+        {
+            await limiter.WaitAsync(cancellationToken);
+            bool resourceSlot = false;
+            bool diskSlot = false;
+            ulong estimatedWriteBytes = benchmark.EstimateParseWriteBytes(entry, diskEstimate);
+            try
+            {
+                ulong estimatedMemoryBytes = Math.Max(ResourcePlan.EstimateParseJobBytes(entry.DemoPath), resourcePlan.EstimatedParseWorkerBytes);
+                await resourceGate.EnterAsync(estimatedMemoryBytes, cancellationToken);
+                resourceSlot = true;
+                await diskGate.EnterAsync(estimatedWriteBytes, cancellationToken);
+                diskSlot = true;
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string prefix = "[PARSE " + entry.Order.ToString("D3") + "] ";
+                Append(prefix + "Starting " + Path.GetFileName(entry.DemoPath) +
+                    " | estimated write " + BenchmarkFormatting.Bytes(estimatedWriteBytes) + "\r\n");
+                Append(prefix + "Export: " + entry.ExportDirectory + "\r\n");
+
+                WorkerRunResult result = await RunWorker(parser,
+                    Quote(entry.DemoPath) + " " + Quote(entry.ExportDirectory), prefix, cancellationToken);
+                ulong outputBytes = BenchmarkFormatting.DirectorySize(entry.ExportDirectory);
+                benchmark.RecordParse(entry, result, outputBytes, workerLimit);
+
+                EtaSnapshot eta = etaTracker.Complete(Math.Max(1.0, (double)BenchmarkFormatting.FileSize(entry.DemoPath)));
+                benchmark.SetPhaseCompleted(eta.Completed);
+                benchmark.RecordEta(eta);
+                UpdatePhaseProgress(1, eta);
+
+                Append(prefix + "Complete in " + result.WallSeconds.ToString("0.0") + " s: " +
+                    Path.GetFileName(entry.DemoPath) + " | output " + BenchmarkFormatting.Bytes(outputBytes) +
+                    " | " + eta.ShortText() + "\r\n");
+            }
+            catch (Exception ex)
+            {
+                benchmark.RecordFailure(1, entry, ex.Message);
+                RequestStopActiveWorkers(true);
+                throw;
+            }
+            finally
+            {
+                if (diskSlot) diskGate.Exit(estimatedWriteBytes);
+                if (resourceSlot) resourceGate.Exit();
+                limiter.Release();
+            }
+        }
+
+        private async Task RunAnalysisPhaseAsync(IList<BatchExportEntry> entries, string itemSchemaPath,
+            ResourcePlan resourcePlan, DiskPreflightEstimate diskEstimate, BenchmarkSession benchmark,
+            CancellationToken cancellationToken)
+        {
+            Stopwatch phaseWatch = Stopwatch.StartNew();
+            int workerCount = resourcePlan.AnalysisWorkers;
+            List<double> weights = new List<double>();
+            foreach (BatchExportEntry entry in entries)
+            {
+                ulong parseBytes = benchmark.ParseOutputBytes(entry.Order);
+                if (parseBytes == 0) parseBytes = BenchmarkFormatting.DirectorySize(entry.ExportDirectory);
+                weights.Add(Math.Max(1.0, (double)parseBytes));
+            }
+            PhaseEtaTracker etaTracker = new PhaseEtaTracker(2, weights, resourcePlan.HistoricalAnalysisSecondsPerGiB, workerCount);
+            etaTracker.Start();
+            benchmark.SetPhase(2, entries.Count, workerCount);
+            EtaSnapshot initialEta = etaTracker.InitialSnapshot();
+            benchmark.RecordEta(initialEta);
+            Append("Phase 2 " + initialEta.ShortText() + "\r\n");
+
+            ulong diskReserve = Math.Max(2UL * 1024UL * 1024UL * 1024UL,
+                Math.Min(8UL * 1024UL * 1024UL * 1024UL, diskEstimate.SafetyHeadroomBytes / 8UL));
+            try
+            {
+                using (SemaphoreSlim limiter = new SemaphoreSlim(workerCount, workerCount))
+                using (AdaptiveResourceGate resourceGate = new AdaptiveResourceGate(resourcePlan.ReservedMemoryBytes))
+                using (AdaptiveDiskGate diskGate = new AdaptiveDiskGate(lastExport, diskReserve))
+                {
+                    List<Task> tasks = new List<Task>();
+                    foreach (BatchExportEntry entry in entries)
+                    {
+                        BatchExportEntry captured = entry;
+                        tasks.Add(RunAnalysisJobAsync(captured, itemSchemaPath, limiter, resourceGate, diskGate,
+                            resourcePlan, diskEstimate, etaTracker, benchmark, workerCount, cancellationToken));
+                    }
+                    await Task.WhenAll(tasks);
+                }
+            }
+            finally
+            {
+                phaseWatch.Stop();
+                benchmark.SetPhaseWallTime(2, phaseWatch.Elapsed.TotalSeconds);
+                Append("Phase 2 wall time: " + phaseWatch.Elapsed.TotalSeconds.ToString("0.0") + " seconds.\r\n");
+            }
+        }
+
+        private async Task RunAnalysisJobAsync(BatchExportEntry entry, string itemSchemaPath, SemaphoreSlim limiter,
+            AdaptiveResourceGate resourceGate, AdaptiveDiskGate diskGate, ResourcePlan resourcePlan, DiskPreflightEstimate diskEstimate,
+            PhaseEtaTracker etaTracker, BenchmarkSession benchmark, int workerLimit, CancellationToken cancellationToken)
+        {
+            await limiter.WaitAsync(cancellationToken);
+            bool resourceSlot = false;
+            bool diskSlot = false;
+            ulong estimatedWriteBytes = benchmark.EstimateAnalysisWriteBytes(entry, diskEstimate);
+            try
+            {
+                ulong estimatedMemoryBytes = Math.Max(ResourcePlan.EstimateAnalysisJobBytes(entry.DemoPath), resourcePlan.EstimatedAnalysisWorkerBytes);
+                await resourceGate.EnterAsync(estimatedMemoryBytes, cancellationToken);
+                resourceSlot = true;
+                await diskGate.EnterAsync(estimatedWriteBytes, cancellationToken);
+                diskSlot = true;
+                cancellationToken.ThrowIfCancellationRequested();
+
+                string prefix = "[ANALYZE " + entry.Order.ToString("D3") + "] ";
+                // Divide the machine-wide CPU budget across the concurrently
+                // active demo analyzers. The analyzer only uses these child
+                // workers for independent candidate-group scoring; the large
+                // StateTimeline remains in the parent process.
+                int candidateWorkers = Math.Max(1,
+                    Math.Min(8, Environment.ProcessorCount / Math.Max(1, workerLimit)));
+                Append(prefix + "Starting candidate analysis for " + Path.GetFileName(entry.DemoPath) +
+                    " | candidate scoring workers=" + candidateWorkers + "\r\n");
+                WorkerRunResult result = await RunFragAnalysis(entry.ExportDirectory, itemSchemaPath, prefix, candidateWorkers, cancellationToken);
+                ulong totalBytesAfter = BenchmarkFormatting.DirectorySize(entry.ExportDirectory);
+                int candidateCount = BenchmarkFormatting.CountNonEmptyLines(Path.Combine(entry.ExportDirectory, "frag_candidates.ndjson"));
+                benchmark.RecordAnalysis(entry, result, totalBytesAfter, candidateCount, workerLimit);
+
+                ulong parseWeight = benchmark.ParseOutputBytes(entry.Order);
+                if (parseWeight == 0) parseWeight = Math.Max(1UL, totalBytesAfter);
+                EtaSnapshot eta = etaTracker.Complete(Math.Max(1.0, (double)parseWeight));
+                benchmark.SetPhaseCompleted(eta.Completed);
+                benchmark.RecordEta(eta);
+                UpdatePhaseProgress(2, eta);
+
+                Append(prefix + "Complete in " + result.WallSeconds.ToString("0.0") + " s: " +
+                    Path.GetFileName(entry.DemoPath) + " | " + candidateCount + " candidate(s) | " + eta.ShortText() + "\r\n");
+            }
+            catch (Exception ex)
+            {
+                benchmark.RecordFailure(2, entry, ex.Message);
+                RequestStopActiveWorkers(true);
+                throw;
+            }
+            finally
+            {
+                if (diskSlot) diskGate.Exit(estimatedWriteBytes);
+                if (resourceSlot) resourceGate.Exit();
+                limiter.Release();
+            }
+        }
+
+        private void UpdatePhaseProgress(int phase, EtaSnapshot eta)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<int, EtaSnapshot>(UpdatePhaseProgress), phase, eta);
+                return;
+            }
+
+            double fraction = eta == null ? 0.0 : eta.Fraction;
+            int percentWithinPhase = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, fraction)) * 100.0);
+            int overall = phase == 1 ? percentWithinPhase / 2 : 50 + (percentWithinPhase / 2);
+            if (overall < 0) overall = 0;
+            if (overall > 100) overall = 100;
+            progress.Value = overall;
+            string countText = eta == null ? "" : eta.Completed + " of " + eta.Total + " demos";
+            string etaText = eta == null ? "ETA: calibrating..." : eta.ShortText();
+            status.Text = "Phase " + phase + " of 2: " + (phase == 1 ? "parsed " : "analyzed ") +
+                countText + ". " + etaText;
+        }
+
+        private Task<WorkerRunResult> RunWorker(string fileName, string arguments, string logPrefix, CancellationToken cancellationToken)
+        {
+            return Task.Run<WorkerRunResult>(delegate
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Process process = null;
+                CancellationTokenRegistration cancellationRegistration = new CancellationTokenRegistration();
+                Stopwatch wall = Stopwatch.StartNew();
+                DateTime startedUtc = DateTime.UtcNow;
+                try
+                {
+                    ProcessStartInfo info = new ProcessStartInfo();
+                    info.FileName = fileName;
+                    info.Arguments = arguments;
+                    info.WorkingDirectory = root;
+                    info.UseShellExecute = false;
+                    info.CreateNoWindow = true;
+                    info.RedirectStandardOutput = true;
+                    info.RedirectStandardError = true;
+
+                    process = new Process();
+                    process.StartInfo = info;
+                    Process capturedProcess = process;
+                    process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                    {
+                        if (e.Data != null) Append(logPrefix + e.Data + "\r\n");
+                    };
+                    process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                    {
+                        if (e.Data != null) Append(logPrefix + e.Data + "\r\n");
+                    };
+
+                    process.Start();
+                    RegisterActiveProcess(process);
+                    cancellationRegistration = cancellationToken.Register(delegate { TryKillProcess(capturedProcess); });
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+                    process.WaitForExit();
+                    wall.Stop();
+                    int code = process.ExitCode;
+
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (code != 0)
+                        throw new InvalidOperationException(logPrefix + "Worker exited with code " + code + ". See the prefixed log lines above.");
+
+                    WorkerRunResult result = new WorkerRunResult();
+                    result.StartedUtc = startedUtc;
+                    result.FinishedUtc = DateTime.UtcNow;
+                    result.WallSeconds = wall.Elapsed.TotalSeconds;
+                    result.ExitCode = code;
+                    result.Executable = fileName;
+                    try { result.CpuSeconds = process.TotalProcessorTime.TotalSeconds; } catch { result.CpuSeconds = 0.0; }
+                    try { result.PeakWorkingSetBytes = process.PeakWorkingSet64; } catch { result.PeakWorkingSetBytes = 0; }
+                    return result;
+                }
+                finally
+                {
+                    wall.Stop();
+                    cancellationRegistration.Dispose();
+                    if (process != null)
+                    {
+                        UnregisterActiveProcess(process);
+                        process.Dispose();
+                    }
+                }
+            }, cancellationToken);
+        }
+
+        private async Task<WorkerRunResult> RunFragAnalysis(string exportDirectory, string itemSchemaPath, string logPrefix, int candidateWorkers, CancellationToken cancellationToken)
         {
             string script = Path.Combine(root, "analyze_frags.py");
             if (!File.Exists(script)) throw new FileNotFoundException("Frag analyzer is missing.", script);
-            string analyzerArguments = Quote(script) + " --debug ";
-            if (!String.IsNullOrWhiteSpace(schemaBox.Text))
-                analyzerArguments += "--item-schema " + Quote(schemaBox.Text.Trim()) + " ";
+            // Normal batch analysis writes analysis_profile.json automatically.
+            // Do not enable per-event --debug logging here: large POV/STV demos
+            // can contain thousands of intentionally rejected deaths (warmup,
+            // post-round, or non-POV attackers), and printing each rejection is
+            // measurable console/process overhead. Run analyze_frags.py manually
+            // with --debug only when investigating a specific demo.
+            string analyzerArguments = Quote(script) + " --candidate-workers " + Math.Max(1, candidateWorkers).ToString() + " ";
+            if (!String.IsNullOrWhiteSpace(itemSchemaPath))
+                analyzerArguments += "--item-schema " + Quote(itemSchemaPath) + " ";
             analyzerArguments += Quote(exportDirectory);
+
             Exception pythonFailure = null;
             try
             {
-                await RunWorker("python.exe", analyzerArguments);
+                return await RunWorker("python.exe", analyzerArguments, logPrefix, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
                 pythonFailure = ex;
+                Append(logPrefix + "python.exe failed; trying py.exe -3. " + ex.Message + "\r\n");
             }
+
             if (pythonFailure != null)
-                await RunWorker("py.exe", "-3 " + analyzerArguments);
+                return await RunWorker("py.exe", "-3 " + analyzerArguments, logPrefix, cancellationToken);
+            throw new InvalidOperationException(logPrefix + "Candidate analyzer did not run.");
+        }
+
+        private int GetActiveProcessCount()
+        {
+            lock (activeProcessesLock) return activeProcesses.Count;
+        }
+
+        private void RegisterActiveProcess(Process process)
+        {
+            lock (activeProcessesLock)
+            {
+                activeProcesses.Add(process);
+            }
+        }
+
+        private void UnregisterActiveProcess(Process process)
+        {
+            lock (activeProcessesLock)
+            {
+                activeProcesses.Remove(process);
+            }
+        }
+
+        private static void TryKillProcess(Process process)
+        {
+            if (process == null) return;
+            try
+            {
+                if (process.HasExited) return;
+
+                // Candidate analysis may temporarily use bounded child Python
+                // processes for independent group scoring. Kill the complete
+                // process tree on Windows so Cancel does not leave orphaned
+                // scoring workers behind. Fall back to Process.Kill if
+                // taskkill is unavailable for any reason.
+                try
+                {
+                    ProcessStartInfo killInfo = new ProcessStartInfo();
+                    killInfo.FileName = "taskkill.exe";
+                    killInfo.Arguments = "/PID " + process.Id.ToString() + " /T /F";
+                    killInfo.UseShellExecute = false;
+                    killInfo.CreateNoWindow = true;
+                    using (Process killer = Process.Start(killInfo))
+                    {
+                        if (killer != null) killer.WaitForExit(5000);
+                    }
+                }
+                catch
+                {
+                    if (!process.HasExited) process.Kill();
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void RequestStopActiveWorkers(bool cancelBatch)
+        {
+            CancellationTokenSource cancellation = batchCancellation;
+            if (cancelBatch && cancellation != null && !cancellation.IsCancellationRequested)
+            {
+                try { cancellation.Cancel(); }
+                catch { }
+            }
+
+            List<Process> processes;
+            lock (activeProcessesLock)
+            {
+                processes = new List<Process>(activeProcesses);
+            }
+
+            foreach (Process process in processes)
+                TryKillProcess(process);
         }
 
         private void Cancel(object sender, EventArgs e)
         {
-            Process process = activeProcess;
-            if (process == null || process.HasExited) return;
+            if (!busy) return;
             cancelButton.Enabled = false;
-            status.Text = "Cancelling parser or frag analysis...";
-            Task.Run(delegate { try { process.Kill(); } catch { } });
+            status.Text = "Cancelling active parser/analyzer workers and queued jobs...";
+            RequestStopActiveWorkers(true);
         }
 
         private void BrowseDemo(object sender, EventArgs e)
@@ -519,9 +975,417 @@ namespace Tf2StvParserGui
             log.SelectionStart = log.TextLength;
             log.SelectionLength = 0;
             log.ScrollToCaret();
+            string path = batchLogFilePath;
+            if (!String.IsNullOrWhiteSpace(path))
+            {
+                lock (batchLogFileLock)
+                {
+                    try { File.AppendAllText(path, text, new UTF8Encoding(false)); }
+                    catch { }
+                }
+            }
         }
 
         private static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
+    }
+
+    internal sealed class ResourcePlan
+    {
+        private const ulong MiB = 1024UL * 1024UL;
+        private const ulong GiB = 1024UL * 1024UL * 1024UL;
+
+        public readonly int LogicalProcessors;
+        public readonly ulong AvailableMemoryBytes;
+        public readonly ulong ReservedMemoryBytes;
+        public readonly ulong EstimatedParseWorkerBytes;
+        public readonly ulong EstimatedAnalysisWorkerBytes;
+        public readonly long DemoSize75thPercentileBytes;
+        public readonly int ParseWorkers;
+        public readonly int AnalysisWorkers;
+        public readonly double HistoricalParseSecondsPerGiB;
+        public readonly double HistoricalAnalysisSecondsPerGiB;
+
+        private ResourcePlan(int logicalProcessors, ulong availableMemoryBytes, ulong reservedMemoryBytes,
+            ulong estimatedParseWorkerBytes, ulong estimatedAnalysisWorkerBytes, long demoSize75thPercentileBytes,
+            int parseWorkers, int analysisWorkers, double historicalParseSecondsPerGiB,
+            double historicalAnalysisSecondsPerGiB)
+        {
+            LogicalProcessors = logicalProcessors;
+            AvailableMemoryBytes = availableMemoryBytes;
+            ReservedMemoryBytes = reservedMemoryBytes;
+            EstimatedParseWorkerBytes = estimatedParseWorkerBytes;
+            EstimatedAnalysisWorkerBytes = estimatedAnalysisWorkerBytes;
+            DemoSize75thPercentileBytes = demoSize75thPercentileBytes;
+            ParseWorkers = parseWorkers;
+            AnalysisWorkers = analysisWorkers;
+            HistoricalParseSecondsPerGiB = historicalParseSecondsPerGiB;
+            HistoricalAnalysisSecondsPerGiB = historicalAnalysisSecondsPerGiB;
+        }
+
+        public static ResourcePlan Create(IList<string> demos)
+        {
+            return Create(demos, null);
+        }
+
+        public static ResourcePlan Create(IList<string> demos, BenchmarkHistory history)
+        {
+            int logicalProcessors = Math.Max(1, Environment.ProcessorCount);
+            ulong availableMemory = SystemMemoryInfo.AvailablePhysicalMemoryBytes();
+            long demoP75 = DemoSizePercentile(demos, 0.75);
+
+            // export_all.rs currently reads the full .dem into memory. Leave extra room for
+            // decoded parser/game state and JSON serialization buffers.
+            ulong demoBytes = demoP75 > 0 ? (ulong)demoP75 : 256UL * MiB;
+            ulong estimatedParseWorker = EstimateParseBytes(demoBytes);
+
+            // The Python analyzer loads event/state histories and builds additional indexes.
+            // Keep this conservative until it is ported to Rust and can report exact usage.
+            ulong estimatedAnalysisWorker = EstimateAnalysisBytes(demoBytes);
+            double historicalParseSecondsPerGiB = -1.0;
+            double historicalAnalysisSecondsPerGiB = -1.0;
+            if (history != null)
+            {
+                estimatedParseWorker = history.HistoricalParsePeakBytes(estimatedParseWorker);
+                estimatedAnalysisWorker = history.HistoricalAnalysisPeakBytes(estimatedAnalysisWorker);
+                historicalParseSecondsPerGiB = history.ParseSecondsPerGiB();
+                historicalAnalysisSecondsPerGiB = history.AnalysisSecondsPerGiB();
+            }
+
+            int cpuReserve = logicalProcessors >= 12 ? 2 : (logicalProcessors >= 4 ? 1 : 0);
+            int cpuBudgetWorkers = Math.Max(1, logicalProcessors - cpuReserve);
+
+            ulong reservedMemory = 0;
+            int parseMemoryWorkers = cpuBudgetWorkers;
+            int analysisMemoryWorkers = cpuBudgetWorkers;
+            if (availableMemory > 0)
+            {
+                reservedMemory = Math.Max(2UL * GiB, availableMemory / 5UL);
+                if (reservedMemory >= availableMemory)
+                    reservedMemory = availableMemory / 4UL;
+                ulong usableMemory = availableMemory > reservedMemory ? availableMemory - reservedMemory : availableMemory;
+                parseMemoryWorkers = Math.Max(1, SafeWorkerCount(usableMemory, estimatedParseWorker));
+                analysisMemoryWorkers = Math.Max(1, SafeWorkerCount(usableMemory, estimatedAnalysisWorker));
+            }
+
+            // Full parse/export is also very write-heavy. This scalable I/O ceiling prevents a
+            // high-core-count machine from launching dozens of giant NDJSON writers at once.
+            int parseIoCeiling = Math.Max(2, (int)Math.Ceiling(Math.Sqrt(logicalProcessors) * 2.0));
+            int parseWorkers = Math.Min(cpuBudgetWorkers, Math.Min(parseMemoryWorkers, parseIoCeiling));
+            int analysisWorkers = Math.Min(cpuBudgetWorkers, analysisMemoryWorkers);
+            if (history != null)
+            {
+                parseWorkers = history.RecommendParseWorkers(parseWorkers);
+                analysisWorkers = history.RecommendAnalysisWorkers(analysisWorkers);
+            }
+
+            int demoCount = demos == null ? 0 : demos.Count;
+            if (demoCount > 0)
+            {
+                parseWorkers = Math.Min(parseWorkers, demoCount);
+                analysisWorkers = Math.Min(analysisWorkers, demoCount);
+            }
+            parseWorkers = Math.Max(1, parseWorkers);
+            analysisWorkers = Math.Max(1, analysisWorkers);
+
+            return new ResourcePlan(logicalProcessors, availableMemory, reservedMemory,
+                estimatedParseWorker, estimatedAnalysisWorker, demoP75, parseWorkers, analysisWorkers,
+                historicalParseSecondsPerGiB, historicalAnalysisSecondsPerGiB);
+        }
+
+        public string Describe()
+        {
+            StringBuilder text = new StringBuilder();
+            text.AppendLine("AUTO RESOURCE PLAN");
+            text.AppendLine("Logical CPU processors: " + LogicalProcessors);
+            if (AvailableMemoryBytes > 0)
+            {
+                text.AppendLine("Available physical RAM: " + FormatBytes(AvailableMemoryBytes));
+                text.AppendLine("RAM reserved for Windows/other applications: " + FormatBytes(ReservedMemoryBytes));
+            }
+            else
+            {
+                text.AppendLine("Available physical RAM: unavailable; CPU-only worker planning will be used.");
+            }
+            text.AppendLine("75th percentile demo size: " + FormatBytes(DemoSize75thPercentileBytes > 0 ? (ulong)DemoSize75thPercentileBytes : 0));
+            text.AppendLine("Estimated RAM per parser worker: " + FormatBytes(EstimatedParseWorkerBytes));
+            text.AppendLine("Estimated RAM per analyzer worker: " + FormatBytes(EstimatedAnalysisWorkerBytes));
+            text.AppendLine("Automatic parser workers: " + ParseWorkers);
+            text.AppendLine("Automatic analyzer workers: " + AnalysisWorkers);
+            text.AppendLine("When enough successful same-machine benchmark runs exist at different worker counts, Auto can prefer the measured throughput winner without exceeding current CPU/RAM/I/O limits.");
+            if (HistoricalParseSecondsPerGiB > 0.0)
+                text.AppendLine("Historical parser time: " + HistoricalParseSecondsPerGiB.ToString("0.0") + " seconds per GiB of source demo per worker (median)." );
+            if (HistoricalAnalysisSecondsPerGiB > 0.0)
+                text.AppendLine("Historical analyzer time: " + HistoricalAnalysisSecondsPerGiB.ToString("0.0") + " seconds per GiB of parsed export per worker (median)." );
+            text.AppendLine("Worker RAM estimates learn from recorded peak working-set benchmarks once enough samples exist. The parser-worker count also uses an I/O ceiling because full packet/state NDJSON exports are disk-write heavy. A live gate pauses new jobs when total CPU is already near 95% or free RAM falls below the reserved headroom.");
+            return text.ToString();
+        }
+
+        public static ulong EstimateParseJobBytes(string demoPath)
+        {
+            return EstimateParseBytes(DemoSizeBytes(demoPath));
+        }
+
+        public static ulong EstimateAnalysisJobBytes(string demoPath)
+        {
+            return EstimateAnalysisBytes(DemoSizeBytes(demoPath));
+        }
+
+        private static ulong DemoSizeBytes(string demoPath)
+        {
+            try
+            {
+                if (File.Exists(demoPath)) return (ulong)Math.Max(0L, new FileInfo(demoPath).Length);
+            }
+            catch
+            {
+            }
+            return 256UL * MiB;
+        }
+
+        private static ulong EstimateParseBytes(ulong demoBytes)
+        {
+            ulong estimate = 512UL * MiB + (demoBytes * 2UL);
+            return Clamp(estimate, 768UL * MiB, 8UL * GiB);
+        }
+
+        private static ulong EstimateAnalysisBytes(ulong demoBytes)
+        {
+            ulong estimate = 768UL * MiB + demoBytes;
+            return Clamp(estimate, 1UL * GiB, 8UL * GiB);
+        }
+
+        private static long DemoSizePercentile(IList<string> demos, double percentile)
+        {
+            List<long> sizes = new List<long>();
+            if (demos != null)
+            {
+                foreach (string demo in demos)
+                {
+                    try
+                    {
+                        if (File.Exists(demo)) sizes.Add(new FileInfo(demo).Length);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            if (sizes.Count == 0) return 0;
+            sizes.Sort();
+            int index = (int)Math.Ceiling((sizes.Count - 1) * percentile);
+            if (index < 0) index = 0;
+            if (index >= sizes.Count) index = sizes.Count - 1;
+            return sizes[index];
+        }
+
+        private static int SafeWorkerCount(ulong usableMemory, ulong perWorker)
+        {
+            if (perWorker == 0) return 1;
+            ulong count = usableMemory / perWorker;
+            if (count == 0) return 1;
+            if (count > Int32.MaxValue) return Int32.MaxValue;
+            return (int)count;
+        }
+
+        private static ulong Clamp(ulong value, ulong minimum, ulong maximum)
+        {
+            if (value < minimum) return minimum;
+            if (value > maximum) return maximum;
+            return value;
+        }
+
+        private static string FormatBytes(ulong bytes)
+        {
+            if (bytes >= GiB) return (bytes / (double)GiB).ToString("0.0") + " GB";
+            if (bytes >= MiB) return (bytes / (double)MiB).ToString("0") + " MB";
+            if (bytes >= 1024UL) return (bytes / 1024.0).ToString("0") + " KB";
+            return bytes + " B";
+        }
+    }
+
+    internal sealed class AdaptiveResourceGate : IDisposable
+    {
+        private const double CpuUsageCeilingPercent = 95.0;
+        private readonly object sync = new object();
+        private readonly ulong reservedMemoryBytes;
+        private int activeJobs;
+        private bool disposed;
+
+        public AdaptiveResourceGate(ulong reservedMemoryBytes)
+        {
+            this.reservedMemoryBytes = reservedMemoryBytes;
+        }
+
+        public async Task EnterAsync(ulong estimatedJobBytes, CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                bool allow = false;
+                lock (sync)
+                {
+                    if (disposed) throw new ObjectDisposedException("AdaptiveResourceGate");
+                    ulong available = SystemMemoryInfo.AvailablePhysicalMemoryBytes();
+                    double cpuUsage = SystemCpuInfo.CurrentUsagePercent();
+                    bool memoryOkay = available == 0 || available >= reservedMemoryBytes + estimatedJobBytes;
+                    bool cpuOkay = cpuUsage < 0.0 || cpuUsage < CpuUsageCeilingPercent;
+
+                    // Always allow one job so a transient low-memory/high-CPU reading cannot
+                    // deadlock the whole batch. Additional jobs start only while live RAM and
+                    // live total-CPU pressure remain inside the automatic resource budget.
+                    if (activeJobs == 0 || (memoryOkay && cpuOkay))
+                    {
+                        activeJobs++;
+                        allow = true;
+                    }
+                }
+
+                if (allow) return;
+                await Task.Delay(500, cancellationToken);
+            }
+        }
+
+        public void Exit()
+        {
+            lock (sync)
+            {
+                if (activeJobs > 0) activeJobs--;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (sync)
+            {
+                disposed = true;
+            }
+        }
+    }
+
+    internal static class SystemCpuInfo
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeFileTime
+        {
+            public uint LowDateTime;
+            public uint HighDateTime;
+        }
+
+        private static readonly object sync = new object();
+        private static ulong previousIdle;
+        private static ulong previousKernel;
+        private static ulong previousUser;
+        private static long previousSampleUtcTicks;
+        private static double cachedUsage = -1.0;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetSystemTimes(out NativeFileTime idleTime, out NativeFileTime kernelTime, out NativeFileTime userTime);
+
+        public static double CurrentUsagePercent()
+        {
+            lock (sync)
+            {
+                try
+                {
+                    long now = DateTime.UtcNow.Ticks;
+                    if (previousSampleUtcTicks != 0 && now - previousSampleUtcTicks < TimeSpan.TicksPerMillisecond * 250L)
+                        return cachedUsage;
+
+                    NativeFileTime idleTime;
+                    NativeFileTime kernelTime;
+                    NativeFileTime userTime;
+                    if (!GetSystemTimes(out idleTime, out kernelTime, out userTime)) return -1.0;
+
+                    ulong idle = ToUInt64(idleTime);
+                    ulong kernel = ToUInt64(kernelTime);
+                    ulong user = ToUInt64(userTime);
+
+                    if (previousSampleUtcTicks == 0)
+                    {
+                        previousIdle = idle;
+                        previousKernel = kernel;
+                        previousUser = user;
+                        previousSampleUtcTicks = now;
+                        cachedUsage = -1.0;
+                        return cachedUsage;
+                    }
+
+                    ulong idleDelta = idle >= previousIdle ? idle - previousIdle : 0;
+                    ulong kernelDelta = kernel >= previousKernel ? kernel - previousKernel : 0;
+                    ulong userDelta = user >= previousUser ? user - previousUser : 0;
+                    ulong total = kernelDelta + userDelta;
+
+                    previousIdle = idle;
+                    previousKernel = kernel;
+                    previousUser = user;
+                    previousSampleUtcTicks = now;
+
+                    if (total == 0) return cachedUsage;
+                    ulong busy = total > idleDelta ? total - idleDelta : 0;
+                    cachedUsage = Math.Max(0.0, Math.Min(100.0, (busy * 100.0) / total));
+                    return cachedUsage;
+                }
+                catch
+                {
+                    return -1.0;
+                }
+            }
+        }
+
+        private static ulong ToUInt64(NativeFileTime time)
+        {
+            return ((ulong)time.HighDateTime << 32) | time.LowDateTime;
+        }
+    }
+
+    internal static class SystemMemoryInfo
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MemoryStatusEx
+        {
+            public uint Length;
+            public uint MemoryLoad;
+            public ulong TotalPhysical;
+            public ulong AvailablePhysical;
+            public ulong TotalPageFile;
+            public ulong AvailablePageFile;
+            public ulong TotalVirtual;
+            public ulong AvailableVirtual;
+            public ulong AvailableExtendedVirtual;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+
+        public static ulong AvailablePhysicalMemoryBytes()
+        {
+            try
+            {
+                MemoryStatusEx status = new MemoryStatusEx();
+                status.Length = (uint)Marshal.SizeOf(typeof(MemoryStatusEx));
+                if (GlobalMemoryStatusEx(ref status)) return status.AvailablePhysical;
+            }
+            catch
+            {
+            }
+            return 0;
+        }
+
+        public static ulong TotalPhysicalMemoryBytes()
+        {
+            try
+            {
+                MemoryStatusEx status = new MemoryStatusEx();
+                status.Length = (uint)Marshal.SizeOf(typeof(MemoryStatusEx));
+                if (GlobalMemoryStatusEx(ref status)) return status.TotalPhysical;
+            }
+            catch
+            {
+            }
+            return 0;
+        }
     }
 
     internal sealed class CandidateViewerForm : Form
@@ -538,6 +1402,7 @@ namespace Tf2StvParserGui
         private readonly ComboBox recordingFps = new ComboBox();
         private readonly NumericUpDown jpgQuality = new NumericUpDown();
         private readonly ComboBox recordingOutput = new ComboBox();
+        private readonly Label recordingEstimate = new Label();
         private readonly Button inlinePreviewButton = GreenButton("Preview Selected Clip in TF2", 190);
         private readonly Button selectAllButton = GreenButton("Select all visible", 135);
         private readonly Button recordButton = GreenButton("Record selected with HLAE", 205);
@@ -547,6 +1412,7 @@ namespace Tf2StvParserGui
         private string tf2Executable;
         private bool detailsScrollPending;
         private int clickedSelectedRow = -1;
+        private bool applyingFilter;
 
         public event EventHandler BackRequested;
 
@@ -597,16 +1463,17 @@ namespace Tf2StvParserGui
             layout.Padding = new Padding(14);
             layout.ColumnCount = 1;
             layout.RowCount = 2;
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 152));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 188));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             Controls.Add(layout);
 
             TableLayoutPanel filters = new TableLayoutPanel();
             filters.Dock = DockStyle.Fill;
             filters.ColumnCount = 1;
-            filters.RowCount = 4;
+            filters.RowCount = 5;
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+            filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             FlowLayoutPanel heading = new FlowLayoutPanel();
@@ -624,11 +1491,11 @@ namespace Tf2StvParserGui
             filterControls.FlowDirection = FlowDirection.LeftToRight;
             filterControls.WrapContents = false;
             Label filterLabel = new Label();
-            filterLabel.Text = "Filter candidates (tags, class, team, weapon, or player ID)";
+            filterLabel.Text = "Filter (field-specific: +class:demoman -map:cp_steel; combine multiple filters)";
             filterLabel.AutoSize = true;
             filterLabel.Margin = new Padding(3, 9, 4, 2);
             filterControls.Controls.Add(filterLabel);
-            filterBox.Width = 230;
+            filterBox.Width = 360;
             filterBox.Margin = new Padding(0, 5, 14, 2);
             filterBox.TextChanged += delegate { ApplyFilter(); };
             filterControls.Controls.Add(filterBox);
@@ -667,6 +1534,7 @@ namespace Tf2StvParserGui
             leadInSeconds.Value = 8;
             leadInSeconds.Increment = 1;
             leadInSeconds.Margin = new Padding(0, 5, 10, 2);
+            leadInSeconds.ValueChanged += delegate { UpdateRecordingEstimate(); };
             playbackControls.Controls.Add(leadInSeconds);
             Label outroLabel = new Label();
             outroLabel.Text = "Seconds after last event";
@@ -678,6 +1546,7 @@ namespace Tf2StvParserGui
             outroSeconds.Maximum = 60;
             outroSeconds.Value = 3;
             outroSeconds.Margin = new Padding(0, 5, 10, 2);
+            outroSeconds.ValueChanged += delegate { UpdateRecordingEstimate(); };
             playbackControls.Controls.Add(outroSeconds);
             Label fpsLabel = new Label();
             fpsLabel.Text = "Capture FPS";
@@ -692,6 +1561,7 @@ namespace Tf2StvParserGui
             recordingFps.Items.Add("480");
             recordingFps.SelectedIndex = 1;
             recordingFps.Margin = new Padding(0, 5, 10, 2);
+            recordingFps.SelectedIndexChanged += delegate { UpdateRecordingEstimate(); };
             playbackControls.Controls.Add(recordingFps);
             filters.Controls.Add(playbackControls, 0, 2);
 
@@ -726,6 +1596,7 @@ namespace Tf2StvParserGui
             jpgQuality.Maximum = 100;
             jpgQuality.Value = 90;
             jpgQuality.Margin = new Padding(0, 5, 14, 2);
+            jpgQuality.ValueChanged += delegate { UpdateRecordingEstimate(); };
             recordingControls.Controls.Add(jpgQuality);
             selectAllButton.Margin = new Padding(4, 3, 2, 2);
             selectAllButton.Click += delegate { SelectAllVisibleCandidates(); };
@@ -738,6 +1609,12 @@ namespace Tf2StvParserGui
             inlinePreviewButton.Click += delegate { LaunchSelectedCandidate(); };
             recordingControls.Controls.Add(inlinePreviewButton);
             filters.Controls.Add(recordingControls, 0, 3);
+            recordingEstimate.Dock = DockStyle.Fill;
+            recordingEstimate.AutoEllipsis = true;
+            recordingEstimate.ForeColor = Color.LightSkyBlue;
+            recordingEstimate.TextAlign = ContentAlignment.MiddleLeft;
+            recordingEstimate.Margin = new Padding(14, 0, 3, 0);
+            filters.Controls.Add(recordingEstimate, 0, 4);
             layout.Controls.Add(filters, 0, 0);
 
             SplitContainer split = new SplitContainer();
@@ -774,6 +1651,7 @@ namespace Tf2StvParserGui
             AddColumn("Class", 95);
             AddColumn("Team", 72);
             AddColumn("Demo", 170);
+            AddColumn("Map", 170);
             AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 400);
             grid.SelectionChanged += ShowSelectedCandidate;
@@ -875,15 +1753,24 @@ namespace Tf2StvParserGui
         private void ApplyFilter()
         {
             if (grid.Columns.Count == 0) return;
-            string filter = filterBox.Text.Trim().ToLowerInvariant();
+            HashSet<string> selectedCandidateKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (DataGridViewRow selectedRow in grid.SelectedRows)
+            {
+                IDictionary selectedCandidate = selectedRow.Tag as IDictionary;
+                if (selectedCandidate != null) selectedCandidateKeys.Add(CandidateSelectionKey(selectedCandidate));
+            }
+            string filter = filterBox.Text.Trim();
             decimal requiredScore = minimumScore.Value;
+            applyingFilter = true;
             grid.Rows.Clear();
             int visible = 0;
+            string exportDirectory = Path.GetDirectoryName(candidatesPath);
             foreach (CandidateRecord record in records)
             {
                 if (record.Score < requiredScore) continue;
-                if (filter.Length > 0 && record.SearchText.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0) continue;
                 IDictionary candidate = record.Candidate;
+                string mapName = BatchCandidateSupport.CandidateMapName(candidate, exportDirectory);
+                if (!CandidateMatchesFilter(record, candidate, mapName, demoPath, filter)) continue;
                 IDictionary metrics = Map(candidate, "metrics");
                 IList killTicks = List(candidate, "point_of_kill_ticks");
                 int row = grid.Rows.Add(
@@ -894,19 +1781,330 @@ namespace Tf2StvParserGui
                     DisplayValue(candidate, "attacker_class"),
                     DisplayValue(candidate, "attacker_team"),
                     BatchCandidateSupport.CandidateDemoName(candidate, demoPath),
+                    mapName,
                     JoinValues(killTicks),
                     JoinCandidateTags(Value(candidate, "tags")));
                 grid.Rows[row].Tag = candidate;
                 visible++;
             }
+            grid.ClearSelection();
+            grid.CurrentCell = null;
+            if (selectedCandidateKeys.Count > 0)
+            {
+                foreach (DataGridViewRow row in grid.Rows)
+                {
+                    IDictionary candidate = row.Tag as IDictionary;
+                    if (candidate != null && selectedCandidateKeys.Contains(CandidateSelectionKey(candidate))) row.Selected = true;
+                }
+            }
+            applyingFilter = false;
             FitCandidateColumnsToContent();
             summary.Text = visible + " of " + records.Count + " ranked candidates. Select one or more rows before recording.";
-            ClearCandidateSelection();
             if (grid.Rows.Count == 0)
                 details.Text = records.Count == 0 ? "No candidates were produced for this demo." : "No candidates match the current filter.";
             else
                 details.Clear();
             UpdateCandidateActionAvailability();
+        }
+
+        private string CandidateSelectionKey(IDictionary candidate)
+        {
+            return BatchCandidateSupport.CandidateDemoPath(candidate, demoPath) + "|" +
+                TextValue(candidate, "candidate_id") + "|" +
+                ClipTick(candidate, "clip_start_tick", "start_tick") + "|" +
+                ClipTick(candidate, "clip_end_tick", "end_tick");
+        }
+
+        private static bool CandidateMatchesFilter(CandidateRecord record, IDictionary candidate, string mapName, string fallbackDemoPath, string filter)
+        {
+            if (String.IsNullOrWhiteSpace(filter)) return true;
+            string demoName = BatchCandidateSupport.CandidateDemoName(candidate, fallbackDemoPath);
+            string demoPathValue = BatchCandidateSupport.CandidateDemoPath(candidate, fallbackDemoPath);
+            string searchText = String.Join(" ", new string[]
+            {
+                record.SearchText ?? "",
+                mapName ?? "",
+                demoName ?? "",
+                demoPathValue ?? "",
+                TextValue(candidate, "attacker_class"),
+                TextValue(candidate, "attacker_team"),
+                TextValue(candidate, "attacker_user_id"),
+                JoinCandidateTags(Value(candidate, "tags"))
+            });
+            CandidateFilterExpression expression = CandidateFilterExpression.Parse(filter);
+            return expression.Matches(
+                delegate(string field, string value)
+                {
+                    return CandidateFieldMatches(candidate, mapName, fallbackDemoPath, field, value, searchText);
+                },
+                delegate(string value) { return ContainsFilterValue(searchText, value); });
+        }
+
+        private static bool CandidateFieldMatches(IDictionary candidate, string mapName, string fallbackDemoPath, string field, string value, string searchText)
+        {
+            if (String.Equals(field, "map", StringComparison.OrdinalIgnoreCase))
+                return ContainsFilterValue(mapName, value);
+
+            if (String.Equals(field, "class", StringComparison.OrdinalIgnoreCase))
+            {
+                if (ClassValueMatches(TextValue(candidate, "attacker_class"), value)) return true;
+                IDictionary attacker = Map(candidate, "attacker");
+                if (ClassValueMatches(TextValue(attacker, "class"), value) ||
+                    ClassValueMatches(TextValue(attacker, "class_id"), value) ||
+                    ClassValueMatches(TextValue(attacker, "player_class"), value)) return true;
+                IList kills = List(candidate, "kills");
+                for (int index = 0; index < kills.Count; index++)
+                {
+                    IDictionary kill = kills[index] as IDictionary;
+                    if (kill == null) continue;
+                    if (ClassValueMatches(TextValue(kill, "attacker_class"), value)) return true;
+                    IDictionary killAttacker = Map(kill, "attacker");
+                    if (ClassValueMatches(TextValue(killAttacker, "class"), value) ||
+                        ClassValueMatches(TextValue(killAttacker, "class_id"), value)) return true;
+                }
+                return false;
+            }
+
+            if (String.Equals(field, "team", StringComparison.OrdinalIgnoreCase))
+            {
+                if (TeamValueMatches(TextValue(candidate, "attacker_team"), value)) return true;
+                IDictionary attacker = Map(candidate, "attacker");
+                if (TeamValueMatches(TextValue(attacker, "team"), value) ||
+                    TeamValueMatches(TextValue(attacker, "team_id"), value)) return true;
+                IList kills = List(candidate, "kills");
+                for (int index = 0; index < kills.Count; index++)
+                {
+                    IDictionary kill = kills[index] as IDictionary;
+                    if (kill == null) continue;
+                    if (TeamValueMatches(TextValue(kill, "attacker_team"), value)) return true;
+                    IDictionary killAttacker = Map(kill, "attacker");
+                    if (TeamValueMatches(TextValue(killAttacker, "team"), value) ||
+                        TeamValueMatches(TextValue(killAttacker, "team_id"), value)) return true;
+                }
+                return false;
+            }
+
+            if (String.Equals(field, "demo", StringComparison.OrdinalIgnoreCase))
+            {
+                string name = BatchCandidateSupport.CandidateDemoName(candidate, fallbackDemoPath);
+                string path = BatchCandidateSupport.CandidateDemoPath(candidate, fallbackDemoPath);
+                return ContainsFilterValue(name, value) || ContainsFilterValue(path, value);
+            }
+
+            if (String.Equals(field, "weapon", StringComparison.OrdinalIgnoreCase))
+            {
+                if (ContainsFilterValue(TextValue(candidate, "weapon"), value) ||
+                    ContainsFilterValue(TextValue(candidate, "weapon_logclassname"), value)) return true;
+                IList kills = List(candidate, "kills");
+                for (int index = 0; index < kills.Count; index++)
+                {
+                    IDictionary kill = kills[index] as IDictionary;
+                    if (kill == null) continue;
+                    if (ContainsFilterValue(TextValue(kill, "weapon"), value)) return true;
+                    if (ContainsFilterValue(TextValue(kill, "weapon_logclassname"), value)) return true;
+                    if (ContainsFilterValue(TextValue(kill, "weapon_name"), value)) return true;
+                }
+                return false;
+            }
+
+            if (String.Equals(field, "player", StringComparison.OrdinalIgnoreCase))
+            {
+                string wanted = value.Trim().TrimStart('#');
+                if (PlayerValueMatches(candidate, wanted)) return true;
+                IList kills = List(candidate, "kills");
+                for (int index = 0; index < kills.Count; index++)
+                {
+                    IDictionary kill = kills[index] as IDictionary;
+                    if (kill != null && PlayerValueMatches(kill, wanted)) return true;
+                }
+                return false;
+            }
+
+            if (String.Equals(field, "tag", StringComparison.OrdinalIgnoreCase))
+            {
+                IList tags = Value(candidate, "tags") as IList;
+                if (tags != null)
+                {
+                    foreach (object tag in tags)
+                    {
+                        string raw = Convert.ToString(tag);
+                        if (ContainsFilterValue(raw, value) || ContainsFilterValue(CandidateTagName(raw), value)) return true;
+                    }
+                }
+                return false;
+            }
+
+            if (String.Equals(field, "text", StringComparison.OrdinalIgnoreCase))
+                return ContainsFilterValue(searchText, value);
+
+            return false;
+        }
+
+        private static bool PlayerValueMatches(IDictionary values, string wanted)
+        {
+            if (values == null || String.IsNullOrWhiteSpace(wanted)) return false;
+            string id = TextValue(values, "attacker_user_id").TrimStart('#');
+            if (String.Equals(id, wanted, StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (string key in new string[] { "attacker_name", "attacker_steamid", "attacker_steam_id", "attacker_steamid64" })
+                if (ContainsFilterValue(TextValue(values, key), wanted)) return true;
+
+            IDictionary attacker = Map(values, "attacker");
+            foreach (string key in new string[] { "user_id", "userid", "name", "steamid", "steam_id", "steamid64" })
+            {
+                string nested = TextValue(attacker, key);
+                if ((key == "user_id" || key == "userid") && String.Equals(nested.TrimStart('#'), wanted, StringComparison.OrdinalIgnoreCase)) return true;
+                if (key != "user_id" && key != "userid" && ContainsFilterValue(nested, wanted)) return true;
+            }
+            return false;
+        }
+
+        private static bool ClassValueMatches(string actual, string wanted)
+        {
+            if (ContainsFilterValue(actual, wanted)) return true;
+            string normalizedActual = NormalizeClassValue(actual);
+            string normalizedWanted = NormalizeClassValue(wanted);
+            return normalizedActual.Length > 0 && normalizedWanted.Length > 0 &&
+                (ContainsFilterValue(normalizedActual, normalizedWanted) || ContainsFilterValue(normalizedWanted, normalizedActual));
+        }
+
+        private static string NormalizeClassValue(string value)
+        {
+            string text = (value ?? "").Trim().ToLowerInvariant();
+            int numeric;
+            if (Int32.TryParse(text, out numeric))
+            {
+                switch (numeric)
+                {
+                    case 1: return "scout";
+                    case 2: return "sniper";
+                    case 3: return "soldier";
+                    case 4: return "demoman";
+                    case 5: return "medic";
+                    case 6: return "heavy";
+                    case 7: return "pyro";
+                    case 8: return "spy";
+                    case 9: return "engineer";
+                }
+            }
+            if (text == "demo") return "demoman";
+            if (text == "engi" || text == "engie") return "engineer";
+            if (text == "heavyweapons" || text == "heavyweaponsguy") return "heavy";
+            return text.Replace(" ", "").Replace("_", "").Replace("-", "");
+        }
+
+        private static bool TeamValueMatches(string actual, string wanted)
+        {
+            if (ContainsFilterValue(actual, wanted)) return true;
+            string normalizedActual = NormalizeTeamValue(actual);
+            string normalizedWanted = NormalizeTeamValue(wanted);
+            return normalizedActual.Length > 0 && normalizedActual == normalizedWanted;
+        }
+
+        private static string NormalizeTeamValue(string value)
+        {
+            string text = (value ?? "").Trim().ToLowerInvariant();
+            if (text == "2" || text == "red") return "red";
+            if (text == "3" || text == "blu" || text == "blue") return "blu";
+            if (text == "1" || text == "spectator" || text == "spec") return "spectator";
+            return text;
+        }
+
+        private static int FirstFilterSeparator(string token)
+        {
+            int colon = token.IndexOf(':');
+            int equals = token.IndexOf('=');
+            if (colon < 0) return equals;
+            if (equals < 0) return colon;
+            return Math.Min(colon, equals);
+        }
+
+        private static string CanonicalFilterField(string field)
+        {
+            string value = (field ?? "").Trim().ToLowerInvariant();
+            if (value == "maps") value = "map";
+            else if (value == "classes") value = "class";
+            else if (value == "teams") value = "team";
+            else if (value == "demos") value = "demo";
+            else if (value == "weapons") value = "weapon";
+            else if (value == "players") value = "player";
+            else if (value == "tags") value = "tag";
+            return IsFilterField(value) ? value : "";
+        }
+
+        private static bool IsFilterField(string field)
+        {
+            return String.Equals(field, "map", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "maps", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "class", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "classes", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "team", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "teams", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "demo", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "demos", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "weapon", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "weapons", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "player", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "players", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "tag", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "tags", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "text", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ContainsFilterValue(string source, string value)
+        {
+            return !String.IsNullOrEmpty(source) && !String.IsNullOrEmpty(value) &&
+                source.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static List<string> SplitFilterTokens(string filter)
+        {
+            List<string> tokens = new List<string>();
+            StringBuilder current = new StringBuilder();
+            bool inQuotes = false;
+            for (int index = 0; index < (filter ?? "").Length; index++)
+            {
+                char character = filter[index];
+                if (character == '\"')
+                {
+                    inQuotes = !inQuotes;
+                    current.Append(character);
+                }
+                else if ((Char.IsWhiteSpace(character) || character == ',') && !inQuotes)
+                {
+                    if (current.Length > 0)
+                    {
+                        tokens.Add(current.ToString());
+                        current.Length = 0;
+                    }
+                }
+                else
+                {
+                    current.Append(character);
+                }
+            }
+            if (current.Length > 0) tokens.Add(current.ToString());
+            return tokens;
+        }
+
+        private static string UnquoteFilterValue(string value)
+        {
+            if (String.IsNullOrEmpty(value)) return "";
+            string text = value.Trim();
+            if (text.Length >= 2 && text[0] == '\"' && text[text.Length - 1] == '\"')
+                return text.Substring(1, text.Length - 2);
+            return text.Replace("\"", "");
+        }
+
+        private sealed class FilterTerm
+        {
+            public readonly string Field;
+            public readonly string Value;
+
+            public FilterTerm(string field, string value)
+            {
+                Field = field;
+                Value = value;
+            }
         }
 
         private void FitCandidateColumnsToContent()
@@ -919,6 +2117,25 @@ namespace Tf2StvParserGui
                 column.MinimumWidth = minimumWidth;
                 column.Width = minimumWidth;
             }
+        }
+
+        private void UpdateRecordingEstimate()
+        {
+            List<IDictionary> selected = new List<IDictionary>();
+            foreach (DataGridViewRow row in grid.SelectedRows)
+            {
+                IDictionary candidate = row.Tag as IDictionary;
+                if (candidate != null) selected.Add(candidate);
+            }
+            if (selected.Count == 0)
+            {
+                recordingEstimate.Text = "Recording size estimate: select one or more candidates.";
+                return;
+            }
+            int captureFps = Convert.ToInt32(recordingFps.SelectedItem);
+            HlaeRecordingOutput output = HlaeRecordingOutputs.FromDisplayName(Convert.ToString(recordingOutput.SelectedItem));
+            RecordingSizeEstimate estimate = HlaeRecordingSizeEstimator.Estimate(selected, leadInSeconds.Value, outroSeconds.Value, captureFps, output, (int)jpgQuality.Value, HlaeBatchRecorder.SavedRecordingResolution());
+            recordingEstimate.Text = "Recording size estimate: " + estimate.Summary(output, (int)jpgQuality.Value);
         }
 
         private void LaunchSelectedCandidate()
@@ -1064,6 +2281,7 @@ namespace Tf2StvParserGui
             bool hasSelection = selectedCount > 0;
             recordButton.Enabled = hasSelection;
             inlinePreviewButton.Visible = selectedCount == 1;
+            UpdateRecordingEstimate();
         }
 
         private void RecordSelectedCandidates()
@@ -1105,6 +2323,7 @@ namespace Tf2StvParserGui
             if (HlaeRecordingOutputs.RequiresFfmpeg(output)) note += " (requires HLAE FFmpeg)";
             if (jpg) note += " (100 is highest quality; 90 is the default)";
             summary.Text = note;
+            UpdateRecordingEstimate();
         }
 
         private static string WritePlaybackVdm(string gameDirectory, string stagedDemo, int targetTick, int stvAttackerUserId)
@@ -1185,6 +2404,7 @@ namespace Tf2StvParserGui
 
         private void ShowSelectedCandidate(object sender, EventArgs e)
         {
+            if (applyingFilter) return;
             UpdateCandidateActionAvailability();
             if (grid.SelectedRows.Count == 0)
             {

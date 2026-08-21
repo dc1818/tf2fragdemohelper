@@ -15,9 +15,7 @@ import math
 import os
 import re
 import sys
-import time
-from concurrent.futures import ProcessPoolExecutor
-from bisect import bisect_left, bisect_right
+from bisect import bisect_right
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -385,25 +383,14 @@ class StateTimeline:
         self.players: Dict[int, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
         self.projectiles: Dict[int, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
         self.projectile_removals: Dict[int, List[int]] = defaultdict(list)
-        self.player_ticks: Dict[int, List[int]] = {}
-        self.projectile_ticks: Dict[int, List[int]] = {}
-        self.projectiles_by_launcher: Dict[int, set] = defaultdict(set)
         self.sample_count = 0
         self.ignored_out_of_range_samples = 0
-        self.state_lookup_count = 0
-        self.unindexed_state_lookup_count = 0
-        self.projectile_lookup_calls = 0
-        self.projectile_tracks_examined = 0
 
-    def _at(self, history: List[Tuple[int, Dict[str, Any]]], tick: int, require_alive: bool = False,
-            ticks: Optional[List[int]] = None) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _at(history: List[Tuple[int, Dict[str, Any]]], tick: int, require_alive: bool = False) -> Optional[Dict[str, Any]]:
         if not history:
             return None
-        self.state_lookup_count += 1
-        if ticks is None:
-            self.unindexed_state_lookup_count += 1
-            ticks = [item[0] for item in history]
-        index = bisect_right(ticks, tick) - 1
+        index = bisect_right([item[0] for item in history], tick) - 1
         while index >= 0:
             state = history[index][1]
             if not require_alive or (as_text(state.get("life_state")).lower() == "alive" and as_int(state.get("health")) > 0):
@@ -412,26 +399,7 @@ class StateTimeline:
         return None
 
     def player_at(self, user_id: int, tick: int, require_alive: bool = False) -> Optional[Dict[str, Any]]:
-        return self._at(self.players.get(user_id, []), tick, require_alive, self.player_ticks.get(user_id))
-
-    def projectile_at(self, entity_id: int, tick: int) -> Optional[Dict[str, Any]]:
-        return self._at(self.projectiles.get(entity_id, []), tick, False, self.projectile_ticks.get(entity_id))
-
-    def projectile_entities_for_handles(self, handles: Iterable[int]) -> List[int]:
-        self.projectile_lookup_calls += 1
-        # Unit tests and callers may construct StateTimeline directly instead
-        # of using read_state_timeline(), in which case the launcher index has
-        # not been finalized. Preserve the old correct behavior as a fallback.
-        if self.projectiles and not self.projectiles_by_launcher:
-            result = sorted(self.projectiles.keys())
-            self.projectile_tracks_examined += len(result)
-            return result
-        entity_ids = set()
-        for handle in handles:
-            entity_ids.update(self.projectiles_by_launcher.get(as_int(handle), set()))
-        result = sorted(entity_ids)
-        self.projectile_tracks_examined += len(result)
-        return result
+        return self._at(self.players.get(user_id, []), tick, require_alive)
 
     def last_player_flag_tick(self, user_id: int, tick: int, field: str, window_ticks: int) -> Optional[int]:
         """Find recent positive reconstructed state for a short causal window."""
@@ -447,8 +415,8 @@ class StateTimeline:
     def team_counts_at(self, tick: int) -> Tuple[Dict[str, int], Dict[str, int]]:
         alive: Dict[str, int] = defaultdict(int)
         roster: Dict[str, int] = defaultdict(int)
-        for user_id, history in self.players.items():
-            state = self._at(history, tick, False, self.player_ticks.get(user_id))
+        for history in self.players.values():
+            state = self._at(history, tick)
             if state is None:
                 continue
             team = canonical_team(state.get("team"))
@@ -466,8 +434,8 @@ class StateTimeline:
         dead entity is not an Uber advantage and must not create a sack tag.
         """
         charges = []
-        for user_id, history in self.players.items():
-            state = self._at(history, tick, require_alive=True, ticks=self.player_ticks.get(user_id))
+        for history in self.players.values():
+            state = self._at(history, tick, require_alive=True)
             if state is None:
                 continue
             if canonical_team(state.get("team")) != canonical_team(team):
@@ -493,7 +461,7 @@ class StateTimeline:
         respawns: List[int] = []
         wanted_team = canonical_team(team)
         for user_id, history in self.players.items():
-            state = self._at(history, tick, False, self.player_ticks.get(user_id))
+            state = self._at(history, tick)
             if state is None or canonical_team(state.get("team")) != wanted_team:
                 continue
             alive = as_text(state.get("life_state")).lower() == "alive" and as_int(state.get("health")) > 0
@@ -564,15 +532,8 @@ def read_state_timeline(path: Path, debug: bool = False, max_demo_tick: Optional
     # the histories to be monotonic regardless of input order.
     for history in timeline.players.values():
         history.sort(key=lambda item: item[0])
-    for user_id, history in timeline.players.items():
-        timeline.player_ticks[user_id] = [item[0] for item in history]
-    for entity_id, history in timeline.projectiles.items():
+    for history in timeline.projectiles.values():
         history.sort(key=lambda item: item[0])
-        timeline.projectile_ticks[entity_id] = [item[0] for item in history]
-        for _, state in history:
-            launcher_handle = as_int(state.get("launcher_handle"))
-            if launcher_handle:
-                timeline.projectiles_by_launcher[launcher_handle].add(entity_id)
     for removals in timeline.projectile_removals.values():
         removals.sort()
     if debug:
@@ -646,11 +607,8 @@ def matching_projectile(timeline: StateTimeline, kill: Dict[str, Any], attacker_
         return None
     victim_position = vector3(victim_state.get("position"))
     best: Optional[Tuple[float, Dict[str, Any]]] = None
-    # Launcher handles are stable enough to pre-index projectile entities.
-    # This avoids scanning every projectile track in the demo for every kill.
-    for entity_id in timeline.projectile_entities_for_handles(handles):
-        history = timeline.projectiles.get(entity_id, [])
-        projectile = timeline.projectile_at(entity_id, tick + 3)
+    for entity_id, history in timeline.projectiles.items():
+        projectile = timeline._at(history, tick + 3)
         if projectile is None or as_int(projectile.get("launcher_handle")) not in handles:
             continue
         if not projectile_type_matches_weapon(as_text(projectile.get("projectile_type")), kill["weapon"]):
@@ -707,11 +665,9 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
     # attributed to the Medic who deployed, not merely to an Uber-like state
     # seen on the POV player's team.
     deploys: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    deploys_by_target: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    deploy_events: List[Dict[str, Any]] = []
-    hurt_events_by_pair: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
+    hurt_events: List[Dict[str, Any]] = []
     charged_deaths = set()
-    friendly_losses_by_round_team: Dict[Tuple[int, str], List[Tuple[int, int]]] = defaultdict(list)
+    friendly_loss_events: List[Tuple[int, int, str, int]] = []
     team_history = teams or {}
     pov_user_id = as_int((context or {}).get("pov_player_user_id")) if (context or {}).get("analysis_scope") == "pov_player_only" else 0
     for event in events:
@@ -719,28 +675,22 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         if event_name(event) == "player_chargedeployed":
             medic_user_id = as_int(fields.get("user_id", fields.get("userid")))
             if medic_user_id:
-                deploy = {
+                deploys[medic_user_id].append({
                     "event_tick": event["tick"],
                     "target_user_id": as_int(fields.get("target_id", fields.get("targetid"))),
-                    "medic_user_id": medic_user_id,
-                }
-                deploys[medic_user_id].append(deploy)
-                deploy_events.append(deploy)
-                if deploy["target_user_id"]:
-                    deploys_by_target[deploy["target_user_id"]].append(deploy)
+                })
         elif event_name(event) == "player_hurt":
             attacker = as_int(fields.get("attacker"))
             victim = as_int(fields.get("user_id", fields.get("userid")))
             if attacker and victim and attacker != victim:
-                hurt = {
+                hurt_events.append({
                     "event_tick": event["tick"],
                     "attacker_user_id": attacker,
                     "victim_user_id": victim,
                     "weapon_id": as_int(fields.get("weapon_id", fields.get("weaponid"))),
                     "damage_amount": as_int(fields.get("damage_amount", fields.get("damageamount"))),
                     "mini_crit": as_bool(fields.get("mini_crit", fields.get("minicrit"))),
-                }
-                hurt_events_by_pair[(attacker, victim)].append(hurt)
+                })
         elif event_name(event) == "medic_death" and as_bool(fields.get("charged"), False):
             charged_deaths.add((event["tick"], as_int(fields.get("user_id", fields.get("userid")))))
         elif event_name(event) == "player_death":
@@ -757,20 +707,7 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
             victim_state = timeline.player_at(victim, max(0, tick - 1), require_alive=True)
             victim_team = canonical_team(victim_state.get("team")) if victim_state is not None else ""
             if victim_team in {"red", "blu"}:
-                friendly_losses_by_round_team[(as_int(round_data.get("round_index")) if round_data else 0, victim_team)].append((tick, victim))
-
-    deploy_events.sort(key=lambda item: item["event_tick"])
-    deploy_event_ticks = [item["event_tick"] for item in deploy_events]
-    for values in deploys.values():
-        values.sort(key=lambda item: item["event_tick"])
-    for values in deploys_by_target.values():
-        values.sort(key=lambda item: item["event_tick"])
-    for values in hurt_events_by_pair.values():
-        values.sort(key=lambda item: item["event_tick"])
-    friendly_loss_ticks: Dict[Tuple[int, str], List[int]] = {}
-    for key, values in friendly_losses_by_round_team.items():
-        values.sort(key=lambda item: item[0])
-        friendly_loss_ticks[key] = [item[0] for item in values]
+                friendly_loss_events.append((tick, victim, victim_team, as_int(round_data.get("round_index")) if round_data else 0))
 
     for kill in deaths:
         tick = kill["event_tick"]
@@ -806,12 +743,13 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         attacker_team = canonical_team(kill.get("attacker_team"))
         victim_team = canonical_team(kill.get("victim_team"))
         current_round_index = as_int(kill.get("round_index"))
-        loss_key = (current_round_index, attacker_team)
-        loss_values = friendly_losses_by_round_team.get(loss_key, [])
-        loss_ticks = friendly_loss_ticks.get(loss_key, [])
-        loss_start = bisect_left(loss_ticks, tick - SACK_RECOVERY_TICKS)
-        loss_end = bisect_left(loss_ticks, tick)
-        recent_losses = [item for item in loss_values[loss_start:loss_end] if 0 < tick - item[0] <= SACK_RECOVERY_TICKS]
+        recent_losses = [
+            (loss_tick, loss_user_id)
+            for loss_tick, loss_user_id, loss_team, loss_round_index in friendly_loss_events
+            if loss_team == attacker_team
+            and (rounds is None or loss_round_index == current_round_index)
+            and 0 < tick - loss_tick <= SACK_RECOVERY_TICKS
+        ]
         # A teammate can die twice in a long enough window. Count distinct
         # players so the label really means at least two teammates were lost.
         recent_loss_users = sorted({loss_user_id for _, loss_user_id in recent_losses})
@@ -822,11 +760,11 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
             or (enemy_medic_charge >= 75 and (friendly_medic_charge is None or enemy_medic_charge - friendly_medic_charge >= UBER_ADVANTAGE_CHARGE_GAP))
         )
         force_followups = []
-        deploy_start = bisect_left(deploy_event_ticks, tick)
-        deploy_end = bisect_right(deploy_event_ticks, tick + MEDIC_FORCE_FOLLOWUP_TICKS)
-        for deploy in deploy_events[deploy_start:deploy_end]:
-                medic_user_id = as_int(deploy.get("medic_user_id"))
+        for medic_user_id, deploy_events in deploys.items():
+            for deploy in deploy_events:
                 deploy_tick = deploy["event_tick"]
+                if deploy_tick < tick or deploy_tick - tick > MEDIC_FORCE_FOLLOWUP_TICKS:
+                    continue
                 # State samples represent applied packet deltas. Read just
                 # before the event so this validates the Medic's active team
                 # and class at the actual deployment moment.
@@ -871,21 +809,12 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
                 # avoids crediting a POV player's unrelated Engineer pick for
                 # their own team's or an independent enemy Uber.
                 target_user_id = deploy.get("target_user_id", 0)
-                pressure_events = []
-                pressure_seen = set()
-                for pressure_victim in {medic_user_id, target_user_id}:
-                    if not pressure_victim:
-                        continue
-                    for hurt in hurt_events_by_pair.get((attacker, pressure_victim), []):
-                        hurt_tick = hurt["event_tick"]
-                        if hurt_tick > deploy_tick:
-                            break
-                        if deploy_tick - hurt_tick > MEDIC_FORCE_PRESSURE_TICKS:
-                            continue
-                        pressure_key = (hurt_tick, pressure_victim, hurt.get("weapon_id"), hurt.get("damage_amount"), hurt.get("mini_crit"))
-                        if pressure_key not in pressure_seen:
-                            pressure_seen.add(pressure_key)
-                            pressure_events.append(hurt)
+                pressure_events = [
+                    hurt for hurt in hurt_events
+                    if hurt["attacker_user_id"] == attacker
+                    and hurt["victim_user_id"] in {medic_user_id, target_user_id}
+                    and 0 <= deploy_tick - hurt["event_tick"] <= MEDIC_FORCE_PRESSURE_TICKS
+                ]
                 if not pressure_events:
                     if debug:
                         print("[candidate-debug] reject medic_force tick={} medic={} target={} attacker={} reason=no_direct_candidate_pressure".format(deploy_tick, medic_user_id, target_user_id or "unknown", attacker))
@@ -909,13 +838,13 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         )
         kritz_deployments = []
         if attacker_state is not None and bool(attacker_state.get("kritz_boosted")):
-            for deploy in deploys_by_target.get(attacker, []):
+            for medic_user_id, deploy_events in deploys.items():
+                for deploy in deploy_events:
                     deploy_tick = as_int(deploy.get("event_tick"))
-                    if deploy_tick > tick:
-                        break
-                    if tick - deploy_tick > KRITZKRIEG_DURATION_TICKS:
+                    if not (0 <= tick - deploy_tick <= KRITZKRIEG_DURATION_TICKS):
                         continue
-                    medic_user_id = as_int(deploy.get("medic_user_id"))
+                    if as_int(deploy.get("target_user_id")) != attacker:
+                        continue
                     medic_state = timeline.player_at(medic_user_id, max(0, deploy_tick - 1), require_alive=True)
                     if medic_state is None or as_text(medic_state.get("class")).lower() != "medic":
                         continue
@@ -932,8 +861,10 @@ def enrich_state_evidence(deaths: List[Dict[str, Any]], events: List[Dict[str, A
         if kill.get("weapon") in LOOSE_CANNON_WEAPONS:
             kill_weapon_id = as_int(kill.get("weapon_id"))
             matching_hurts = [
-                hurt for hurt in hurt_events_by_pair.get((attacker, victim), [])
-                if hurt["event_tick"] <= tick
+                hurt for hurt in hurt_events
+                if hurt["attacker_user_id"] == attacker
+                and hurt["victim_user_id"] == victim
+                and hurt["event_tick"] <= tick
                 and (not kill_weapon_id or hurt["weapon_id"] == kill_weapon_id)
             ]
             for impact in matching_hurts:
@@ -1176,26 +1107,7 @@ def build_rounds(events: Iterable[Dict[str, Any]], timeline: Optional[StateTimel
     }]
 
 
-class LiveRoundIndex:
-    """Binary-searchable live-round lookup used by all early analysis gates."""
-
-    def __init__(self, rounds: Iterable[Dict[str, Any]]) -> None:
-        self.rounds = sorted(list(rounds), key=lambda item: as_int(item.get("live_start_tick")))
-        self.starts = [as_int(item.get("live_start_tick")) for item in self.rounds]
-
-    def at(self, tick: int) -> Optional[Dict[str, Any]]:
-        if not self.rounds:
-            return None
-        index = bisect_right(self.starts, tick) - 1
-        if index < 0:
-            return None
-        round_data = self.rounds[index]
-        return round_data if as_int(round_data.get("live_start_tick")) <= tick < as_int(round_data.get("end_tick")) else None
-
-
-def round_for_tick(rounds: Any, tick: int) -> Optional[Dict[str, Any]]:
-    if isinstance(rounds, LiveRoundIndex):
-        return rounds.at(tick)
+def round_for_tick(rounds: Iterable[Dict[str, Any]], tick: int) -> Optional[Dict[str, Any]]:
     for round_data in rounds:
         if round_data["live_start_tick"] <= tick < round_data["end_tick"]:
             return round_data
@@ -1344,36 +1256,38 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
     }
 
 
-def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: Any, classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any], debug: bool = False, item_slots: Optional[Dict[int, str]] = None, profile: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any], debug: bool = False, item_slots: Optional[Dict[int, str]] = None) -> List[Dict[str, Any]]:
     deaths: List[Dict[str, Any]] = []
     pov_user_id = context.get("pov_player_user_id") if context.get("analysis_scope") == "pov_player_only" else None
     last_death_by_victim: Dict[int, int] = {}
-    reject_counts: Dict[str, int] = defaultdict(int)
-    total_player_deaths = 0
     for item in events:
         if event_name(item) != "player_death":
             continue
-        total_player_deaths += 1
         fields = event_fields(item)
         tick = item["tick"]
         round_data = round_for_tick(rounds, tick)
         if round_data is None:
-            reject_counts["outside_live_round"] += 1
+            if debug:
+                print("[candidate-debug] reject player_death tick={} reason=outside_live_round".format(tick))
             continue
         attacker = as_int(fields.get("attacker"))
         victim = as_int(fields.get("user_id"))
         if attacker <= 0 or victim <= 0 or attacker == victim:
-            reject_counts["invalid_or_world_damage"] += 1
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} victim={} reason=invalid_or_world_damage".format(tick, attacker, victim))
             continue
         if pov_user_id is not None and victim == pov_user_id:
-            reject_counts["pov_recorder_death"] += 1
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} victim={} reason=pov_recorder_death".format(tick, attacker, victim))
             continue
         if context["analysis_scope"] == "pov_player_only" and attacker != context["pov_player_user_id"]:
-            reject_counts["not_pov_attacker"] += 1
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} reason=not_pov_attacker".format(tick, attacker))
             continue
         previous_death_tick = last_death_by_victim.get(victim)
         if previous_death_tick is not None and 0 <= tick - previous_death_tick <= DUPLICATE_DEATH_TICKS:
-            reject_counts["duplicate_victim_death"] += 1
+            if debug:
+                print("[candidate-debug] reject player_death tick={} attacker={} victim={} reason=duplicate_victim_death previous_tick={}".format(tick, attacker, victim, previous_death_tick))
             continue
         last_death_by_victim[victim] = tick
         weapon = as_text(fields.get("weapon")).lower()
@@ -1421,41 +1335,26 @@ def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: Any, classes: Di
                 tick, attacker, victim, assister or "none", weapon or "unknown", weapon_id or "unknown",
                 weapon_def_index or "unknown", death.get("weapon_slot", "unknown"), death.get("weapon_slot_source", "unknown")
             ))
-    if profile is not None:
-        profile["total_player_death_events"] = total_player_deaths
-        profile["accepted_live_scope_kills"] = len(deaths)
-        profile["death_rejections"] = dict(reject_counts)
-    if debug:
-        print("[candidate-debug] death gate summary total={} accepted={} outside_live_round={} not_pov_attacker={} pov_recorder_death={} invalid_or_world_damage={} duplicate_victim_death={} scope={}".format(
-            total_player_deaths,
-            len(deaths),
-            reject_counts.get("outside_live_round", 0),
-            reject_counts.get("not_pov_attacker", 0),
-            reject_counts.get("pov_recorder_death", 0),
-            reject_counts.get("invalid_or_world_damage", 0),
-            reject_counts.get("duplicate_victim_death", 0),
-            context.get("analysis_scope", "unknown"),
-        ))
     return deaths
 
 
-def normalized_building_destructions(events: Iterable[Dict[str, Any]], rounds: Any, context: Dict[str, Any], debug: bool = False, profile: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def normalized_building_destructions(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], debug: bool = False) -> List[Dict[str, Any]]:
     """Normalize building/object destruction events without treating them as kills."""
     destructions: List[Dict[str, Any]] = []
     pov_user_id = context.get("pov_player_user_id") if context.get("analysis_scope") == "pov_player_only" else None
-    rejected_outside = 0
-    rejected_scope = 0
     for item in events:
         if event_name(item) not in BUILDING_DESTRUCTION_EVENTS:
             continue
         tick = item["tick"]
         if round_for_tick(rounds, tick) is None:
-            rejected_outside += 1
+            if debug:
+                print("[candidate-debug] reject building tick={} reason=outside_live_round".format(tick))
             continue
         fields = event_fields(item)
         attacker = as_int(fields.get("attacker", fields.get("userid", fields.get("user_id"))))
         if context.get("analysis_scope") == "pov_player_only" and pov_user_id is not None and attacker != pov_user_id:
-            rejected_scope += 1
+            if debug:
+                print("[candidate-debug] reject building tick={} attacker={} reason=not_pov_attacker".format(tick, attacker))
             continue
         object_type = as_text(fields.get("objecttype", fields.get("object_type", fields.get("object")))).lower() or "building"
         destruction = {
@@ -1468,15 +1367,6 @@ def normalized_building_destructions(events: Iterable[Dict[str, Any]], rounds: A
         destructions.append(destruction)
         if debug:
             print("[candidate-debug] building destruction tick={} attacker={} type={} weight=low_until_followed_by_kills".format(tick, attacker, object_type))
-    if profile is not None:
-        profile["building_rejections"] = {
-            "outside_live_round": rejected_outside,
-            "not_pov_attacker": rejected_scope,
-        }
-    if debug and (rejected_outside or rejected_scope):
-        print("[candidate-debug] building gate summary accepted={} outside_live_round={} not_pov_attacker={} scope={}".format(
-            len(destructions), rejected_outside, rejected_scope, context.get("analysis_scope", "unknown")
-        ))
     return destructions
 
 
@@ -1492,7 +1382,7 @@ def team_id(team: Any) -> int:
     return as_int(value)
 
 
-def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: Any, teams: Dict[int, List[Tuple[int, Optional[str]]]], debug: bool = False) -> List[Dict[str, Any]]:
+def normalized_objective_events(events: Iterable[Dict[str, Any]], rounds: List[Dict[str, Any]], teams: Dict[int, List[Tuple[int, Optional[str]]]], debug: bool = False) -> List[Dict[str, Any]]:
     """Keep live-round objective progress as evidence for kill-to-objective conversions."""
     objectives: List[Dict[str, Any]] = []
     for item in events:
@@ -2013,18 +1903,12 @@ def group_kills(kills: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     return groups
 
 
-def _score_group_work(item: Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]]) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
-    group, round_data, building_destructions, objective_events = item
-    return score_candidate(group, round_data, building_destructions, objective_events)
-
-
-def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None, objective_events: Optional[List[Dict[str, Any]]] = None, debug: bool = False, candidate_workers: int = 1, profile: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], building_destructions: Optional[List[Dict[str, Any]]] = None, objective_events: Optional[List[Dict[str, Any]]] = None, debug: bool = False) -> List[Dict[str, Any]]:
     by_attacker: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
     for death in deaths:
         by_attacker[(death["round_index"], death["attacker_user_id"])].append(death)
     round_lookup = {item["round_index"]: item for item in rounds}
     candidates: List[Dict[str, Any]] = []
-    group_jobs: List[Tuple[int, int, List[Dict[str, Any]], Dict[str, Any]]] = []
     for (round_index, attacker), kills in by_attacker.items():
         kills.sort(key=lambda item: (item["event_tick"], item["packet_sequence"], item["event_index_in_packet"]))
         groups = group_kills(kills)
@@ -2032,31 +1916,7 @@ def build_candidates(deaths: List[Dict[str, Any]], rounds: List[Dict[str, Any]],
             print("[candidate-debug] grouping round={} attacker={} input_kills={} groups={}".format(round_index, attacker, len(kills), [[kill["event_tick"] for kill in group] for group in groups]))
         round_data = round_lookup[round_index]
         for group in groups:
-            group_jobs.append((round_index, attacker, group, round_data))
-
-    requested_workers = max(1, as_int(candidate_workers, 1))
-    use_parallel = requested_workers > 1 and len(group_jobs) >= max(8, requested_workers * 2)
-    if profile is not None:
-        profile["candidate_group_jobs"] = len(group_jobs)
-        profile["candidate_workers_requested"] = requested_workers
-        profile["candidate_workers_used"] = requested_workers if use_parallel else 1
-
-    if use_parallel:
-        work = [
-            (group, round_data, building_destructions, objective_events)
-            for _, _, group, round_data in group_jobs
-        ]
-        with ProcessPoolExecutor(max_workers=requested_workers) as executor:
-            scored = list(executor.map(_score_group_work, work, chunksize=1))
-    else:
-        scored = [
-            score_candidate(group, round_data, building_destructions, objective_events)
-            for _, _, group, round_data in group_jobs
-        ]
-
-    for job, score_result in zip(group_jobs, scored):
-            round_index, attacker, group, round_data = job
-            score, tags, metrics, score_breakdown = score_result
+            score, tags, metrics, score_breakdown = score_candidate(group, round_data, building_destructions, objective_events)
             objective_followups = metrics.get("objective_followup_evidence", [])
             # Keep single kills only when they contain a meaningful known signal.
             if len(group) == 1 and score < 25.0:
@@ -2138,91 +1998,39 @@ def write_ndjson(path: Path, values: Iterable[Dict[str, Any]]) -> None:
 
 
 def main() -> int:
-    analyzer_started = time.perf_counter()
     parser = argparse.ArgumentParser(description="Rank live-round TF2 frag candidates from events.ndjson.")
     parser.add_argument("export_directory", type=Path, help="Folder produced by export_all.exe")
     parser.add_argument("--item-schema", type=Path, help="Optional path to TF2's current scripts/items/items_game.txt")
-    parser.add_argument("--candidate-workers", type=int, default=1, help="Bounded child-process workers for independent candidate-group scoring")
     parser.add_argument("--debug", action="store_true", help="Print candidate acceptance, rejection, grouping, and scoring decisions")
     arguments = parser.parse_args()
     export_directory = arguments.export_directory.resolve()
     events_path = export_directory / "events.ndjson"
     if not events_path.is_file():
         raise FileNotFoundError("events.ndjson is missing. Rebuild and run the updated parser first: {}".format(events_path))
-    profile: Dict[str, Any] = {
-        "format": "tf2-frag-analysis-profile",
-        "format_version": 1,
-        "scope_behavior": "pov_player_only filters to the resolved POV attacker; STV/all_players retains all attackers",
-        "stage_seconds": {},
-    }
-    stage_started = time.perf_counter()
     events = read_events(events_path)
-    profile["stage_seconds"]["read_events"] = round(time.perf_counter() - stage_started, 6)
     header = read_json_if_present(export_directory / "header.json")
     header_ticks = as_int(header.get("ticks"))
-
-    stage_started = time.perf_counter()
-    teams = player_team_history(events)
-    classes = class_history(events)
-    names = player_name_history(events)
-    context = analysis_context(export_directory, names)
-    profile["analysis_scope"] = context.get("analysis_scope")
-    profile["capture_type"] = context.get("capture_type")
-    profile["pov_player_user_id"] = context.get("pov_player_user_id")
-    profile["stage_seconds"]["event_indexes_and_scope"] = round(time.perf_counter() - stage_started, 6)
-
-    stage_started = time.perf_counter()
     state_timeline = read_state_timeline(
         export_directory / "state_samples.ndjson",
         arguments.debug,
         max_demo_tick=header_ticks if header_ticks > 0 else None,
     )
-    profile["stage_seconds"]["read_and_index_state"] = round(time.perf_counter() - stage_started, 6)
-
-    stage_started = time.perf_counter()
+    teams = player_team_history(events)
     rounds = build_rounds(events, state_timeline, teams)
-    live_round_index = LiveRoundIndex(rounds)
-    profile["live_round_count"] = len(rounds)
-    profile["stage_seconds"]["build_live_rounds"] = round(time.perf_counter() - stage_started, 6)
-
-    stage_started = time.perf_counter()
+    classes = class_history(events)
+    names = player_name_history(events)
+    context = analysis_context(export_directory, names)
     item_slots, item_schema_info = load_item_schema(export_directory, arguments.item_schema, arguments.debug)
-    profile["stage_seconds"]["load_item_schema"] = round(time.perf_counter() - stage_started, 6)
     if arguments.debug:
         print("[candidate-debug] demo capture={} scope={} pov_user_id={} header_nick={}".format(context["capture_type"], context["analysis_scope"], context.get("pov_player_user_id") or "none", context.get("header_nick") or "unknown"))
         for round_data in rounds:
             print("[candidate-debug] live round #{} start={} ({}) end={} ({})".format(round_data["round_index"], round_data["live_start_tick"], round_data["live_start_event"], round_data["end_tick"], round_data["end_reason"]))
-
-    stage_started = time.perf_counter()
-    deaths = normalized_deaths(events, live_round_index, classes, teams, names, context, arguments.debug, item_slots, profile)
-    profile["stage_seconds"]["early_death_gating"] = round(time.perf_counter() - stage_started, 6)
-
-    stage_started = time.perf_counter()
-    enrich_state_evidence(deaths, events, state_timeline, arguments.debug, live_round_index, teams, context)
-    profile["stage_seconds"]["state_enrichment"] = round(time.perf_counter() - stage_started, 6)
-
-    stage_started = time.perf_counter()
-    building_destructions = normalized_building_destructions(events, live_round_index, context, arguments.debug, profile)
-    objective_events = normalized_objective_events(events, live_round_index, teams, arguments.debug)
-    profile["stage_seconds"]["auxiliary_events"] = round(time.perf_counter() - stage_started, 6)
-
-    stage_started = time.perf_counter()
-    candidates = build_candidates(deaths, rounds, context, building_destructions, objective_events, arguments.debug, arguments.candidate_workers, profile)
-    profile["stage_seconds"]["candidate_grouping_and_scoring"] = round(time.perf_counter() - stage_started, 6)
-
-    profile["state_sample_count"] = state_timeline.sample_count
-    profile["state_lookup_count"] = state_timeline.state_lookup_count
-    profile["unindexed_state_lookup_count"] = state_timeline.unindexed_state_lookup_count
-    profile["projectile_tracks_total"] = len(state_timeline.projectiles)
-    profile["projectile_launcher_index_keys"] = len(state_timeline.projectiles_by_launcher)
-    profile["projectile_lookup_calls"] = state_timeline.projectile_lookup_calls
-    profile["projectile_tracks_examined"] = state_timeline.projectile_tracks_examined
-    profile["candidate_count"] = len(candidates)
-
-    stage_started = time.perf_counter()
+    deaths = normalized_deaths(events, rounds, classes, teams, names, context, arguments.debug, item_slots)
+    enrich_state_evidence(deaths, events, state_timeline, arguments.debug, rounds, teams, context)
+    building_destructions = normalized_building_destructions(events, rounds, context, arguments.debug)
+    objective_events = normalized_objective_events(events, rounds, teams, arguments.debug)
+    candidates = build_candidates(deaths, rounds, context, building_destructions, objective_events, arguments.debug)
     write_ndjson(export_directory / "frag_candidates.ndjson", candidates)
-    profile["stage_seconds"]["write_candidates"] = round(time.perf_counter() - stage_started, 6)
-    profile["total_seconds"] = round(time.perf_counter() - analyzer_started, 6)
     summary = {
         "format": "tf2-frag-candidates",
         "format_version": 1,
@@ -2238,7 +2046,6 @@ def main() -> int:
         "state_samples_ignored_out_of_range": state_timeline.ignored_out_of_range_samples,
         "state_backed_analysis": state_timeline.sample_count > 0,
         "candidate_count": len(candidates),
-        "analysis_performance": profile,
         "limitations": [
             "Confirmed airshots require an airborne victim plus a matching reconstructed projectile owner, type, timing, and impact proximity.",
             "When state_samples.ndjson is unavailable, the analyzer retains event-only scoring and does not invent state-backed tags.",
@@ -2249,9 +2056,6 @@ def main() -> int:
     }
     with (export_directory / "frag_summary.json").open("w", encoding="utf-8", newline="\n") as output:
         json.dump(summary, output, indent=2, ensure_ascii=False)
-        output.write("\n")
-    with (export_directory / "analysis_profile.json").open("w", encoding="utf-8", newline="\n") as output:
-        json.dump(profile, output, indent=2, ensure_ascii=False)
         output.write("\n")
     print("Analyzed {} events: {} live rounds, {} live-round kills, {} candidates.".format(len(events), len(rounds), len(deaths), len(candidates)))
     return 0

@@ -71,7 +71,7 @@ fn field_matches(candidate: &Candidate, recorded: bool, field: &str, value: &str
         "type" | "demo_type" | "capture" => contains(&candidate.demo_context.capture_type),
         "tag" => candidate.tags.iter().any(|tag| contains(tag)),
         "player" => value.trim_start_matches('#').parse::<i64>().ok() == Some(candidate.attacker_user_id),
-        "recorded" => match value.as_str() {
+        "recorded" => match value {
             "true" | "yes" | "1" | "recorded" => recorded,
             "false" | "no" | "0" | "unrecorded" => !recorded,
             _ => false,
@@ -122,4 +122,3 @@ mod tests {
         assert!(!CandidateFilter::parse("+class:demoman +map:steel").matches(&candidate, false));
     }
 }
-

@@ -343,7 +343,7 @@ fn append_history(samples: impl IntoIterator<Item = WorkerSample>) -> Result<()>
 fn directory_size(path: &Path) -> u64 {
     WalkDir::new(path)
         .into_iter()
-        .filter_map(Result::ok)
+        .filter_map(|entry| entry.ok())
         .filter_map(|entry| entry.metadata().ok())
         .filter(|metadata| metadata.is_file())
         .map(|metadata| metadata.len())

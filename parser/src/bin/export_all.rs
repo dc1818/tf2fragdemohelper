@@ -419,7 +419,7 @@ fn main() -> Result<(), MainError> {
             "packet_index.ndjson contains packet order, tick, type, and original stream bit ranges",
             "events.ndjson contains normalized decoded game events for highlight analysis",
             "state_samples.ndjson contains parser-reconstructed player and projectile state deltas",
-            "frag_candidates.ndjson and frag_summary.json are written by analyze_frags.py after parsing",
+            "frag_candidates.ndjson and frag_summary.json are written by the Rust analyzer after parsing",
             "keep the original .dem file as the bit-exact source archive"
         ]
     });

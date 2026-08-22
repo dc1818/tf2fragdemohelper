@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: rust-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     strategy:

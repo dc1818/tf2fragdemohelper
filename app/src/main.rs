@@ -137,8 +137,12 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let controller = BatchController::new();
         state_for_start.lock().controller = Some(controller.clone());
         ui.set_busy(true);
+        ui.set_has_export(false);
+        ui.set_selected_count(0);
+        ui.set_selected_page(0);
         ui.set_progress_value(0.0);
         ui.set_log_text("".into());
+        ui.set_log_cursor_position(0);
         ui.set_status_text("Preparing Rust resource plan...".into());
         let weak_for_thread = weak.clone();
         let state_for_thread = state_for_start.clone();
@@ -150,20 +154,32 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             });
             let result = batch::run_batch(demos, output, schema, scheduler::load_history(), controller, sink);
             if let Ok(root) = result {
-                if let Ok(candidates) = load_candidates(&root.join("frag_candidates.ndjson")) {
-                    let mut state = state_for_thread.lock();
-                    state.export_root = Some(root);
-                    state.selected = vec![false; candidates.len()];
-                    state.candidates = candidates;
-                }
-                let state = state_for_thread.clone();
-                let weak = weak_for_thread.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        refresh_candidates(&ui, &state, "", 0);
-                        ui.set_selected_page(1);
+                match load_candidates(&root.join("frag_candidates.ndjson")) {
+                    Ok(candidates) => {
+                        let mut state = state_for_thread.lock();
+                        state.export_root = Some(root);
+                        state.selected = vec![false; candidates.len()];
+                        state.candidates = candidates;
+                        drop(state);
+                        let state = state_for_thread.clone();
+                        let weak = weak_for_thread.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                refresh_candidates(&ui, &state, "", 0);
+                                ui.set_has_export(true);
+                                ui.set_selected_page(1);
+                            }
+                        });
                     }
-                });
+                    Err(error) => {
+                        let weak = weak_for_thread.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = weak.upgrade() {
+                                ui.set_status_text(format!("Analysis completed but candidates could not be loaded: {error}").into());
+                            }
+                        });
+                    }
+                }
             }
         });
     });
@@ -187,6 +203,7 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 drop(state);
                 if let Some(ui) = weak.upgrade() {
                     refresh_candidates(&ui, &state_for_load, "", 0);
+                    ui.set_has_export(true);
                     ui.set_selected_page(1);
                     ui.set_status_text("Loaded parsed export".into());
                 }
@@ -218,12 +235,10 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let mut state = state_for_toggle.lock();
         if let Some(candidate_index) = state.visible.get(visible_index as usize).copied() {
             state.selected[candidate_index] = !state.selected[candidate_index];
-            let details = candidate_details(&state.candidates[candidate_index]);
             let filter = weak.upgrade().map(|ui| ui.get_filter_text().to_string()).unwrap_or_default();
             let score = weak.upgrade().map(|ui| ui.get_minimum_score()).unwrap_or_default();
             drop(state);
             if let Some(ui) = weak.upgrade() {
-                ui.set_candidate_details(details.into());
                 refresh_candidates(&ui, &state_for_toggle, &filter, score);
             }
         }
@@ -331,16 +346,20 @@ fn update_progress(weak: &Weak<AppWindow>, event: ProgressEvent) {
     let Some(ui) = weak.upgrade() else { return };
     match event {
         ProgressEvent::Plan(plan) => {
-            ui.set_resource_plan_text(format!("{} logical CPUs | parse workers {} | analysis workers {} | available RAM {:.1} GB", plan.logical_processors, plan.parse_workers, plan.analysis_workers, plan.available_memory_bytes as f64 / 1_073_741_824.0).into());
+            ui.set_resource_plan_text(format!("{} logical CPUs | adaptive parser ceiling {} | adaptive analyzer ceiling {} | available RAM {:.1} GB", plan.logical_processors, plan.parse_worker_ceiling, plan.analysis_worker_ceiling, plan.available_memory_bytes as f64 / 1_073_741_824.0).into());
         }
         ProgressEvent::Log(line) => {
             let mut text = ui.get_log_text().to_string();
             if text.len() > 200_000 { text.drain(..100_000); }
-            text.push_str(&line); text.push('\n'); ui.set_log_text(text.into());
+            text.push_str(&line); text.push('\n');
+            let cursor = text.chars().count().min(i32::MAX as usize) as i32;
+            ui.set_log_text(text.into());
+            ui.set_log_cursor_position(cursor);
         }
-        ProgressEvent::Phase { phase, completed, total, fraction } => {
+        ProgressEvent::Phase { phase, completed, total, fraction, eta_seconds, active_workers, worker_limit } => {
             ui.set_progress_value(fraction);
-            ui.set_status_text(format!("Phase {phase} of 2: {completed}/{total}").into());
+            let eta = eta_seconds.map(format_duration).unwrap_or_else(|| "estimating…".into());
+            ui.set_status_text(format!("Phase {phase} of 2: {completed}/{total} | active workers {active_workers}/{worker_limit} | ETA {eta}").into());
         }
         ProgressEvent::Complete { export_root, candidates } => {
             ui.set_busy(false); ui.set_progress_value(1.0); ui.set_status_text(format!("Complete: {candidates} candidates — {}", export_root.display()).into());
@@ -383,14 +402,11 @@ fn refresh_candidates(ui: &AppWindow, state: &Arc<Mutex<State>>, filter: &str, m
     }
     ui.set_candidate_summary(format!("{} of {} ranked candidates", rows.len(), state.candidates.len()).into());
     ui.set_candidate_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_selected_count(state.selected.iter().filter(|selected| **selected).count().min(i32::MAX as usize) as i32);
 }
 
 fn selected_candidates(state: &State) -> Vec<&Candidate> {
     state.candidates.iter().zip(&state.selected).filter_map(|(candidate, selected)| selected.then_some(candidate)).collect()
-}
-
-fn candidate_details(candidate: &Candidate) -> String {
-    serde_json::to_string_pretty(candidate).unwrap_or_else(|_| candidate.candidate_id.clone())
 }
 
 fn load_candidates(path: &Path) -> Result<Vec<Candidate>> {
@@ -402,6 +418,13 @@ fn load_candidates(path: &Path) -> Result<Vec<Candidate>> {
             Err(error) => Some(Err(error.into())),
         })
         .collect()
+}
+
+fn format_duration(seconds: u64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 { format!("{hours}h {minutes:02}m") } else if minutes > 0 { format!("{minutes}m {seconds:02}s") } else { format!("{seconds}s") }
 }
 
 fn open_path(path: &Path) -> Result<()> {

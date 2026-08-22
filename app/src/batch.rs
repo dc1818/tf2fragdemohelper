@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     thread,
@@ -27,7 +27,15 @@ use walkdir::WalkDir;
 pub enum ProgressEvent {
     Plan(ResourcePlan),
     Log(String),
-    Phase { phase: u8, completed: usize, total: usize, fraction: f32 },
+    Phase {
+        phase: u8,
+        completed: usize,
+        total: usize,
+        fraction: f32,
+        eta_seconds: Option<u64>,
+        active_workers: usize,
+        worker_limit: usize,
+    },
     Complete { export_root: PathBuf, candidates: usize },
     Failed(String),
     Cancelled,
@@ -52,6 +60,10 @@ impl BatchController {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub fn cancellation_token(&self) -> Arc<AtomicBool> {
+        self.cancelled.clone()
     }
 }
 
@@ -101,23 +113,37 @@ pub fn run_batch(
     let plan = ResourcePlan::detect(&jobs, &history);
     sink(ProgressEvent::Plan(plan.clone()));
     write_preflight(&root, &jobs, &plan)?;
-    emit(format!("Phase 1: {} parser workers", plan.parse_workers));
+    emit(format!(
+        "Phase 1: parser starts with up to {} workers and adjusts admission from live free memory",
+        plan.parse_worker_ceiling
+    ));
 
     let parser = locate_exporter()?;
     let parse_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(plan.parse_workers)
+        .num_threads(plan.parse_worker_ceiling)
         .thread_name(|index| format!("tf2-parse-{index}"))
         .build()?;
     let parse_completed = AtomicUsize::new(0);
+    let parse_completed_bytes = AtomicU64::new(0);
     let total = jobs.len();
+    let total_parse_bytes: u64 = jobs.iter().map(|job| job.source_bytes).sum();
+    let parse_started = Instant::now();
     let parse_samples = Mutex::new(Vec::new());
+    let parse_gate = Arc::new(plan.parser_gate(controller.cancellation_token()));
     let parse_result: Result<()> = parse_pool.install(|| {
         largest_first(jobs.clone(), false).par_iter().try_for_each(|job| {
             if controller.is_cancelled() {
                 bail!("cancelled");
             }
+            let _permit = parse_gate.acquire()?;
             fs::create_dir_all(&job.export_directory)?;
-            emit(format!("[PARSE {:03}] {}", job.order, job.demo_path.display()));
+            emit(format!(
+                "[PARSE {:03}] {} (active {}/{})",
+                job.order,
+                job.demo_path.display(),
+                parse_gate.active(),
+                parse_gate.limit()
+            ));
             let started = Instant::now();
             let mut command = Command::new(&parser);
             command.arg(&job.demo_path).arg(&job.export_directory);
@@ -138,7 +164,16 @@ pub fn run_batch(
                 succeeded: true,
             });
             let completed = parse_completed.fetch_add(1, Ordering::SeqCst) + 1;
-            sink(ProgressEvent::Phase { phase: 1, completed, total, fraction: completed as f32 / total as f32 * 0.5 });
+            let completed_bytes = parse_completed_bytes.fetch_add(job.source_bytes, Ordering::SeqCst).saturating_add(job.source_bytes);
+            sink(ProgressEvent::Phase {
+                phase: 1,
+                completed,
+                total,
+                fraction: completed as f32 / total as f32 * 0.5,
+                eta_seconds: estimated_remaining_seconds(completed_bytes, total_parse_bytes, parse_started.elapsed()),
+                active_workers: parse_gate.active(),
+                worker_limit: parse_gate.limit(),
+            });
             emit(format!("[PARSE {:03}] complete in {:.1}s; {:.1} GiB", job.order, elapsed, output_bytes as f64 / 1_073_741_824.0));
             Ok(())
         })
@@ -158,20 +193,35 @@ pub fn run_batch(
     // Re-plan Phase 2 from the parsed bytes now known, preserving the same
     // benchmark history but refusing the old one-worker collapse.
     let analysis_plan = ResourcePlan::detect(&jobs, &history);
-    emit(format!("Phase 2: {} Rust analyzer workers; largest parsed exports first", analysis_plan.analysis_workers));
+    emit(format!(
+        "Phase 2: Rust analysis starts with up to {} workers and adjusts admission from live free memory; largest exports first",
+        analysis_plan.analysis_worker_ceiling
+    ));
     let analysis_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(analysis_plan.analysis_workers)
+        .num_threads(analysis_plan.analysis_worker_ceiling)
         .thread_name(|index| format!("tf2-analysis-{index}"))
         .build()?;
     let analysis_completed = AtomicUsize::new(0);
+    let analysis_completed_bytes = AtomicU64::new(0);
+    let total_analysis_bytes: u64 = jobs.iter().map(|job| job.parsed_bytes).sum();
+    let analysis_started = Instant::now();
     let analysis_samples = Mutex::new(Vec::new());
     let candidates_total = AtomicUsize::new(0);
+    let analysis_gate = Arc::new(analysis_plan.analyzer_gate(controller.cancellation_token()));
     let analysis_result: Result<()> = analysis_pool.install(|| {
         largest_first(jobs.clone(), true).par_iter().try_for_each(|job| {
             if controller.is_cancelled() {
                 bail!("cancelled");
             }
-            emit(format!("[ANALYZE {:03}] {} ({:.1} GiB)", job.order, job.demo_path.display(), job.parsed_bytes as f64 / 1_073_741_824.0));
+            let _permit = analysis_gate.acquire()?;
+            emit(format!(
+                "[ANALYZE {:03}] {} ({:.1} GiB, active {}/{})",
+                job.order,
+                job.demo_path.display(),
+                job.parsed_bytes as f64 / 1_073_741_824.0,
+                analysis_gate.active(),
+                analysis_gate.limit()
+            ));
             let started = Instant::now();
             let candidates = analyze_export(&job.export_directory, item_schema.as_deref())?;
             let elapsed = started.elapsed().as_secs_f64();
@@ -187,7 +237,16 @@ pub fn run_batch(
                 succeeded: true,
             });
             let completed = analysis_completed.fetch_add(1, Ordering::SeqCst) + 1;
-            sink(ProgressEvent::Phase { phase: 2, completed, total, fraction: 0.5 + completed as f32 / total as f32 * 0.5 });
+            let completed_bytes = analysis_completed_bytes.fetch_add(job.parsed_bytes, Ordering::SeqCst).saturating_add(job.parsed_bytes);
+            sink(ProgressEvent::Phase {
+                phase: 2,
+                completed,
+                total,
+                fraction: 0.5 + completed as f32 / total as f32 * 0.5,
+                eta_seconds: estimated_remaining_seconds(completed_bytes, total_analysis_bytes, analysis_started.elapsed()),
+                active_workers: analysis_gate.active(),
+                worker_limit: analysis_gate.limit(),
+            });
             emit(format!("[ANALYZE {:03}] complete in {:.1}s; {} candidates", job.order, elapsed, candidates.len()));
             Ok(())
         })
@@ -283,12 +342,12 @@ fn write_preflight(root: &Path, jobs: &[DemoJob], plan: &ResourcePlan) -> Result
     let total = parse_estimate.saturating_add(analysis_additions);
     let headroom = total / 5;
     let text = format!(
-        "RUST AUTO RESOURCE PLAN\nLogical processors: {}\nAvailable RAM: {:.1} GB\nReserved RAM: {:.1} GB\nAutomatic parser workers: {}\nAutomatic analyzer workers: {}\n\nDISK PREFLIGHT\nInput demos: {:.2} GB\nEstimated parse output: {:.2} GB\nEstimated analysis additions: {:.2} GB\nSafety headroom: {:.2} GB\nRecommended free space: {:.2} GB\n\n{}\n",
+        "RUST ADAPTIVE RESOURCE PLAN\nLogical processors: {}\nAvailable RAM: {:.1} GB\nReserved RAM: {:.1} GB\nParser worker ceiling: {}\nAnalyzer worker ceiling: {}\nWorker admission: rechecked before each job from live available RAM\n\nDISK PREFLIGHT\nInput demos: {:.2} GB\nEstimated parse output: {:.2} GB\nEstimated analysis additions: {:.2} GB\nSafety headroom: {:.2} GB\nRecommended free space: {:.2} GB\n\n{}\n",
         plan.logical_processors,
         plan.available_memory_bytes as f64 / 1_073_741_824.0,
         plan.reserved_memory_bytes as f64 / 1_073_741_824.0,
-        plan.parse_workers,
-        plan.analysis_workers,
+        plan.parse_worker_ceiling,
+        plan.analysis_worker_ceiling,
         input as f64 / 1_073_741_824.0,
         parse_estimate as f64 / 1_073_741_824.0,
         analysis_additions as f64 / 1_073_741_824.0,
@@ -352,6 +411,15 @@ fn directory_size(path: &Path) -> u64 {
 
 fn mib_per_second(bytes: u64, seconds: f64) -> f64 {
     if seconds <= 0.0 { 0.0 } else { bytes as f64 / 1_048_576.0 / seconds }
+}
+
+fn estimated_remaining_seconds(completed_bytes: u64, total_bytes: u64, elapsed: Duration) -> Option<u64> {
+    if completed_bytes == 0 || total_bytes <= completed_bytes || elapsed.is_zero() {
+        return None;
+    }
+    let bytes_per_second = completed_bytes as f64 / elapsed.as_secs_f64();
+    (bytes_per_second.is_finite() && bytes_per_second > 0.0)
+        .then(|| ((total_bytes - completed_bytes) as f64 / bytes_per_second).ceil() as u64)
 }
 
 fn file_stem(path: &Path) -> String {

@@ -12,6 +12,7 @@ use crate::{
     filter::CandidateFilter,
     models::{AppSettings, Candidate},
     recording::{launch_hlae_batch, preview_candidate, recover_interrupted_profile, RecordingIndex},
+    scheduler::PerformanceProfile,
 };
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -61,6 +62,7 @@ fn main() -> Result<()> {
     ui.set_capture_fps(settings.capture_fps.to_string().into());
     ui.set_jpg_quality(settings.jpg_quality as i32);
     ui.set_recording_format(settings.recording_format.clone().into());
+    ui.set_performance_profile(settings.performance_profile.clone().into());
     ui.set_resolution(settings.resolution.clone().into());
     ui.set_dx_level(settings.dx_level.clone().into());
     ui.set_skybox(settings.skybox.clone().into());
@@ -134,6 +136,7 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let output = PathBuf::from(ui.get_export_directory().to_string());
         let schema_text = ui.get_item_schema().to_string();
         let schema = (!schema_text.trim().is_empty()).then(|| PathBuf::from(schema_text));
+        let performance_profile = PerformanceProfile::from_setting(&ui.get_performance_profile().to_string());
         let controller = BatchController::new();
         state_for_start.lock().controller = Some(controller.clone());
         ui.set_busy(true);
@@ -142,7 +145,7 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         ui.set_selected_page(0);
         ui.set_progress_value(0.0);
         ui.set_log_text("".into());
-        ui.set_log_cursor_position(0);
+        ui.set_log_scroll_offset(0.0);
         ui.set_status_text("Preparing Rust resource plan...".into());
         let weak_for_thread = weak.clone();
         let state_for_thread = state_for_start.clone();
@@ -152,7 +155,7 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 let weak = progress_weak.clone();
                 let _ = slint::invoke_from_event_loop(move || update_progress(&weak, event));
             });
-            let result = batch::run_batch(demos, output, schema, controller, sink);
+            let result = batch::run_batch(demos, output, schema, performance_profile, controller, sink);
             if let Ok(root) = result {
                 match load_candidates(&root.join("frag_candidates.ndjson")) {
                     Ok(candidates) => {
@@ -269,15 +272,19 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let weak = ui.as_weak();
     let state_for_all = state.clone();
     ui.on_select_all_visible(move || {
+        let Some(ui) = weak.upgrade() else { return };
         let mut state = state_for_all.lock();
         let visible = state.visible.clone();
         let deselect = !visible.is_empty() && visible.iter().all(|index| state.selected.get(*index).copied().unwrap_or(false));
-        for index in visible { state.selected[index] = !deselect; }
-        drop(state);
-        if let Some(ui) = weak.upgrade() {
-            let filter = ui.get_filter_text().to_string();
-            refresh_candidates(&ui, &state_for_all, &filter, ui.get_minimum_score());
+        let model = ui.get_candidate_rows();
+        for (visible_row, candidate_index) in visible.into_iter().enumerate() {
+            state.selected[candidate_index] = !deselect;
+            if let Some(mut row) = model.row_data(visible_row) {
+                row.selected = !deselect;
+                model.set_row_data(visible_row, row);
+            }
         }
+        ui.set_selected_count(state.selected.iter().filter(|selected| **selected).count().min(i32::MAX as usize) as i32);
     });
     let weak = ui.as_weak();
     let state_for_preview = state.clone();
@@ -333,6 +340,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         settings.capture_fps = ui.get_capture_fps().parse().unwrap_or(120);
         settings.jpg_quality = ui.get_jpg_quality().clamp(1, 100) as u8;
         settings.recording_format = ui.get_recording_format().to_string();
+        settings.performance_profile = ui.get_performance_profile().to_string();
         let result = launch_hlae_batch(&selected, &settings);
         ui.set_status_text(result.map(|path| format!("Offline HLAE recording launched: {}", path.display())).unwrap_or_else(|error| error.to_string()).into());
     });
@@ -371,6 +379,7 @@ fn bind_settings_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         state.settings.capture_fps = ui.get_capture_fps().parse().unwrap_or(120);
         state.settings.jpg_quality = ui.get_jpg_quality() as u8;
         state.settings.recording_format = ui.get_recording_format().to_string();
+        state.settings.performance_profile = ui.get_performance_profile().to_string();
         state.settings.resolution = ui.get_resolution().to_string();
         state.settings.dx_level = ui.get_dx_level().to_string();
         state.settings.skybox = ui.get_skybox().to_string();
@@ -399,15 +408,14 @@ fn update_progress(weak: &Weak<AppWindow>, event: ProgressEvent) {
     let Some(ui) = weak.upgrade() else { return };
     match event {
         ProgressEvent::Plan(plan) => {
-            ui.set_resource_plan_text(format!("{} logical CPUs | adaptive parser ceiling {} | adaptive analyzer ceiling {} | available RAM {:.1} GB", plan.logical_processors, plan.parse_worker_ceiling, plan.analysis_worker_ceiling, plan.available_memory_bytes as f64 / 1_073_741_824.0).into());
+            ui.set_resource_plan_text(format!("{} performance | {} logical CPUs | adaptive parser ceiling {} | adaptive analyzer ceiling {} | available RAM {:.1} GB", plan.performance_profile.label(), plan.logical_processors, plan.parse_worker_ceiling, plan.analysis_worker_ceiling, plan.available_memory_bytes as f64 / 1_073_741_824.0).into());
         }
         ProgressEvent::Log(line) => {
             let mut text = ui.get_log_text().to_string();
             if text.len() > 200_000 { text.drain(..100_000); }
             text.push_str(&line); text.push('\n');
-            let cursor = text.chars().count().min(i32::MAX as usize) as i32;
             ui.set_log_text(text.into());
-            ui.set_log_cursor_position(cursor);
+            ui.set_log_scroll_offset(-1_000_000.0);
         }
         ProgressEvent::Phase { phase, completed, total, fraction, eta_seconds, active_workers, worker_limit } => {
             ui.set_progress_value(fraction);

@@ -109,6 +109,7 @@ pub struct AppSettings {
     pub hlae_executable: PathBuf,
     pub ffmpeg_executable: PathBuf,
     pub recording_output_directory: PathBuf,
+    pub performance_profile: String,
     pub parse_workers_override: Option<usize>,
     pub analysis_workers_override: Option<usize>,
     pub lead_seconds: u32,
@@ -142,7 +143,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             output_directory: PathBuf::new(), item_schema: PathBuf::new(), tf2_executable: PathBuf::new(),
-            hlae_executable: PathBuf::new(), ffmpeg_executable: PathBuf::new(), recording_output_directory: PathBuf::new(),
+            hlae_executable: PathBuf::new(), ffmpeg_executable: PathBuf::new(), recording_output_directory: PathBuf::new(), performance_profile: "High".into(),
             parse_workers_override: None, analysis_workers_override: None, lead_seconds: 8, outro_seconds: 3,
             capture_fps: 120, jpg_quality: 90, recording_format: "MP4 - Standard".into(), resolution: "2560x1440".into(),
             dx_level: "98 (highest)".into(), skybox: "Default".into(), hud: "Kill notices only".into(),

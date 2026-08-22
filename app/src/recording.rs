@@ -9,7 +9,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::Duration,
 };
@@ -30,6 +30,12 @@ struct RecordingProfileSession {
     original_profile_cfg_existed: bool,
     isolated_custom: bool,
     tf_process_name: String,
+    #[serde(default)]
+    original_config_existed: bool,
+    #[serde(default)]
+    original_video_existed: bool,
+    #[serde(default)]
+    original_offline_cfg_existed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -126,8 +132,8 @@ pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Resul
     if !tf2.is_file() {
         bail!("select tf_win64.exe in Settings");
     }
-    let game = tf2.parent().and_then(Path::parent).context("could not find TF2 game directory")?;
-    let cfg = game.join("tf").join("cfg").join("tf2fragdemohelper_preview.cfg");
+    let game = tf2_game_directory(tf2)?;
+    let cfg = game.join("cfg").join("tf2fragdemohelper_preview.cfg");
     fs::write(&cfg, format!(
         "sv_lan 1\nsv_master_legacy_mode 1\ncl_predict 0\ndemo_gototick {}\n",
         candidate.clip_start_tick
@@ -192,11 +198,7 @@ pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> R
 pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Result<PathBuf> {
     recover_interrupted_profile()?;
     let session = prepare_hlae_batch(candidates, settings)?;
-    let tf_root = settings.tf2_executable.parent().context("could not find the TF2 directory")?;
-    let game = tf_root.join("tf");
-    if !game.is_dir() {
-        bail!("could not find TF2's tf folder next to the selected executable");
-    }
+    let game = tf2_game_directory(&settings.tf2_executable)?;
     let hlae_root = settings.hlae_executable.parent().context("could not find the HLAE directory")?;
     let x64 = settings.tf2_executable.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case("tf_win64.exe"));
     let hook = if x64 { hlae_root.join("x64/AfxHookSource.dll") } else { hlae_root.join("AfxHookSource.dll") };
@@ -217,7 +219,6 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
     fs::create_dir_all(settings.recording_output_directory.join("Videos"))?;
     fs::create_dir_all(settings.recording_output_directory.join("Image Sequences"))?;
     fs::create_dir_all(game.join("cfg"))?;
-    fs::write(game.join("cfg/tf2fragdemohelper_offline.cfg"), offline_cfg())?;
 
     let mut by_demo: BTreeMap<PathBuf, Vec<(usize, Candidate)>> = BTreeMap::new();
     for (order, candidate) in candidates.iter().cloned().enumerate() {
@@ -261,7 +262,10 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         staged_relatives[0]
     );
     let profile = stage_recording_profile(game.as_path(), session_name, tf_process_name, settings)?;
-    let launch_result = Command::new(&settings.hlae_executable)
+    let launch_log = session.join("hlae_launch.log");
+    let launch_log_file = File::create(&launch_log)?;
+    let mut launch = Command::new(&settings.hlae_executable);
+    launch
         .current_dir(hlae_root)
         .args(["-customLoader", "-autoStart", "-noGui", "-programPath"])
         .arg(&settings.tf2_executable)
@@ -269,7 +273,15 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         .arg(game_arguments)
         .arg("-hookDllPath")
         .arg(hook)
-        .spawn();
+        .stdout(Stdio::from(launch_log_file.try_clone()?))
+        .stderr(Stdio::from(launch_log_file));
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        launch.creation_flags(CREATE_NO_WINDOW);
+    }
+    let launch_result = launch.spawn();
     let mut child = match launch_result {
         Ok(child) => child,
         Err(error) => {
@@ -309,6 +321,12 @@ fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str,
     let profile = custom.join(PROFILE_FOLDER);
     let profile_backup = backup.join("custom_profile_original");
     let cfg_backup = backup.join(PROFILE_CFG);
+    let config = game.join("cfg").join("config.cfg");
+    let config_backup = backup.join("config.cfg");
+    let video = game.join("cfg").join("video.txt");
+    let video_backup = backup.join("video.txt");
+    let offline_config_path = game.join("cfg").join("tf2fragdemohelper_offline.cfg");
+    let offline_cfg_backup = backup.join("tf2fragdemohelper_offline.cfg");
     fs::create_dir_all(&backup)?;
     let session = RecordingProfileSession {
         session_id: session_id.to_owned(),
@@ -319,6 +337,9 @@ fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str,
         original_profile_cfg_existed: cfg.is_file(),
         isolated_custom: settings.isolate_custom_resources,
         tf_process_name: tf_process_name.to_owned(),
+        original_config_existed: config.is_file(),
+        original_video_existed: video.is_file(),
+        original_offline_cfg_existed: offline_config_path.is_file(),
     };
     write_active_profile(&session)?;
 
@@ -326,6 +347,9 @@ fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str,
         if session.original_profile_cfg_existed {
             fs::rename(&cfg, &cfg_backup)?;
         }
+        if session.original_config_existed { fs::copy(&config, &config_backup)?; }
+        if session.original_video_existed { fs::copy(&video, &video_backup)?; }
+        if session.original_offline_cfg_existed { fs::copy(&offline_config_path, &offline_cfg_backup)?; }
         if session.isolated_custom {
             if session.original_custom_existed {
                 fs::rename(&custom, &custom_backup).context("could not back up TF2's custom folder")?;
@@ -345,6 +369,7 @@ fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str,
         install_recording_resources(&custom, settings)?;
         fs::create_dir_all(game.join("cfg"))?;
         fs::write(&cfg, recording_profile_cfg(settings))?;
+        fs::write(&offline_config_path, offline_cfg())?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -361,6 +386,12 @@ fn restore_recording_profile(session: &RecordingProfileSession) -> Result<()> {
     let profile = custom.join(PROFILE_FOLDER);
     let profile_backup = session.backup_directory.join("custom_profile_original");
     let cfg_backup = session.backup_directory.join(PROFILE_CFG);
+    let config = session.game_directory.join("cfg").join("config.cfg");
+    let config_backup = session.backup_directory.join("config.cfg");
+    let video = session.game_directory.join("cfg").join("video.txt");
+    let video_backup = session.backup_directory.join("video.txt");
+    let offline_cfg = session.game_directory.join("cfg").join("tf2fragdemohelper_offline.cfg");
+    let offline_cfg_backup = session.backup_directory.join("tf2fragdemohelper_offline.cfg");
 
     if session.isolated_custom {
         if custom.exists() {
@@ -383,6 +414,10 @@ fn restore_recording_profile(session: &RecordingProfileSession) -> Result<()> {
     if session.original_profile_cfg_existed {
         fs::rename(&cfg_backup, &cfg)?;
     }
+    if session.original_config_existed && config_backup.is_file() { fs::copy(&config_backup, &config)?; }
+    if session.original_video_existed && video_backup.is_file() { fs::copy(&video_backup, &video)?; }
+    if offline_cfg.exists() { fs::remove_file(&offline_cfg)?; }
+    if session.original_offline_cfg_existed && offline_cfg_backup.is_file() { fs::copy(&offline_cfg_backup, &offline_cfg)?; }
     let pointer = active_profile_path();
     if pointer.exists() {
         fs::remove_file(pointer)?;
@@ -554,6 +589,34 @@ fn windows_process_is_running(image_name: &str) -> bool {
         .output().ok().is_some_and(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains(&image_name.to_ascii_lowercase()))
 }
 
+/// Resolve TF2's actual game directory from both current x64 installs
+/// (`tf/win64/tf_win64.exe`) and older layouts (`tf/tf.exe`).  Treating the
+/// executable's parent as the install root created the invalid `tf/win64/tf`
+/// path responsible for Windows error 3 during preview and HLAE launch.
+fn tf2_game_directory(executable: &Path) -> Result<PathBuf> {
+    let binary_directory = executable.parent().context("could not find the TF2 executable directory")?;
+    let direct_game = binary_directory.join("cfg");
+    if direct_game.is_dir() {
+        return Ok(binary_directory.to_path_buf());
+    }
+    let sibling_game = binary_directory.join("tf");
+    if sibling_game.join("cfg").is_dir() {
+        return Ok(sibling_game);
+    }
+    if let Some(game) = binary_directory.parent() {
+        if game.join("cfg").is_dir() {
+            return Ok(game.to_path_buf());
+        }
+    }
+    if let Some(root) = binary_directory.parent() {
+        let game = root.join("tf");
+        if game.join("cfg").is_dir() {
+            return Ok(game);
+        }
+    }
+    bail!("could not locate TF2's tf/cfg directory from {}", executable.display())
+}
+
 fn wait_for_tf2_exit(image_name: &str) {
     for _ in 0..30 {
         if windows_process_is_running(image_name) { break; }
@@ -622,7 +685,7 @@ fn recording_stop_cfg(settings: &AppSettings) -> String {
 }
 
 fn offline_cfg() -> &'static str {
-    "// Generated by TF2 Frag Demo Helper. Offline demo playback only.\nsv_lan 1\nsv_master_legacy_mode 1\ncl_allowdownload 0\ncl_downloadfilter none\nalias connect \"echo BLOCKED: recording mode cannot connect to servers\"\nalias retry \"echo BLOCKED: recording mode cannot reconnect\"\nengine_no_focus_sleep 0\nsnd_mute_losefocus 0\n"
+    "// Generated by TF2 Frag Demo Helper. Offline demo playback only.\nsv_lan 1\nsv_master_legacy_mode 1\nnet_start 0\ncl_allowdownload 0\ncl_downloadfilter none\nalias connect \"echo BLOCKED: recording mode cannot connect to servers\"\nalias retry \"echo BLOCKED: recording mode cannot reconnect\"\nalias openserverbrowser \"echo BLOCKED: recording mode is offline only\"\nengine_no_focus_sleep 0\nsnd_mute_losefocus 0\n"
 }
 
 fn parse_resolution(value: &str) -> (u32, u32) {

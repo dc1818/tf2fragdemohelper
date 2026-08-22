@@ -1,7 +1,7 @@
 use crate::{
     analyzer::analyze_export,
     models::{Candidate, DemoJob},
-    scheduler::{largest_first, ResourcePlan},
+    scheduler::{largest_first, PerformanceProfile, ResourcePlan},
 };
 use anyhow::{bail, Context, Result};
 use chrono::Local;
@@ -71,6 +71,7 @@ pub fn run_batch(
     demos: Vec<PathBuf>,
     output_parent: PathBuf,
     item_schema: Option<PathBuf>,
+    performance_profile: PerformanceProfile,
     controller: BatchController,
     sink: ProgressSink,
 ) -> Result<PathBuf> {
@@ -109,12 +110,12 @@ pub fn run_batch(
             export_directory: export,
         });
     }
-    let plan = ResourcePlan::detect(&jobs);
+    let plan = ResourcePlan::detect(&jobs, performance_profile);
     sink(ProgressEvent::Plan(plan.clone()));
     write_preflight(&root, &jobs, &plan)?;
     emit(format!(
-        "Phase 1: parser starts with up to {} workers and adjusts admission from live free memory",
-        plan.parse_worker_ceiling
+        "Phase 1: parser starts with up to {} workers ({}) and adjusts admission from live free memory",
+        plan.parse_worker_ceiling, plan.performance_profile.label()
     ));
 
     let parser = locate_exporter()?;
@@ -128,61 +129,57 @@ pub fn run_batch(
     let total_parse_bytes: u64 = jobs.iter().map(|job| job.source_bytes).sum();
     let parse_started = Instant::now();
     let parse_gate = Arc::new(plan.parser_gate(controller.cancellation_token()));
-    let parse_result: Result<()> = parse_pool.install(|| {
-        largest_first(jobs.clone(), false).par_iter().try_for_each(|job| {
-            if controller.is_cancelled() {
-                bail!("cancelled");
+    // A shared queue keeps every Rayon thread supplied with work.  An indexed
+    // par_iter can leave its final contiguous chunk assigned to one thread,
+    // which was the cause of the one-worker tail observed in the benchmark.
+    let parse_jobs = largest_first(jobs.clone(), false);
+    let parse_next = AtomicUsize::new(0);
+    let parse_error = Mutex::new(None::<String>);
+    parse_pool.install(|| {
+        (0..plan.parse_worker_ceiling).into_par_iter().for_each(|_| loop {
+            if controller.is_cancelled() { break; }
+            let index = parse_next.fetch_add(1, Ordering::SeqCst);
+            let Some(job) = parse_jobs.get(index) else { break };
+            let result = (|| -> Result<()> {
+                let _permit = parse_gate.acquire()?;
+                fs::create_dir_all(&job.export_directory)?;
+                emit(format!("[PARSE {:03}] {} (active {}/{})", job.order, job.demo_path.display(), parse_gate.active(), parse_gate.limit()));
+                let started = Instant::now();
+                let mut command = Command::new(&parser);
+                command.arg(&job.demo_path).arg(&job.export_directory);
+                let output = run_command(command, &controller)?;
+                if !output.status.success() {
+                    bail!("parser failed for {}: {}", job.demo_path.display(), String::from_utf8_lossy(&output.stderr));
+                }
+                let elapsed = started.elapsed().as_secs_f64();
+                let output_bytes = directory_size(&job.export_directory);
+                let completed = parse_completed.fetch_add(1, Ordering::SeqCst) + 1;
+                let completed_bytes = parse_completed_bytes.fetch_add(job.source_bytes, Ordering::SeqCst).saturating_add(job.source_bytes);
+                sink(ProgressEvent::Phase { phase: 1, completed, total, fraction: completed as f32 / total as f32 * 0.5, eta_seconds: estimated_remaining_seconds(completed_bytes, total_parse_bytes, parse_started.elapsed()), active_workers: parse_gate.active(), worker_limit: parse_gate.limit() });
+                emit(format!("[PARSE {:03}] complete in {:.1}s; {:.1} GiB", job.order, elapsed, output_bytes as f64 / 1_073_741_824.0));
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if !controller.is_cancelled() { *parse_error.lock() = Some(error.to_string()); controller.cancel(); }
+                break;
             }
-            let _permit = parse_gate.acquire()?;
-            fs::create_dir_all(&job.export_directory)?;
-            emit(format!(
-                "[PARSE {:03}] {} (active {}/{})",
-                job.order,
-                job.demo_path.display(),
-                parse_gate.active(),
-                parse_gate.limit()
-            ));
-            let started = Instant::now();
-            let mut command = Command::new(&parser);
-            command.arg(&job.demo_path).arg(&job.export_directory);
-            let output = run_command(command, &controller)?;
-            if !output.status.success() {
-                bail!("parser failed for {}: {}", job.demo_path.display(), String::from_utf8_lossy(&output.stderr));
-            }
-            let elapsed = started.elapsed().as_secs_f64();
-            let output_bytes = directory_size(&job.export_directory);
-            let completed = parse_completed.fetch_add(1, Ordering::SeqCst) + 1;
-            let completed_bytes = parse_completed_bytes.fetch_add(job.source_bytes, Ordering::SeqCst).saturating_add(job.source_bytes);
-            sink(ProgressEvent::Phase {
-                phase: 1,
-                completed,
-                total,
-                fraction: completed as f32 / total as f32 * 0.5,
-                eta_seconds: estimated_remaining_seconds(completed_bytes, total_parse_bytes, parse_started.elapsed()),
-                active_workers: parse_gate.active(),
-                worker_limit: parse_gate.limit(),
-            });
-            emit(format!("[PARSE {:03}] complete in {:.1}s; {:.1} GiB", job.order, elapsed, output_bytes as f64 / 1_073_741_824.0));
-            Ok(())
-        })
+        });
     });
-    if let Err(error) = parse_result {
-        if controller.is_cancelled() {
-            sink(ProgressEvent::Cancelled);
-        } else {
-            sink(ProgressEvent::Failed(error.to_string()));
-        }
+    if let Some(error) = parse_error.lock().take() {
+        let error = anyhow::Error::msg(error);
+        sink(ProgressEvent::Failed(error.to_string()));
         return Err(error);
     }
+    if controller.is_cancelled() { sink(ProgressEvent::Cancelled); bail!("cancelled"); }
 
     for job in &mut jobs {
         job.parsed_bytes = directory_size(&job.export_directory);
     }
     // Re-plan Phase 2 from the parsed bytes now known.
-    let analysis_plan = ResourcePlan::detect(&jobs);
+    let analysis_plan = ResourcePlan::detect(&jobs, performance_profile);
     emit(format!(
-        "Phase 2: Rust analysis starts with up to {} workers and adjusts admission from live free memory; largest exports first",
-        analysis_plan.analysis_worker_ceiling
+        "Phase 2: Rust analysis starts with up to {} workers ({}) and adjusts admission from live free memory; largest exports first",
+        analysis_plan.analysis_worker_ceiling, analysis_plan.performance_profile.label()
     ));
     let analysis_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(analysis_plan.analysis_worker_ceiling)
@@ -194,47 +191,39 @@ pub fn run_batch(
     let analysis_started = Instant::now();
     let candidates_total = AtomicUsize::new(0);
     let analysis_gate = Arc::new(analysis_plan.analyzer_gate(controller.cancellation_token()));
-    let analysis_result: Result<()> = analysis_pool.install(|| {
-        largest_first(jobs.clone(), true).par_iter().try_for_each(|job| {
-            if controller.is_cancelled() {
-                bail!("cancelled");
+    let analysis_jobs = largest_first(jobs.clone(), true);
+    let analysis_next = AtomicUsize::new(0);
+    let analysis_error = Mutex::new(None::<String>);
+    analysis_pool.install(|| {
+        (0..analysis_plan.analysis_worker_ceiling).into_par_iter().for_each(|_| loop {
+            if controller.is_cancelled() { break; }
+            let index = analysis_next.fetch_add(1, Ordering::SeqCst);
+            let Some(job) = analysis_jobs.get(index) else { break };
+            let result = (|| -> Result<()> {
+                let _permit = analysis_gate.acquire()?;
+                emit(format!("[ANALYZE {:03}] {} ({:.1} GiB, active {}/{})", job.order, job.demo_path.display(), job.parsed_bytes as f64 / 1_073_741_824.0, analysis_gate.active(), analysis_gate.limit()));
+                let started = Instant::now();
+                let candidates = analyze_export(&job.export_directory, item_schema.as_deref())?;
+                let elapsed = started.elapsed().as_secs_f64();
+                candidates_total.fetch_add(candidates.len(), Ordering::SeqCst);
+                let completed = analysis_completed.fetch_add(1, Ordering::SeqCst) + 1;
+                let completed_bytes = analysis_completed_bytes.fetch_add(job.parsed_bytes, Ordering::SeqCst).saturating_add(job.parsed_bytes);
+                sink(ProgressEvent::Phase { phase: 2, completed, total, fraction: 0.5 + completed as f32 / total as f32 * 0.5, eta_seconds: estimated_remaining_seconds(completed_bytes, total_analysis_bytes, analysis_started.elapsed()), active_workers: analysis_gate.active(), worker_limit: analysis_gate.limit() });
+                emit(format!("[ANALYZE {:03}] complete in {:.1}s; {} candidates", job.order, elapsed, candidates.len()));
+                Ok(())
+            })();
+            if let Err(error) = result {
+                if !controller.is_cancelled() { *analysis_error.lock() = Some(error.to_string()); controller.cancel(); }
+                break;
             }
-            let _permit = analysis_gate.acquire()?;
-            emit(format!(
-                "[ANALYZE {:03}] {} ({:.1} GiB, active {}/{})",
-                job.order,
-                job.demo_path.display(),
-                job.parsed_bytes as f64 / 1_073_741_824.0,
-                analysis_gate.active(),
-                analysis_gate.limit()
-            ));
-            let started = Instant::now();
-            let candidates = analyze_export(&job.export_directory, item_schema.as_deref())?;
-            let elapsed = started.elapsed().as_secs_f64();
-            candidates_total.fetch_add(candidates.len(), Ordering::SeqCst);
-            let completed = analysis_completed.fetch_add(1, Ordering::SeqCst) + 1;
-            let completed_bytes = analysis_completed_bytes.fetch_add(job.parsed_bytes, Ordering::SeqCst).saturating_add(job.parsed_bytes);
-            sink(ProgressEvent::Phase {
-                phase: 2,
-                completed,
-                total,
-                fraction: 0.5 + completed as f32 / total as f32 * 0.5,
-                eta_seconds: estimated_remaining_seconds(completed_bytes, total_analysis_bytes, analysis_started.elapsed()),
-                active_workers: analysis_gate.active(),
-                worker_limit: analysis_gate.limit(),
-            });
-            emit(format!("[ANALYZE {:03}] complete in {:.1}s; {} candidates", job.order, elapsed, candidates.len()));
-            Ok(())
-        })
+        });
     });
-    if let Err(error) = analysis_result {
-        if controller.is_cancelled() {
-            sink(ProgressEvent::Cancelled);
-        } else {
-            sink(ProgressEvent::Failed(error.to_string()));
-        }
+    if let Some(error) = analysis_error.lock().take() {
+        let error = anyhow::Error::msg(error);
+        sink(ProgressEvent::Failed(error.to_string()));
         return Err(error);
     }
+    if controller.is_cancelled() { sink(ProgressEvent::Cancelled); bail!("cancelled"); }
 
     let combined = combine_candidates(&root, &jobs)?;
     write_summary(&benchmark, &plan, &analysis_plan, &jobs, combined.len())?;
@@ -326,7 +315,8 @@ fn write_preflight(root: &Path, jobs: &[DemoJob], plan: &ResourcePlan) -> Result
     let total = parse_estimate.saturating_add(analysis_additions);
     let headroom = total / 5;
     let text = format!(
-        "RUST ADAPTIVE RESOURCE PLAN\nLogical processors: {}\nAvailable RAM: {:.1} GB\nReserved RAM: {:.1} GB\nParser worker ceiling: {}\nAnalyzer worker ceiling: {}\nWorker admission: rechecked before each job from live available RAM\n\nDISK PREFLIGHT\nInput demos: {:.2} GB\nEstimated parse output: {:.2} GB\nEstimated analysis additions: {:.2} GB\nSafety headroom: {:.2} GB\nRecommended free space: {:.2} GB\n\n{}\n",
+        "RUST ADAPTIVE RESOURCE PLAN\nPerformance profile: {}\nLogical processors: {}\nAvailable RAM: {:.1} GB\nReserved RAM: {:.1} GB\nParser worker ceiling: {}\nAnalyzer worker ceiling: {}\nWorker admission: rechecked before each job from live available RAM\n\nDISK PREFLIGHT\nInput demos: {:.2} GB\nEstimated parse output: {:.2} GB\nEstimated analysis additions: {:.2} GB\nSafety headroom: {:.2} GB\nRecommended free space: {:.2} GB\n\n{}\n",
+        plan.performance_profile.label(),
         plan.logical_processors,
         plan.available_memory_bytes as f64 / 1_073_741_824.0,
         plan.reserved_memory_bytes as f64 / 1_073_741_824.0,

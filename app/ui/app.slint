@@ -8,11 +8,12 @@ export struct CandidateRow {
 
 component AutoScrollLog inherits ScrollView {
     in property <string> log-text;
+    in property <float> scroll-offset;
     vertical-scrollbar-policy: always-on;
     horizontal-scrollbar-policy: always-off;
     viewport-width: self.width;
     viewport-height: log-content.height + 8px;
-    viewport-y: Math.min(0px, self.height - self.viewport-height);
+    viewport-y: root.scroll-offset * 1px;
 
     log-content := Text {
         x: 4px;
@@ -41,10 +42,11 @@ export component AppWindow inherits Window {
     in-out property <string> item-schema;
     in-out property <string> status-text: "Ready";
     in-out property <string> log-text;
-    in-out property <int> log-cursor-position: 0;
+    in-out property <float> log-scroll-offset: 0;
     in-out property <float> progress-value: 0;
     in-out property <bool> busy: false;
     in-out property <string> resource-plan-text;
+    in-out property <string> performance-profile: "High";
 
     in-out property <[CandidateRow]> candidate-rows;
     in-out property <string> filter-text;
@@ -109,9 +111,10 @@ export component AppWindow inherits Window {
                 Row { Text { text: "TF2 demos"; color: #e2e8ee; vertical-alignment: center; } LineEdit { text <=> root.demo-paths; horizontal-stretch: 1; } Button { text: "Browse demos"; clicked => { root.choose-demos(); } } }
                 Row { Text { text: "Export location"; color: #e2e8ee; vertical-alignment: center; } LineEdit { text <=> root.export-directory; horizontal-stretch: 1; } Button { text: "Select location"; clicked => { root.choose-export-directory(); } } }
                 Row { Text { text: "Item schema (optional)"; color: #e2e8ee; vertical-alignment: center; } LineEdit { text <=> root.item-schema; horizontal-stretch: 1; } Button { text: "Select schema"; clicked => { root.choose-item-schema(); } } }
+                Row { Text { text: "Performance"; color: #e2e8ee; vertical-alignment: center; } ComboBox { model: ["Low", "Medium", "High"]; current-value <=> root.performance-profile; } Text { text: "Low uses ~45%, Medium ~70%, and High the full safe dynamic worker maximum for this computer."; color: #aeb8c2; horizontal-stretch: 1; wrap: word-wrap; } }
             }
             Text { text: "Rust two-phase pipeline: adaptive parallel parsing followed by adaptive Rust analysis. Worker admission responds to this computer's available CPU and RAM during the run."; color: #aeb8c2; wrap: word-wrap; }
-            AutoScrollLog { log-text: root.log-text; vertical-stretch: 1; }
+            AutoScrollLog { log-text: root.log-text; scroll-offset: root.log-scroll-offset; vertical-stretch: 1; }
             Rectangle {
                 height: 12px;
                 background: #17191c;
@@ -240,7 +243,7 @@ export component AppWindow inherits Window {
         if root.selected-page == 3 : VerticalLayout {
             spacing: 8px;
             HorizontalLayout { Text { text: "Parser/Analyzer Logs"; color: white; font-size: 20px; } Rectangle { horizontal-stretch: 1; } Button { text: "Back to Candidates"; enabled: root.has-export; clicked => { root.selected-page = 1; } } }
-            AutoScrollLog { log-text: root.log-text; vertical-stretch: 1; }
+            AutoScrollLog { log-text: root.log-text; scroll-offset: root.log-scroll-offset; vertical-stretch: 1; }
         }
     }
 }

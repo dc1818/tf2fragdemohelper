@@ -15,8 +15,38 @@ use sysinfo::System;
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
+/// A user preference layered on top of the machine-specific resource plan.
+/// The underlying CPU and RAM calculation remains dynamic; this only scales
+/// its safe maximum before the live-memory gate admits a new job.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub enum PerformanceProfile {
+    Low,
+    Medium,
+    High,
+}
+
+impl PerformanceProfile {
+    pub fn from_setting(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            _ => Self::High,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self { Self::Low => "Low", Self::Medium => "Medium", Self::High => "High" }
+    }
+
+    fn scale(self, maximum: usize) -> usize {
+        let multiplier = match self { Self::Low => 0.45, Self::Medium => 0.70, Self::High => 1.0 };
+        ((maximum as f64 * multiplier).round() as usize).clamp(1, maximum.max(1))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResourcePlan {
+    pub performance_profile: PerformanceProfile,
     pub logical_processors: usize,
     pub total_memory_bytes: u64,
     pub available_memory_bytes: u64,
@@ -31,7 +61,7 @@ pub struct ResourcePlan {
 }
 
 impl ResourcePlan {
-    pub fn detect(jobs: &[DemoJob]) -> Self {
+    pub fn detect(jobs: &[DemoJob], performance_profile: PerformanceProfile) -> Self {
         let mut system = System::new_all();
         system.refresh_memory();
         let logical = thread::available_parallelism().map(|value| value.get()).unwrap_or(1);
@@ -66,10 +96,13 @@ impl ResourcePlan {
         let parse_memory_limit = (usable / parse_memory).max(1) as usize;
         let analysis_memory_limit = (usable / analysis_memory).max(1) as usize;
         let count = jobs.len().max(1);
-        let parse_ceiling = cpu_budget.min(parse_memory_limit).min(count).max(1);
-        let analysis_ceiling = cpu_budget.min(analysis_memory_limit).min(count).max(1);
+        let parse_hardware_ceiling = cpu_budget.min(parse_memory_limit).min(count).max(1);
+        let analysis_hardware_ceiling = cpu_budget.min(analysis_memory_limit).min(count).max(1);
+        let parse_ceiling = performance_profile.scale(parse_hardware_ceiling);
+        let analysis_ceiling = performance_profile.scale(analysis_hardware_ceiling);
 
         Self {
+            performance_profile,
             logical_processors: logical,
             total_memory_bytes: total,
             available_memory_bytes: available,
@@ -81,6 +114,7 @@ impl ResourcePlan {
             estimated_parse_worker_bytes: parse_memory,
             estimated_analysis_worker_bytes: analysis_memory,
             reason: vec![
+                format!("{} performance profile: {}% of this computer's safe dynamic worker maximum", performance_profile.label(), match performance_profile { PerformanceProfile::Low => 45, PerformanceProfile::Medium => 70, PerformanceProfile::High => 100 }),
                 format!("{} logical processors; {} reserved for the OS/UI", logical, cpu_reserve),
                 format!("analysis sized from parsed exports; p75={} MiB", parsed_p75 / MIB),
                 "worker admission is rechecked from live available memory before every job starts".into(),

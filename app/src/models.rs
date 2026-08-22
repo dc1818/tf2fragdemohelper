@@ -100,18 +100,6 @@ pub struct DemoJob {
     pub parsed_bytes: u64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct WorkerSample {
-    pub kind: String,
-    pub machine_id: String,
-    pub workers: usize,
-    pub input_bytes: u64,
-    pub wall_seconds: f64,
-    pub throughput_mib_s: f64,
-    pub peak_memory_bytes: u64,
-    pub succeeded: bool,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppSettings {

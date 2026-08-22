@@ -152,7 +152,7 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 let weak = progress_weak.clone();
                 let _ = slint::invoke_from_event_loop(move || update_progress(&weak, event));
             });
-            let result = batch::run_batch(demos, output, schema, scheduler::load_history(), controller, sink);
+            let result = batch::run_batch(demos, output, schema, controller, sink);
             if let Ok(root) = result {
                 match load_candidates(&root.join("frag_candidates.ndjson")) {
                     Ok(candidates) => {

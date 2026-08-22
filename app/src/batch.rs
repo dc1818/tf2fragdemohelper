@@ -1,7 +1,7 @@
 use crate::{
     analyzer::analyze_export,
-    models::{Candidate, DemoJob, WorkerSample},
-    scheduler::{history_path, largest_first, machine_id, ResourcePlan},
+    models::{Candidate, DemoJob},
+    scheduler::{largest_first, ResourcePlan},
 };
 use anyhow::{bail, Context, Result};
 use chrono::Local;
@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 use serde_json::json;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -71,7 +71,6 @@ pub fn run_batch(
     demos: Vec<PathBuf>,
     output_parent: PathBuf,
     item_schema: Option<PathBuf>,
-    history: Vec<WorkerSample>,
     controller: BatchController,
     sink: ProgressSink,
 ) -> Result<PathBuf> {
@@ -110,7 +109,7 @@ pub fn run_batch(
             export_directory: export,
         });
     }
-    let plan = ResourcePlan::detect(&jobs, &history);
+    let plan = ResourcePlan::detect(&jobs);
     sink(ProgressEvent::Plan(plan.clone()));
     write_preflight(&root, &jobs, &plan)?;
     emit(format!(
@@ -128,7 +127,6 @@ pub fn run_batch(
     let total = jobs.len();
     let total_parse_bytes: u64 = jobs.iter().map(|job| job.source_bytes).sum();
     let parse_started = Instant::now();
-    let parse_samples = Mutex::new(Vec::new());
     let parse_gate = Arc::new(plan.parser_gate(controller.cancellation_token()));
     let parse_result: Result<()> = parse_pool.install(|| {
         largest_first(jobs.clone(), false).par_iter().try_for_each(|job| {
@@ -153,16 +151,6 @@ pub fn run_batch(
             }
             let elapsed = started.elapsed().as_secs_f64();
             let output_bytes = directory_size(&job.export_directory);
-            parse_samples.lock().push(WorkerSample {
-                kind: "parse".into(),
-                machine_id: machine_id(plan.logical_processors, plan.total_memory_bytes),
-                workers: plan.parse_workers,
-                input_bytes: job.source_bytes,
-                wall_seconds: elapsed,
-                throughput_mib_s: mib_per_second(job.source_bytes, elapsed),
-                peak_memory_bytes: 0,
-                succeeded: true,
-            });
             let completed = parse_completed.fetch_add(1, Ordering::SeqCst) + 1;
             let completed_bytes = parse_completed_bytes.fetch_add(job.source_bytes, Ordering::SeqCst).saturating_add(job.source_bytes);
             sink(ProgressEvent::Phase {
@@ -190,9 +178,8 @@ pub fn run_batch(
     for job in &mut jobs {
         job.parsed_bytes = directory_size(&job.export_directory);
     }
-    // Re-plan Phase 2 from the parsed bytes now known, preserving the same
-    // benchmark history but refusing the old one-worker collapse.
-    let analysis_plan = ResourcePlan::detect(&jobs, &history);
+    // Re-plan Phase 2 from the parsed bytes now known.
+    let analysis_plan = ResourcePlan::detect(&jobs);
     emit(format!(
         "Phase 2: Rust analysis starts with up to {} workers and adjusts admission from live free memory; largest exports first",
         analysis_plan.analysis_worker_ceiling
@@ -205,7 +192,6 @@ pub fn run_batch(
     let analysis_completed_bytes = AtomicU64::new(0);
     let total_analysis_bytes: u64 = jobs.iter().map(|job| job.parsed_bytes).sum();
     let analysis_started = Instant::now();
-    let analysis_samples = Mutex::new(Vec::new());
     let candidates_total = AtomicUsize::new(0);
     let analysis_gate = Arc::new(analysis_plan.analyzer_gate(controller.cancellation_token()));
     let analysis_result: Result<()> = analysis_pool.install(|| {
@@ -226,16 +212,6 @@ pub fn run_batch(
             let candidates = analyze_export(&job.export_directory, item_schema.as_deref())?;
             let elapsed = started.elapsed().as_secs_f64();
             candidates_total.fetch_add(candidates.len(), Ordering::SeqCst);
-            analysis_samples.lock().push(WorkerSample {
-                kind: "analysis".into(),
-                machine_id: machine_id(analysis_plan.logical_processors, analysis_plan.total_memory_bytes),
-                workers: analysis_plan.analysis_workers,
-                input_bytes: job.parsed_bytes,
-                wall_seconds: elapsed,
-                throughput_mib_s: mib_per_second(job.parsed_bytes, elapsed),
-                peak_memory_bytes: 0,
-                succeeded: true,
-            });
             let completed = analysis_completed.fetch_add(1, Ordering::SeqCst) + 1;
             let completed_bytes = analysis_completed_bytes.fetch_add(job.parsed_bytes, Ordering::SeqCst).saturating_add(job.parsed_bytes);
             sink(ProgressEvent::Phase {
@@ -261,7 +237,6 @@ pub fn run_batch(
     }
 
     let combined = combine_candidates(&root, &jobs)?;
-    append_history(parse_samples.into_inner().into_iter().chain(analysis_samples.into_inner()))?;
     write_summary(&benchmark, &plan, &analysis_plan, &jobs, combined.len())?;
     sink(ProgressEvent::Complete { export_root: root.clone(), candidates: combined.len() });
     Ok(root)
@@ -395,19 +370,6 @@ fn write_summary(path: &Path, parse: &ResourcePlan, analysis: &ResourcePlan, job
     Ok(())
 }
 
-fn append_history(samples: impl IntoIterator<Item = WorkerSample>) -> Result<()> {
-    let path = history_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut output = OpenOptions::new().create(true).append(true).open(path)?;
-    for sample in samples {
-        serde_json::to_writer(&mut output, &sample)?;
-        output.write_all(b"\n")?;
-    }
-    Ok(())
-}
-
 fn directory_size(path: &Path) -> u64 {
     WalkDir::new(path)
         .into_iter()
@@ -416,10 +378,6 @@ fn directory_size(path: &Path) -> u64 {
         .filter(|metadata| metadata.is_file())
         .map(|metadata| metadata.len())
         .sum()
-}
-
-fn mib_per_second(bytes: u64, seconds: f64) -> f64 {
-    if seconds <= 0.0 { 0.0 } else { bytes as f64 / 1_048_576.0 / seconds }
 }
 
 fn estimated_remaining_seconds(completed_bytes: u64, total_bytes: u64, elapsed: Duration) -> Option<u64> {

@@ -1,11 +1,8 @@
-use crate::models::{DemoJob, WorkerSample};
+use crate::models::DemoJob;
 use serde::{Deserialize, Serialize};
 use anyhow::{bail, Result};
 use std::{
     cmp::Reverse,
-    collections::BTreeMap,
-    fs,
-    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -34,7 +31,7 @@ pub struct ResourcePlan {
 }
 
 impl ResourcePlan {
-    pub fn detect(jobs: &[DemoJob], history: &[WorkerSample]) -> Self {
+    pub fn detect(jobs: &[DemoJob]) -> Self {
         let mut system = System::new_all();
         system.refresh_memory();
         let logical = thread::available_parallelism().map(|value| value.get()).unwrap_or(1);
@@ -72,12 +69,6 @@ impl ResourcePlan {
         let parse_ceiling = cpu_budget.min(parse_memory_limit).min(count).max(1);
         let analysis_ceiling = cpu_budget.min(analysis_memory_limit).min(count).max(1);
 
-        // Historical results are retained for benchmark reporting, but they do
-        // not cap a fresh run.  That avoids one slow/old configuration keeping
-        // a faster computer underutilized.  Runtime admission responds to the
-        // currently available RAM before every parser/analyzer job starts.
-        let _ = history;
-
         Self {
             logical_processors: logical,
             total_memory_bytes: total,
@@ -93,7 +84,7 @@ impl ResourcePlan {
                 format!("{} logical processors; {} reserved for the OS/UI", logical, cpu_reserve),
                 format!("analysis sized from parsed exports; p75={} MiB", parsed_p75 / MIB),
                 "worker admission is rechecked from live available memory before every job starts".into(),
-                "benchmark history is recorded for comparison but cannot throttle a new hardware plan".into(),
+                "per-run benchmark logs and summaries are written beside the export".into(),
             ],
         }
     }
@@ -196,37 +187,6 @@ pub fn largest_first(mut jobs: Vec<DemoJob>, analysis: bool) -> Vec<DemoJob> {
     jobs
 }
 
-fn guarded_history_choice(kind: &str, hardware_maximum: usize, history: &[WorkerSample], machine: &str) -> usize {
-    let mut groups: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
-    for sample in history.iter().filter(|sample| {
-        sample.kind == kind
-            && sample.machine_id == machine
-            && sample.succeeded
-            && sample.workers > 0
-            && sample.workers <= hardware_maximum
-            && sample.throughput_mib_s > 0.0
-    }) {
-        groups.entry(sample.workers).or_default().push(sample.throughput_mib_s);
-    }
-    let eligible: Vec<_> = groups
-        .into_iter()
-        .filter(|(_, samples)| samples.len() >= 2)
-        .collect();
-    if eligible.len() < 2 {
-        return hardware_maximum;
-    }
-    let (best_workers, _) = eligible
-        .into_iter()
-        .map(|(workers, mut samples)| {
-            samples.sort_by(f64::total_cmp);
-            let median = samples[samples.len() / 2];
-            (workers, median)
-        })
-        .max_by(|left, right| left.1.total_cmp(&right.1))
-        .unwrap();
-    best_workers.max((hardware_maximum + 1) / 2).min(hardware_maximum)
-}
-
 fn percentile(mut values: Vec<u64>, percentile: f64) -> u64 {
     if values.is_empty() {
         return 0;
@@ -234,51 +194,4 @@ fn percentile(mut values: Vec<u64>, percentile: f64) -> u64 {
     values.sort_unstable();
     let index = ((values.len() - 1) as f64 * percentile).ceil() as usize;
     values[index.min(values.len() - 1)]
-}
-
-pub fn machine_id(logical: usize, total_memory: u64) -> String {
-    format!("{}-{}-{}", std::env::consts::OS, logical, total_memory / GIB)
-}
-
-pub fn history_path() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("TF2FragDemoHelper")
-        .join("rust_benchmark_history.ndjson")
-}
-
-pub fn load_history() -> Vec<WorkerSample> {
-    fs::read_to_string(history_path())
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn one_repeated_worker_count_cannot_collapse_plan() {
-        let history = (0..5)
-            .map(|_| WorkerSample {
-                kind: "analysis".into(),
-                machine_id: "test".into(),
-                workers: 1,
-                throughput_mib_s: 130.0,
-                succeeded: true,
-                ..WorkerSample::default()
-            })
-            .chain(std::iter::once(WorkerSample {
-                kind: "analysis".into(),
-                machine_id: "test".into(),
-                workers: 8,
-                throughput_mib_s: 614.0,
-                succeeded: true,
-                ..WorkerSample::default()
-            }))
-            .collect::<Vec<_>>();
-        assert_eq!(guarded_history_choice("analysis", 14, &history, "test"), 14);
-    }
 }

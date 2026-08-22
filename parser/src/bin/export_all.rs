@@ -228,16 +228,26 @@ fn packet_server_tick(packet: &Packet<'_>) -> Option<u32> {
     })
 }
 
-fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::Value {
+fn capture_metadata(header: &Header, usercmd_packet_count: u64, server_info_stv: Option<bool>) -> serde_json::Value {
     let nick = header.nick.trim();
     let normalized_nick = nick.to_ascii_lowercase();
-    if normalized_nick.contains("sourcetv") || normalized_nick.contains("source tv") {
+    if server_info_stv == Some(true) {
+        json!({
+            "classification": "stv",
+            "confidence": "high",
+            "evidence": ["The decoded server-info message identifies this client as SourceTV."],
+            "header_nick": nick,
+            "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": true,
+        })
+    } else if normalized_nick.contains("sourcetv") || normalized_nick.contains("source tv") {
         json!({
             "classification": "stv",
             "confidence": "high",
             "evidence": ["Demo header nickname identifies a SourceTV recorder."],
             "header_nick": nick,
             "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": server_info_stv,
         })
     } else if usercmd_packet_count > 0 {
         json!({
@@ -246,6 +256,7 @@ fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::V
             "evidence": ["Demo contains dem_usercmd packets, which record a client player's input."],
             "header_nick": nick,
             "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": server_info_stv,
         })
     } else {
         json!({
@@ -254,8 +265,20 @@ fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::V
             "evidence": ["Header is not explicitly SourceTV and no dem_usercmd packets were found."],
             "header_nick": nick,
             "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": server_info_stv,
         })
     }
+}
+
+fn packet_server_info_stv(packet: &Packet<'_>) -> Option<bool> {
+    let messages = match packet {
+        Packet::Signon(message_packet) | Packet::Message(message_packet) => &message_packet.messages,
+        _ => return None,
+    };
+    messages.iter().find_map(|message| match message {
+        Message::ServerInfo(server_info) => Some(server_info.stv),
+        _ => None,
+    })
 }
 
 fn usage(program: &str) {
@@ -321,6 +344,7 @@ fn main() -> Result<(), MainError> {
     let mut state_delta_writer = StateDeltaWriter::default();
     let mut packet_count: u64 = 0;
     let mut usercmd_packet_count: u64 = 0;
+    let mut server_info_stv: Option<bool> = None;
 
     loop {
         // RawPacketStream positions are bit positions in the original demo stream.
@@ -339,6 +363,9 @@ fn main() -> Result<(), MainError> {
         let packet_type = packet.packet_type().as_lowercase_str();
         if matches!(&packet, Packet::UserCmd(_)) {
             usercmd_packet_count += 1;
+        }
+        if let Some(stv) = packet_server_info_stv(&packet) {
+            server_info_stv = Some(server_info_stv.unwrap_or(false) || stv);
         }
 
         // Write the complete decoded packet as one independent JSON line.
@@ -402,7 +429,7 @@ fn main() -> Result<(), MainError> {
         "source_demo": input_path.to_string_lossy(),
         "packet_count": packet_count,
         "state_sample_count": state_delta_writer.sample_count,
-        "demo_capture": capture_metadata(&header, usercmd_packet_count),
+        "demo_capture": capture_metadata(&header, usercmd_packet_count, server_info_stv),
         "parser_reported_incomplete": packet_stream.incomplete,
         "files": {
             "header": "header.json",

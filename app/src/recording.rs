@@ -986,6 +986,21 @@ fn clip_window(candidate: &Candidate, settings: &AppSettings) -> (i64, i64) {
     (start, end.max(start + 1))
 }
 
+fn candidate_needs_spectator_focus(candidate: &Candidate) -> bool {
+    if candidate.attacker_user_id <= 0 {
+        return false;
+    }
+    if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") {
+        return true;
+    }
+    // Older exports could mislabel an STV as POV when dem_usercmd packets were
+    // present.  A supposed POV with no identified POV player and all-player
+    // analysis cannot safely preserve a single recorded POV, so explicitly
+    // focus the selected candidate just as an STV requires.
+    candidate.demo_context.analysis_scope.eq_ignore_ascii_case("all_players")
+        && candidate.demo_context.pov_player_user_id.is_none()
+}
+
 fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
@@ -998,7 +1013,7 @@ fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         Some(target_tick),
         "",
     );
-    if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") && candidate.attacker_user_id > 0 {
+    if candidate_needs_spectator_focus(candidate) {
         add_vdm_action(
             &mut lines,
             &mut action,
@@ -1030,7 +1045,7 @@ fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<
         let base = format!("{:03}_{}_t{}-{}", order, sanitize(&candidate.candidate_id), candidate.clip_start_tick, candidate.clip_end_tick);
         let seek_at = if previous_finalize_tick < 0 { 2 } else { previous_finalize_tick + 2 };
         add_vdm_action(&mut lines, &mut action, "SkipAhead", "Batch seek", seek_at, Some(start), "");
-        let focus = if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") && candidate.attacker_user_id > 0 {
+        let focus = if candidate_needs_spectator_focus(candidate) {
             format!("spec_autodirector 0; spec_player #{}; spec_mode 4; ", candidate.attacker_user_id)
         } else { String::new() };
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Start clip", start + 1, None, &format!("{focus}exec tf2fragdemohelper_batch/{session_name}/{base}_start"));

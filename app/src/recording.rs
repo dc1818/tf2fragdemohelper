@@ -37,7 +37,7 @@ impl RecordingIndex {
             .ok()
             .map(BufReader::new)
             .into_iter()
-            .flat_map(|reader| reader.lines().map_while(Result::ok))
+            .flat_map(|reader| reader.lines().map_while(|line| line.ok()))
             .filter_map(|line| serde_json::from_str::<RecordingEntry>(&line).ok())
             .map(|entry| (entry.recording_key.clone(), entry))
             .collect();
@@ -388,7 +388,7 @@ fn find_fingerprint_near(original: &Path, fingerprint: &str) -> Option<PathBuf> 
     WalkDir::new(root)
         .max_depth(3)
         .into_iter()
-        .filter_map(Result::ok)
+        .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
         .find(|path| file_fingerprint(path).ok().as_deref() == Some(fingerprint))
@@ -403,7 +403,7 @@ fn find_unindexed_output(root: &Path, candidate: &Candidate) -> Option<PathBuf> 
     WalkDir::new(root)
         .max_depth(4)
         .into_iter()
-        .filter_map(Result::ok)
+        .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file() && entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
         .map(|entry| entry.into_path())
         .find(|path| {

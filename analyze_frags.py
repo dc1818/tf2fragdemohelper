@@ -1349,9 +1349,42 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
     }
 
 
-def competitive_roster_at(timeline: StateTimeline, tick: int) -> Dict[str, Dict[str, int]]:
+def player_activity_history(events: Iterable[Dict[str, Any]]) -> Dict[int, List[Tuple[int, bool]]]:
+    """Track disconnect/reconnect events so stale state cannot inflate a roster.
+
+    The state stream intentionally retains the last known state for a player.
+    That is useful for frag analysis, but a departed player must not remain a
+    sixth/ninth player while classifying the server format.
+    """
+    history: Dict[int, List[Tuple[int, bool]]] = defaultdict(list)
+    for item in events:
+        name = event_name(item)
+        fields = event_fields(item)
+        user_id = as_int(fields.get("user_id", fields.get("userid")))
+        if not user_id:
+            continue
+        if name in {"player_disconnect", "player_disconnect_client"}:
+            history[user_id].append((as_int(item.get("tick")), False))
+        elif name in {"player_connect", "player_connect_client"}:
+            history[user_id].append((as_int(item.get("tick")), True))
+    return {user_id: sorted(changes) for user_id, changes in history.items()}
+
+
+def player_active_at(activity: Dict[int, List[Tuple[int, bool]]], user_id: int, tick: int) -> bool:
+    """Unknown players remain eligible; only an observed disconnect excludes."""
+    active = True
+    for event_tick, value in activity.get(user_id, []):
+        if event_tick > tick:
+            break
+        active = value
+    return active
+
+
+def competitive_roster_at(timeline: StateTimeline, tick: int, activity: Optional[Dict[int, List[Tuple[int, bool]]]] = None) -> Dict[str, Dict[str, int]]:
     result: Dict[str, Dict[str, int]] = {"red": defaultdict(int), "blu": defaultdict(int)}
     for user_id in timeline.players:
+        if activity is not None and not player_active_at(activity, user_id, tick):
+            continue
         state = timeline.player_at(user_id, tick, require_alive=False)
         if state is None:
             continue
@@ -1360,6 +1393,24 @@ def competitive_roster_at(timeline: StateTimeline, tick: int) -> Dict[str, Dict[
         if team in result and player_class in COMPETITIVE_CLASSES:
             result[team][player_class] += 1
     return {team: dict(classes) for team, classes in result.items()}
+
+
+def roster_total(roster: Dict[str, int]) -> int:
+    return sum(roster.values())
+
+
+def sixes_roster_fit(roster: Dict[str, int]) -> bool:
+    """Allow one temporary off-class while retaining the characteristic 6s core."""
+    if roster_total(roster) != 6:
+        return False
+    distance = sum(abs(roster.get(player_class, 0) - expected) for player_class, expected in SIXES_COMPOSITION.items())
+    off_class_count = sum(count for player_class, count in roster.items() if player_class not in SIXES_COMPOSITION)
+    return distance + off_class_count <= 2
+
+
+def highlander_roster_fit(roster: Dict[str, int]) -> bool:
+    """A Highlander team can temporarily off-class without losing its identity."""
+    return roster_total(roster) == 9 and len(set(roster).intersection(COMPETITIVE_CLASSES)) >= 8
 
 
 def competitive_mode_context(export_directory: Path, events: List[Dict[str, Any]], timeline: StateTimeline, rounds: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1381,6 +1432,7 @@ def competitive_mode_context(export_directory: Path, events: List[Dict[str, Any]
     rgl_signature = "rgl" in evidence_text
     valve_signature = any(token in evidence_text for token in ("valve", "matchmaking", "casual"))
 
+    activity = player_activity_history(events)
     sample_ticks: List[int] = []
     for round_data in rounds:
         start = as_int(round_data.get("live_start_tick"))
@@ -1393,38 +1445,48 @@ def competitive_mode_context(export_directory: Path, events: List[Dict[str, Any]
 
     sixes_samples = 0
     highlander_samples = 0
+    small_competitive_samples = 0
     observed_samples = 0
     for tick in sample_ticks:
-        rosters = competitive_roster_at(timeline, tick)
+        rosters = competitive_roster_at(timeline, tick, activity)
         if not rosters["red"] or not rosters["blu"]:
             continue
         observed_samples += 1
-        if all(rosters[team] == SIXES_COMPOSITION for team in ("red", "blu")):
+        team_sizes = [roster_total(rosters[team]) for team in ("red", "blu")]
+        if all(5 <= size <= 10 for size in team_sizes):
+            small_competitive_samples += 1
+        if all(sixes_roster_fit(rosters[team]) for team in ("red", "blu")):
             sixes_samples += 1
-        if all(sum(rosters[team].values()) == 9 and set(rosters[team]) == COMPETITIVE_CLASSES and all(count == 1 for count in rosters[team].values()) for team in ("red", "blu")):
+        if all(highlander_roster_fit(rosters[team]) for team in ("red", "blu")):
             highlander_samples += 1
 
     sixes_ratio = sixes_samples / observed_samples if observed_samples else 0.0
     highlander_ratio = highlander_samples / observed_samples if observed_samples else 0.0
+    small_competitive_ratio = small_competitive_samples / observed_samples if observed_samples else 0.0
     mode = "unknown"
     label = "Unknown / Mixed"
     confidence = "low"
     evidence = []
-    if highlander_samples >= 3 and highlander_ratio >= 0.60:
+    if highlander_samples >= 3 and highlander_ratio >= 0.40:
         mode = "rgl_highlander" if rgl_signature else "highlander"
         label = "RGL Highlander" if rgl_signature else "Highlander Competitive"
-        confidence = "high" if highlander_ratio >= 0.85 else "medium"
-        evidence.append("{} of {} sampled live states were exact 9v9 one-of-each-class rosters.".format(highlander_samples, observed_samples))
-    elif sixes_samples >= 3 and sixes_ratio >= 0.60:
+        confidence = "high" if highlander_ratio >= 0.70 else "medium"
+        evidence.append("{} of {} sampled live states had 9 players per team with at least 8 distinct classes; temporary off-classes are allowed.".format(highlander_samples, observed_samples))
+    elif sixes_samples >= 3 and sixes_ratio >= 0.40:
         mode = "rgl_6v6" if rgl_signature else "6v6"
         label = "RGL 6v6" if rgl_signature else "6v6 Competitive"
-        confidence = "high" if sixes_ratio >= 0.85 else "medium"
-        evidence.append("{} of {} sampled live states were 2 Scout, 2 Soldier, 1 Demoman, 1 Medic per team.".format(sixes_samples, observed_samples))
+        confidence = "high" if sixes_ratio >= 0.70 else "medium"
+        evidence.append("{} of {} sampled live states had six players per team and matched the 6v6 core with up to one temporary off-class per team.".format(sixes_samples, observed_samples))
     elif rgl_signature:
         mode = "rgl_competitive"
         label = "RGL Competitive"
         confidence = "medium"
         evidence.append("RGL signature found, but the captured roster was not stable enough to prove a format.")
+    elif small_competitive_samples >= 3 and small_competitive_ratio >= 0.60:
+        mode = "competitive_uncertain"
+        label = "Competitive — Format Uncertain"
+        confidence = "medium"
+        evidence.append("{} of {} sampled live states had stable 5–10 player team rosters, but neither 6v6 nor Highlander was conclusive.".format(small_competitive_samples, observed_samples))
     elif valve_signature:
         mode = "valve_public"
         label = "Valve Public"
@@ -1448,6 +1510,7 @@ def competitive_mode_context(export_directory: Path, events: List[Dict[str, Any]
         "mode_roster_samples": observed_samples,
         "mode_6v6_samples": sixes_samples,
         "mode_highlander_samples": highlander_samples,
+        "mode_small_competitive_samples": small_competitive_samples,
         "server_name": server_name or None,
     }
 

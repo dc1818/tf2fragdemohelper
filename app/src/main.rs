@@ -205,22 +205,43 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     ui.on_load_export(move || {
         let Some(root) = rfd::FileDialog::new().pick_folder() else { return };
         let path = if root.join("frag_candidates.ndjson").is_file() { root.join("frag_candidates.ndjson") } else { return };
-        match load_candidates(&path) {
-            Ok(candidates) => {
-                let mut state = state_for_load.lock();
-                state.export_root = Some(root);
-                state.selected = vec![false; candidates.len()];
-                state.candidates = candidates;
-                drop(state);
-                if let Some(ui) = weak.upgrade() {
-                    refresh_candidates(&ui, &state_for_load, "", 0);
-                    ui.set_has_export(true);
-                    ui.set_selected_page(1);
-                    ui.set_status_text("Loaded parsed export".into());
-                }
-            }
-            Err(error) => if let Some(ui) = weak.upgrade() { ui.set_status_text(error.to_string().into()); },
+        if let Some(ui) = weak.upgrade() {
+            ui.set_busy(true);
+            ui.set_status_text("Loading parsed export: reading candidates…".into());
         }
+        let weak_for_thread = weak.clone();
+        let state_for_thread = state_for_load.clone();
+        thread::spawn(move || {
+            let result = load_candidates(&path).map_err(|error| error.to_string());
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak_for_thread.upgrade() else { return };
+                match result {
+                    Ok(candidates) => {
+                        let count = candidates.len();
+                        {
+                            let mut state = state_for_thread.lock();
+                            state.export_root = Some(root.clone());
+                            state.selected = vec![false; count];
+                            state.candidates = candidates;
+                        }
+                        ui.set_status_text(format!("Loaded {count} candidates: building table…").into());
+                        refresh_candidates(&ui, &state_for_thread, "", 0);
+                        ui.set_has_export(true);
+                        ui.set_selected_page(1);
+                        ui.set_busy(false);
+                        if reconcile_recorded_outputs(ui.as_weak(), state_for_thread.clone(), root) {
+                            ui.set_status_text(format!("Loaded {count} candidates — checking saved recordings in the background").into());
+                        } else {
+                            ui.set_status_text(format!("Loaded {count} candidates").into());
+                        }
+                    }
+                    Err(error) => {
+                        ui.set_busy(false);
+                        ui.set_status_text(format!("Could not load parsed export: {error}").into());
+                    }
+                }
+            });
+        });
     });
 
     let weak = ui.as_weak();
@@ -444,11 +465,7 @@ fn refresh_candidates(ui: &AppWindow, state: &Arc<Mutex<State>>, filter: &str, m
     state.visible.clear();
     let mut rows = Vec::new();
     for index in 0..state.candidates.len() {
-        let recorded = {
-            let candidate = state.candidates[index].clone();
-            let root = state.settings.recording_output_directory.clone();
-            state.recording_index.is_recorded(&candidate, Some(&root))
-        };
+        let recorded = state.recording_index.is_recorded_indexed(&state.candidates[index]);
         let candidate = state.candidates[index].clone();
         if candidate.overall_score < minimum_score as f64 || !expression.matches(&candidate, recorded) { continue }
         state.visible.push(index);
@@ -487,6 +504,37 @@ fn load_candidates(path: &Path) -> Result<Vec<Candidate>> {
             Err(error) => Some(Err(error.into())),
         })
         .collect()
+}
+
+fn reconcile_recorded_outputs(weak: Weak<AppWindow>, state: Arc<Mutex<State>>, export_root: PathBuf) -> bool {
+    let (candidates, output_root) = {
+        let state = state.lock();
+        (state.candidates.clone(), state.settings.recording_output_directory.clone())
+    };
+    if candidates.is_empty() || !output_root.is_dir() {
+        return false;
+    }
+    thread::spawn(move || {
+        let mut reconciled_index = { state.lock().recording_index.clone() };
+        let added = reconciled_index.reconcile_output_root(&candidates, &output_root);
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            {
+                let mut current = state.lock();
+                if current.export_root.as_ref() != Some(&export_root) {
+                    return;
+                }
+                current.recording_index.merge_missing_entries(&reconciled_index);
+            }
+            let filter = ui.get_filter_text().to_string();
+            let minimum_score = ui.get_minimum_score();
+            refresh_candidates(&ui, &state, &filter, minimum_score);
+            if added > 0 {
+                ui.set_status_text(format!("Loaded export — found {added} additional saved recording(s)").into());
+            }
+        });
+    });
+    true
 }
 
 fn format_duration(seconds: u64) -> String {

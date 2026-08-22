@@ -13,7 +13,7 @@ use std::{
     process::{Command, Stdio},
     sync::OnceLock,
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -21,6 +21,15 @@ use zip::ZipArchive;
 const PROFILE_FOLDER: &str = "tf2fragdemohelper_recording";
 const PROFILE_CFG: &str = "tf2fragdemohelper_recording_profile.cfg";
 const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
+
+#[derive(Clone)]
+struct DemoSignatureCacheEntry {
+    length: u64,
+    modified: Option<SystemTime>,
+    signature: String,
+}
+
+static DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignatureCacheEntry>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RecordingProfileSession {
@@ -54,6 +63,7 @@ pub struct RecordingEntry {
     pub completed_utc: String,
 }
 
+#[derive(Clone)]
 pub struct RecordingIndex {
     path: PathBuf,
     entries: HashMap<String, RecordingEntry>,
@@ -73,32 +83,90 @@ impl RecordingIndex {
         Self { path, entries }
     }
 
-    pub fn is_recorded(&mut self, candidate: &Candidate, recording_root: Option<&Path>) -> bool {
+    /// Fast UI-facing status lookup.  It deliberately does not walk the output directory:
+    /// walking it once for every candidate made large exported batches appear to freeze.
+    /// A single background reconciliation pass handles outputs that have not yet been indexed.
+    pub fn is_recorded_indexed(&self, candidate: &Candidate) -> bool {
         let Ok(key) = recording_key(candidate) else { return false };
-        if let Some(mut entry) = self.entries.get(&key).cloned() {
-            if entry.output_path.exists() {
-                if entry.output_fingerprint.is_empty() {
-                    entry.output_fingerprint = file_fingerprint(&entry.output_path).unwrap_or_default();
-                    self.entries.insert(key, entry.clone());
-                    let _ = self.append(entry);
-                }
-                return true;
+        self.entries.get(&key).is_some_and(|entry| entry.output_path.is_file())
+    }
+
+    /// Scan a recording directory once and add the outputs whose generated clip base names
+    /// match candidates.  This preserves detection of pre-existing outputs without doing an
+    /// expensive directory walk for every row in the candidate table.
+    pub fn reconcile_output_root(&mut self, candidates: &[Candidate], root: &Path) -> usize {
+        if !root.is_dir() {
+            return 0;
+        }
+
+        let mut targets: HashMap<(String, i64), Vec<&Candidate>> = HashMap::new();
+        for candidate in candidates {
+            targets
+                .entry((sanitize(&candidate.candidate_id).to_lowercase(), candidate.clip_start_tick))
+                .or_default()
+                .push(candidate);
+        }
+        let mut missing_fingerprints: HashMap<String, Vec<String>> = HashMap::new();
+        for (key, entry) in &self.entries {
+            if !entry.output_fingerprint.is_empty() && !entry.output_path.is_file() {
+                missing_fingerprints
+                    .entry(entry.output_fingerprint.clone())
+                    .or_default()
+                    .push(key.clone());
             }
-            if !entry.output_fingerprint.is_empty() {
-                if let Some(found) = find_fingerprint_near(&entry.output_path, &entry.output_fingerprint) {
-                    entry.output_path = found;
-                    self.entries.insert(key, entry.clone());
-                    let _ = self.append(entry);
-                    return true;
+        }
+
+        let mut found = Vec::new();
+        let mut relocated = Vec::new();
+        for entry in WalkDir::new(root).max_depth(4).into_iter().filter_map(|entry| entry.ok()) {
+            if !entry.file_type().is_file() || !entry.metadata().is_ok_and(|metadata| metadata.len() > 0) {
+                continue;
+            }
+            let Some(stem) = entry.path().file_stem().and_then(|value| value.to_str()) else { continue };
+            if !missing_fingerprints.is_empty() {
+                if let Ok(fingerprint) = file_fingerprint(entry.path()) {
+                    if let Some(keys) = missing_fingerprints.remove(&fingerprint) {
+                        relocated.extend(keys.into_iter().map(|key| (key, entry.path().to_path_buf())));
+                    }
+                }
+            }
+            let Some((prefix, ticks)) = stem.to_lowercase().rsplit_once("_t") else { continue };
+            let Some((order, candidate_id)) = prefix.split_once('_') else { continue };
+            if !order.chars().all(|character| character.is_ascii_digit()) {
+                continue;
+            }
+            let Some((start_text, end_text)) = ticks.split_once('-') else { continue };
+            let Ok(start_tick) = start_text.parse::<i64>() else { continue };
+            let Some(matches) = targets.get(&(candidate_id.to_owned(), start_tick)) else { continue };
+            for candidate in matches {
+                // Movie frame image files add digits after the end tick, so accept a prefix.
+                if end_text.starts_with(&candidate.clip_end_tick.to_string()) {
+                    found.push(((*candidate).clone(), entry.path().to_path_buf()));
+                    break;
                 }
             }
         }
-        if let Some(root) = recording_root.and_then(|root| (!root.as_os_str().is_empty()).then_some(root)) {
-            if let Some(output) = find_unindexed_output(root, candidate) {
-                return self.register(candidate, output).is_ok();
+
+        let mut added = 0;
+        for (candidate, path) in found {
+            if !self.is_recorded_indexed(&candidate) && self.register(&candidate, path).is_ok() {
+                added += 1;
             }
         }
-        false
+        for (key, path) in relocated {
+            if let Some(mut entry) = self.entries.get(&key).cloned() {
+                entry.output_path = path;
+                self.entries.insert(key, entry.clone());
+                let _ = self.append(entry);
+            }
+        }
+        added
+    }
+
+    pub fn merge_missing_entries(&mut self, other: &RecordingIndex) {
+        for (key, entry) in &other.entries {
+            self.entries.entry(key.clone()).or_insert_with(|| entry.clone());
+        }
     }
 
     pub fn register(&mut self, candidate: &Candidate, output: PathBuf) -> Result<()> {
@@ -974,13 +1042,27 @@ fn recording_key(candidate: &Candidate) -> Result<String> {
 
 fn demo_signature(path: &Path) -> Result<String> {
     let metadata = fs::metadata(path).with_context(|| format!("demo missing: {}", path.display()))?;
+    let cache_key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let modified = metadata.modified().ok();
+    let cache = DEMO_SIGNATURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(entry) = cache.lock().get(&cache_key) {
+        if entry.length == metadata.len() && entry.modified == modified {
+            return Ok(entry.signature.clone());
+        }
+    }
     let mut file = File::open(path)?;
     let mut head = vec![0u8; 1024 * 1024];
     let read = file.read(&mut head)?;
     let mut hash = Sha256::new();
     hash.update(metadata.len().to_le_bytes());
     hash.update(&head[..read]);
-    Ok(hex::encode(hash.finalize()))
+    let signature = hex::encode(hash.finalize());
+    cache.lock().insert(cache_key, DemoSignatureCacheEntry {
+        length: metadata.len(),
+        modified,
+        signature: signature.clone(),
+    });
+    Ok(signature)
 }
 
 fn file_fingerprint(path: &Path) -> Result<String> {
@@ -993,35 +1075,6 @@ fn file_fingerprint(path: &Path) -> Result<String> {
         hash.update(&buffer[..read]);
     }
     Ok(hex::encode(hash.finalize()))
-}
-
-fn find_fingerprint_near(original: &Path, fingerprint: &str) -> Option<PathBuf> {
-    let root = original.parent()?.parent().unwrap_or_else(|| original.parent().unwrap());
-    WalkDir::new(root)
-        .max_depth(3)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .find(|path| file_fingerprint(path).ok().as_deref() == Some(fingerprint))
-}
-
-fn find_unindexed_output(root: &Path, candidate: &Candidate) -> Option<PathBuf> {
-    if !root.is_dir() {
-        return None;
-    }
-    let id = sanitize(&candidate.candidate_id).to_lowercase();
-    let ticks = format!("t{}-{}", candidate.clip_start_tick, candidate.clip_end_tick);
-    WalkDir::new(root)
-        .max_depth(4)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file() && entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
-        .map(|entry| entry.into_path())
-        .find(|path| {
-            let name = path.file_stem().and_then(|value| value.to_str()).unwrap_or_default().to_lowercase();
-            name.contains(&id) && name.contains(&ticks)
-        })
 }
 
 fn index_path() -> PathBuf {

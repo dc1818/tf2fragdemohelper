@@ -366,7 +366,7 @@ fn scan_state_stream(path: &Path, deaths: &[Death], rounds: &[Round]) -> Result<
             }
             result.at_death.insert(target, snapshot);
         }
-        while pending_rosters.peek().is_some_and(|target| **target <= tick) {
+        while pending_rosters.peek().is_some_and(|target| *target <= tick) {
             let target = pending_rosters.next().unwrap();
             let mut roster: HashMap<String, HashMap<String, usize>> = HashMap::new();
             for state in current.values() {

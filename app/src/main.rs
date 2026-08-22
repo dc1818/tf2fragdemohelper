@@ -11,7 +11,7 @@ use crate::{
     batch::{BatchController, ProgressEvent},
     filter::CandidateFilter,
     models::{AppSettings, Candidate},
-    recording::{launch_hlae_batch, preview_candidate, recover_interrupted_profile, RecordingIndex},
+    recording::{launch_hlae_batch, preview_candidate, recover_interrupted_profile, shutdown_active_recording, RecordingIndex},
     scheduler::PerformanceProfile,
 };
 use anyhow::{Context, Result};
@@ -95,6 +95,14 @@ fn main() -> Result<()> {
     bind_candidate_callbacks(&ui, &state);
     bind_settings_callbacks(&ui, &state);
     ui.run()?;
+    if let Err(error) = shutdown_active_recording() {
+        rfd::MessageDialog::new()
+            .set_title("TF2 Recording Restore Warning")
+            .set_description(format!("TF2 recording files could not be fully restored. Your backups were retained.\n\n{error}"))
+            .set_level(rfd::MessageLevel::Error)
+            .show();
+        return Err(error);
+    }
     Ok(())
 }
 

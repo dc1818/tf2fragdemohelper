@@ -1,6 +1,7 @@
 use crate::models::{AppSettings, Candidate};
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -10,6 +11,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::OnceLock,
     thread,
     time::Duration,
 };
@@ -36,6 +38,8 @@ struct RecordingProfileSession {
     original_video_existed: bool,
     #[serde(default)]
     original_offline_cfg_existed: bool,
+    #[serde(default)]
+    hitsound_files: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -309,7 +313,37 @@ pub fn recover_interrupted_profile() -> Result<bool> {
     if windows_process_is_running(&profile.tf_process_name) {
         bail!("a TF2 recording session is still active; close TF2 before reopening the helper");
     }
-    restore_recording_profile(&profile)?;
+    if let Err(error) = restore_recording_profile(&profile) {
+        let _ = fs::write(profile.backup_directory.join("RESTORE_REQUIRED.txt"), error.to_string());
+        return Err(error);
+    }
+    Ok(true)
+}
+
+/// Match the previous application's FormClosing behavior: if the helper is
+/// closed during recording, stop the TF2 instance launched for that session
+/// and restore the original custom files and configuration before exiting.
+pub fn shutdown_active_recording() -> Result<bool> {
+    let pointer = active_profile_path();
+    if !pointer.is_file() {
+        return Ok(false);
+    }
+    let profile: RecordingProfileSession = serde_json::from_slice(&fs::read(&pointer)?)
+        .context("the active recording recovery file is invalid")?;
+    if windows_process_is_running(&profile.tf_process_name) {
+        stop_windows_process(&profile.tf_process_name)?;
+        for _ in 0..20 {
+            if !windows_process_is_running(&profile.tf_process_name) { break; }
+            thread::sleep(Duration::from_millis(250));
+        }
+        if windows_process_is_running(&profile.tf_process_name) {
+            bail!("TF2 did not close; original recording files remain safely backed up in {}", profile.backup_directory.display());
+        }
+    }
+    if let Err(error) = restore_recording_profile(&profile) {
+        let _ = fs::write(profile.backup_directory.join("RESTORE_REQUIRED.txt"), error.to_string());
+        return Err(error);
+    }
     Ok(true)
 }
 
@@ -328,6 +362,7 @@ fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str,
     let offline_config_path = game.join("cfg").join("tf2fragdemohelper_offline.cfg");
     let offline_cfg_backup = backup.join("tf2fragdemohelper_offline.cfg");
     fs::create_dir_all(&backup)?;
+    let hitsound_files = backup_hitsound_files(&custom, &backup.join("hitsounds_original"))?;
     let session = RecordingProfileSession {
         session_id: session_id.to_owned(),
         game_directory: game.to_path_buf(),
@@ -340,6 +375,7 @@ fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str,
         original_config_existed: config.is_file(),
         original_video_existed: video.is_file(),
         original_offline_cfg_existed: offline_config_path.is_file(),
+        hitsound_files,
     };
     write_active_profile(&session)?;
 
@@ -380,6 +416,10 @@ fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str,
 }
 
 fn restore_recording_profile(session: &RecordingProfileSession) -> Result<()> {
+    let _restore_guard = restore_lock().lock();
+    if !active_profile_path().is_file() {
+        return Ok(());
+    }
     let custom = session.game_directory.join("custom");
     let cfg = session.game_directory.join("cfg").join(PROFILE_CFG);
     let custom_backup = session.backup_directory.join("custom_original");
@@ -392,6 +432,9 @@ fn restore_recording_profile(session: &RecordingProfileSession) -> Result<()> {
     let video_backup = session.backup_directory.join("video.txt");
     let offline_cfg = session.game_directory.join("cfg").join("tf2fragdemohelper_offline.cfg");
     let offline_cfg_backup = session.backup_directory.join("tf2fragdemohelper_offline.cfg");
+    let config_existed = session.original_config_existed || config_backup.is_file();
+    let video_existed = session.original_video_existed || video_backup.is_file();
+    let offline_cfg_existed = session.original_offline_cfg_existed || offline_cfg_backup.is_file();
 
     if session.isolated_custom {
         if custom.exists() {
@@ -407,22 +450,149 @@ fn restore_recording_profile(session: &RecordingProfileSession) -> Result<()> {
         if session.original_profile_existed {
             fs::rename(&profile_backup, &profile)?;
         }
+        if !session.original_custom_existed && custom.is_dir() && fs::read_dir(&custom)?.next().is_none() {
+            fs::remove_dir(&custom)?;
+        }
     }
+    restore_hitsound_files(session)?;
     if cfg.exists() {
         fs::remove_file(&cfg)?;
     }
     if session.original_profile_cfg_existed {
         fs::rename(&cfg_backup, &cfg)?;
     }
-    if session.original_config_existed && config_backup.is_file() { fs::copy(&config_backup, &config)?; }
-    if session.original_video_existed && video_backup.is_file() { fs::copy(&video_backup, &video)?; }
+    if config_existed && config_backup.is_file() { fs::copy(&config_backup, &config)?; }
+    else if !config_existed && config.exists() { fs::remove_file(&config)?; }
+    if video_existed && video_backup.is_file() { fs::copy(&video_backup, &video)?; }
+    else if !video_existed && video.exists() { fs::remove_file(&video)?; }
     if offline_cfg.exists() { fs::remove_file(&offline_cfg)?; }
-    if session.original_offline_cfg_existed && offline_cfg_backup.is_file() { fs::copy(&offline_cfg_backup, &offline_cfg)?; }
+    if offline_cfg_existed && offline_cfg_backup.is_file() { fs::copy(&offline_cfg_backup, &offline_cfg)?; }
+    verify_restored_profile(session)?;
+    if session.backup_directory.is_dir() {
+        fs::remove_dir_all(&session.backup_directory)?;
+    }
     let pointer = active_profile_path();
     if pointer.exists() {
         fs::remove_file(pointer)?;
     }
     Ok(())
+}
+
+fn restore_lock() -> &'static Mutex<()> {
+    static RESTORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    RESTORE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn backup_hitsound_files(custom: &Path, backup: &Path) -> Result<Vec<PathBuf>> {
+    if !custom.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    for entry in WalkDir::new(custom).into_iter().filter_map(|entry| entry.ok()).filter(|entry| entry.file_type().is_file()) {
+        let relative = entry.path().strip_prefix(custom).context("hitsound path is outside tf/custom")?;
+        if !is_hitsound_file(relative) {
+            continue;
+        }
+        let destination = backup.join(relative);
+        if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+        fs::copy(entry.path(), &destination)?;
+        files.push(relative.to_path_buf());
+    }
+    Ok(files)
+}
+
+fn is_hitsound_file(relative: &Path) -> bool {
+    let normalized = relative.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let file_name = relative.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_ascii_lowercase();
+    file_name.contains("hitsound")
+        || file_name.contains("killsound")
+        || normalized.contains("/sound/ui/")
+        || normalized.starts_with("sound/ui/")
+}
+
+fn restore_hitsound_files(session: &RecordingProfileSession) -> Result<()> {
+    let source_root = session.backup_directory.join("hitsounds_original");
+    let custom = session.game_directory.join("custom");
+    for relative in &session.hitsound_files {
+        let source = source_root.join(relative);
+        if !source.is_file() {
+            bail!("hitsound backup is missing: {}", source.display());
+        }
+        let destination = custom.join(relative);
+        if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+        fs::copy(source, destination)?;
+    }
+    Ok(())
+}
+
+fn verify_restored_profile(session: &RecordingProfileSession) -> Result<()> {
+    let game = &session.game_directory;
+    let backup = &session.backup_directory;
+    let custom = game.join("custom");
+    let profile = custom.join(PROFILE_FOLDER);
+    let profile_cfg = game.join("cfg").join(PROFILE_CFG);
+    let config = game.join("cfg/config.cfg");
+    let video = game.join("cfg/video.txt");
+    let offline = game.join("cfg/tf2fragdemohelper_offline.cfg");
+    let config_backup = backup.join("config.cfg");
+    let video_backup = backup.join("video.txt");
+    let offline_backup = backup.join("tf2fragdemohelper_offline.cfg");
+    let config_existed = session.original_config_existed || config_backup.is_file();
+    let video_existed = session.original_video_existed || video_backup.is_file();
+    let offline_existed = session.original_offline_cfg_existed || offline_backup.is_file();
+    let mut problems = Vec::new();
+
+    if session.original_custom_existed != custom.is_dir() {
+        problems.push("tf/custom was not returned to its original presence state".to_owned());
+    }
+    if session.isolated_custom && backup.join("custom_original").exists() {
+        problems.push("the original tf/custom folder is still staged in the backup".to_owned());
+    }
+    if !session.isolated_custom && session.original_profile_existed != profile.is_dir() {
+        problems.push("the previous helper recording-resource folder was not restored".to_owned());
+    }
+    if session.original_profile_cfg_existed != profile_cfg.is_file() {
+        problems.push("the previous recording profile CFG was not restored".to_owned());
+    }
+    if config_existed {
+        if !files_match(&config, &config_backup)? { problems.push("config.cfg does not match its backup; hitsound settings may not be restored".to_owned()); }
+    } else if config.exists() {
+        problems.push("temporary config.cfg still exists".to_owned());
+    }
+    if video_existed {
+        if !files_match(&video, &video_backup)? { problems.push("video.txt does not match its backup".to_owned()); }
+    } else if video.exists() {
+        problems.push("temporary video.txt still exists".to_owned());
+    }
+    if offline_existed {
+        if !files_match(&offline, &offline_backup)? { problems.push("the previous offline CFG was not restored".to_owned()); }
+    } else if offline.exists() {
+        problems.push("temporary offline CFG still exists".to_owned());
+    }
+    for relative in &session.hitsound_files {
+        if !files_match(&custom.join(relative), &backup.join("hitsounds_original").join(relative))? {
+            problems.push(format!("custom hitsound was not restored: {}", relative.display()));
+        }
+    }
+    if !problems.is_empty() {
+        bail!("restore verification failed: {}. Original backups remain in {}", problems.join("; "), backup.display());
+    }
+    Ok(())
+}
+
+fn files_match(left: &Path, right: &Path) -> Result<bool> {
+    if !left.is_file() || !right.is_file() { return Ok(false); }
+    if fs::metadata(left)?.len() != fs::metadata(right)?.len() { return Ok(false); }
+    let mut left_file = File::open(left)?;
+    let mut right_file = File::open(right)?;
+    let mut left_buffer = [0_u8; 64 * 1024];
+    let mut right_buffer = [0_u8; 64 * 1024];
+    loop {
+        let left_read = left_file.read(&mut left_buffer)?;
+        let right_read = right_file.read(&mut right_buffer)?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] { return Ok(false); }
+        if left_read == 0 { return Ok(true); }
+    }
 }
 
 fn write_active_profile(session: &RecordingProfileSession) -> Result<()> {
@@ -595,6 +765,23 @@ fn windows_process_is_running(image_name: &str) -> bool {
     }
     tasklist
         .output().ok().is_some_and(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains(&image_name.to_ascii_lowercase()))
+}
+
+fn stop_windows_process(image_name: &str) -> Result<()> {
+    if !cfg!(target_os = "windows") { return Ok(()); }
+    let mut taskkill = Command::new("taskkill");
+    taskkill.args(["/IM", image_name, "/T", "/F"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        taskkill.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = taskkill.output()?;
+    if !output.status.success() && windows_process_is_running(image_name) {
+        bail!("could not close TF2: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(())
 }
 
 /// Resolve TF2's actual game directory from both current x64 installs

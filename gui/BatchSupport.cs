@@ -228,6 +228,9 @@ namespace Tf2StvParserGui
                         batchContext["source_demo"] = entry.DemoPath;
                         batchContext["source_export"] = entry.ExportDirectory;
                         batchContext["map_name"] = mapName;
+                        IDictionary demoContext = candidate["demo_context"] as IDictionary;
+                        batchContext["mode"] = TextValue(demoContext, "mode");
+                        batchContext["mode_label"] = TextValue(demoContext, "mode_label");
                         candidate["batch_context"] = batchContext;
                         writer.WriteLine(serializer.Serialize(candidate));
                         candidateCount++;
@@ -248,6 +251,10 @@ namespace Tf2StvParserGui
                 record["source_demo"] = entry.DemoPath;
                 record["export_directory"] = entry.ExportDirectory;
                 record["map_name"] = ExportMapName(entry.ExportDirectory);
+                IDictionary summary = ReadJson(Path.Combine(entry.ExportDirectory, "frag_summary.json"));
+                IDictionary demoContext = summary == null ? null : summary["demo_context"] as IDictionary;
+                record["mode"] = TextValue(demoContext, "mode");
+                record["mode_label"] = TextValue(demoContext, "mode_label");
                 demoRecords.Add(record);
             }
             manifest["demos"] = demoRecords;
@@ -322,6 +329,13 @@ namespace Tf2StvParserGui
             return "Unknown";
         }
 
+        private static IDictionary ReadJson(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+            try { return NewSerializer().DeserializeObject(File.ReadAllText(path)) as IDictionary; }
+            catch { return null; }
+        }
+
         public static string SafeName(string value)
         {
             StringBuilder result = new StringBuilder();
@@ -371,7 +385,10 @@ namespace Tf2StvParserGui
         private static readonly object RecordedClipIndexLock = new object();
         private static bool recordedClipIndexLoaded;
         private static readonly Dictionary<string, List<string>> recordedClipOutputs = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, List<string>> recordedClipFingerprints = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         private static readonly HashSet<string> loadedRecordedClipIndexPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, long> reconciledVideoDirectoryTicks = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> outputFingerprintCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, string> demoSignatureCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         public static event EventHandler RecordedClipVerified;
@@ -917,7 +934,14 @@ namespace Tf2StvParserGui
                 List<string> paths;
                 if (!recordedClipOutputs.TryGetValue(recordingKey, out paths)) return false;
                 paths.RemoveAll(delegate(string path) { return !OutputStillExists(path); });
-                if (paths.Count > 0) return true;
+                if (paths.Count > 0)
+                {
+                    // Upgrade older catalog entries while their original file is still
+                    // present, so a later rename can still be reconciled.
+                    foreach (string path in paths) RememberRecordedClip(recordingKey, path, OutputFingerprint(path));
+                    return true;
+                }
+                if (FindRenamedVideoByFingerprint(recordingKey)) return true;
                 recordedClipOutputs.Remove(recordingKey);
                 return false;
             }
@@ -945,7 +969,7 @@ namespace Tf2StvParserGui
                 try
                 {
                     IDictionary entry = serializer.DeserializeObject(line) as IDictionary;
-                    AddRecordedClip(TextValue(entry, "recording_key"), TextValue(entry, "output_path"));
+                    AddRecordedClip(TextValue(entry, "recording_key"), TextValue(entry, "output_path"), TextValue(entry, "output_fingerprint"));
                 }
                 catch { }
             }
@@ -975,26 +999,13 @@ namespace Tf2StvParserGui
             EnsureRecordedClipIndexLoaded();
             lock (RecordedClipIndexLock)
             {
-                AddRecordedClip(key, output);
-                try
-                {
-                    string indexPath = RecordedClipIndexPath();
-                    Directory.CreateDirectory(Path.GetDirectoryName(indexPath));
-                    Dictionary<string, object> entry = new Dictionary<string, object>();
-                    entry["recording_key"] = key;
-                    entry["output_path"] = output;
-                    entry["source_demo"] = TextValue(record, "source_demo");
-                    entry["candidate_id"] = TextValue(record, "candidate_id");
-                    entry["recorded_utc"] = DateTime.UtcNow.ToString("o");
-                    File.AppendAllText(indexPath, NewIndexSerializer().Serialize(entry) + Environment.NewLine, new UTF8Encoding(false));
-                }
-                catch { }
+                RememberRecordedClip(key, output, OutputFingerprint(output), TextValue(record, "source_demo"), TextValue(record, "candidate_id"));
             }
             EventHandler handler = RecordedClipVerified;
             if (handler != null) handler(null, EventArgs.Empty);
         }
 
-        private static void AddRecordedClip(string key, string output)
+        private static void AddRecordedClip(string key, string output, string fingerprint)
         {
             if (String.IsNullOrEmpty(key) || String.IsNullOrEmpty(output)) return;
             List<string> paths;
@@ -1004,6 +1015,82 @@ namespace Tf2StvParserGui
                 recordedClipOutputs[key] = paths;
             }
             if (!paths.Contains(output)) paths.Add(output);
+            if (!String.IsNullOrEmpty(fingerprint))
+            {
+                List<string> fingerprints;
+                if (!recordedClipFingerprints.TryGetValue(key, out fingerprints))
+                {
+                    fingerprints = new List<string>();
+                    recordedClipFingerprints[key] = fingerprints;
+                }
+                if (!fingerprints.Contains(fingerprint)) fingerprints.Add(fingerprint);
+            }
+        }
+
+        private static void RememberRecordedClip(string key, string output, string fingerprint, string sourceDemo = "", string candidateId = "")
+        {
+            AddRecordedClip(key, output, fingerprint);
+            if (String.IsNullOrEmpty(key) || String.IsNullOrEmpty(output) || String.IsNullOrEmpty(fingerprint)) return;
+            try
+            {
+                string indexPath = RecordedClipIndexPath();
+                Directory.CreateDirectory(Path.GetDirectoryName(indexPath));
+                Dictionary<string, object> entry = new Dictionary<string, object>();
+                entry["recording_key"] = key;
+                entry["output_path"] = output;
+                entry["output_fingerprint"] = fingerprint;
+                entry["source_demo"] = sourceDemo;
+                entry["candidate_id"] = candidateId;
+                entry["recorded_utc"] = DateTime.UtcNow.ToString("o");
+                File.AppendAllText(indexPath, NewIndexSerializer().Serialize(entry) + Environment.NewLine, new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private static string OutputFingerprint(string path)
+        {
+            if (String.IsNullOrEmpty(path) || !File.Exists(path)) return "";
+            try
+            {
+                FileInfo info = new FileInfo(path);
+                string cacheKey = CanonicalDemoPath(path) + "|" + info.Length + "|" + info.LastWriteTimeUtc.Ticks;
+                string cached;
+                if (outputFingerprintCache.TryGetValue(cacheKey, out cached)) return cached;
+                using (SHA256 hash = SHA256.Create())
+                using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    string fingerprint = "sha256:" + Hex(hash.ComputeHash(stream));
+                    outputFingerprintCache[cacheKey] = fingerprint;
+                    return fingerprint;
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static bool FindRenamedVideoByFingerprint(string recordingKey)
+        {
+            List<string> fingerprints;
+            if (!recordedClipFingerprints.TryGetValue(recordingKey, out fingerprints) || fingerprints.Count == 0) return false;
+            try
+            {
+                HlaeRecordingSettings settings = LoadSettings();
+                string videos = settings == null || String.IsNullOrEmpty(settings.OutputDirectory) ? "" : Path.Combine(settings.OutputDirectory, "Videos");
+                if (!Directory.Exists(videos)) return false;
+                string directoryKey = CanonicalDemoPath(videos);
+                long changed = Directory.GetLastWriteTimeUtc(videos).Ticks;
+                long previous;
+                if (reconciledVideoDirectoryTicks.TryGetValue(directoryKey, out previous) && previous == changed) return false;
+                reconciledVideoDirectoryTicks[directoryKey] = changed;
+                foreach (string file in Directory.GetFiles(videos, "*", SearchOption.TopDirectoryOnly))
+                {
+                    string fingerprint = OutputFingerprint(file);
+                    if (!fingerprints.Contains(fingerprint)) continue;
+                    RememberRecordedClip(recordingKey, file, fingerprint);
+                    return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         private static bool OutputStillExists(string path)

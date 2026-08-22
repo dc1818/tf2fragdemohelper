@@ -355,8 +355,8 @@ fn refresh_candidates(ui: &AppWindow, state: &Arc<Mutex<State>>, filter: &str, m
             let root = state.settings.recording_output_directory.clone();
             state.recording_index.is_recorded(&candidate, Some(&root))
         };
-        let candidate = &state.candidates[index];
-        if candidate.overall_score < minimum_score as f64 || !expression.matches(candidate, recorded) { continue }
+        let candidate = state.candidates[index].clone();
+        if candidate.overall_score < minimum_score as f64 || !expression.matches(&candidate, recorded) { continue }
         state.visible.push(index);
         rows.push(CandidateRow {
             rank: (index + 1) as i32,

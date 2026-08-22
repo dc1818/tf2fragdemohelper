@@ -268,6 +268,15 @@ pub fn run_batch(
 }
 
 fn run_command(mut command: Command, controller: &BatchController) -> Result<std::process::Output> {
+    // export_all.exe is a command-line worker, but it is launched behind the
+    // Slint GUI.  Prevent every concurrent parser worker from creating its own
+    // Windows console window while retaining captured stdout/stderr.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     controller.children.lock().push(child.id());

@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, LineEdit, ListView, ScrollView, SpinBox, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, ScrollView, SpinBox } from "std-widgets.slint";
 
 export struct CandidateRow {
     rank: int, score: string, kills: string, attacker: string, class-name: string, team: string,
@@ -85,7 +85,7 @@ export component AppWindow inherits Window {
 
     callback choose-demos(); callback choose-export-directory(); callback choose-item-schema();
     callback start-batch(); callback cancel-batch(); callback load-export(); callback open-export();
-    callback refresh-filter(string, int); callback toggle-candidate(int); callback select-all-visible();
+    callback refresh-filter(string, int); callback toggle-candidate(int); callback drag-select-candidates(int, float, bool); callback select-all-visible();
     callback preview-selected(); callback record-selected(); callback choose-setting-path(string); callback save-settings();
 
     VerticalLayout {
@@ -143,18 +143,20 @@ export component AppWindow inherits Window {
                 SpinBox { value <=> root.lead-seconds; minimum: 0; maximum: 60; }
                 Text { text: "Seconds After Last Tick"; color: #e2e8ee; vertical-alignment: center; }
                 SpinBox { value <=> root.outro-seconds; minimum: 0; maximum: 60; }
-                Button { text: "Select All Visible"; clicked => { root.select-all-visible(); } }
+                Button { text: "Select/Deselect All"; clicked => { root.select-all-visible(); } }
                 Button { text: "Record Selected with HLAE"; enabled: root.selected-count > 0; clicked => { root.record-selected(); } }
                 if root.selected-count == 1 : Button { text: "Preview Selected Clip in TF2"; clicked => { root.preview-selected(); } }
-                Button { text: "View Logs"; clicked => { root.selected-page = 3; } }
+                Button { text: "View Parser/Analyzer Logs"; clicked => { root.selected-page = 3; } }
             }
             Text { text: root.recording-estimate; color: #87cefa; }
-            ScrollView {
+            candidate-scroll := ScrollView {
                 horizontal-scrollbar-policy: always-on;
+                vertical-scrollbar-policy: always-off;
+                mouse-drag-pan-enabled: false;
                 vertical-stretch: 1;
                 Rectangle {
                     width: 1500px;
-                    height: parent.height;
+                    height: candidate-scroll.height;
                     VerticalLayout {
                         spacing: 0px;
                         Rectangle {
@@ -184,7 +186,25 @@ export component AppWindow inherits Window {
                                     Text { text: row.recorded; width: 70px; color: #e5e9ed; horizontal-alignment: center; } Text { text: row.ticks; width: 150px; color: #e5e9ed; overflow: elide; }
                                     Text { text: row.tags; width: 300px; color: #e5e9ed; overflow: elide; }
                                 }
-                                TouchArea { clicked => { root.toggle-candidate(index); } }
+                                drag-area := TouchArea {
+                                    property <bool> drag-selecting;
+                                    property <bool> dragging;
+                                    pointer-event(event) => {
+                                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                            self.drag-selecting = !row.selected;
+                                            self.dragging = true;
+                                            root.drag-select-candidates(index, 0, self.drag-selecting);
+                                        }
+                                        if (event.button == PointerEventButton.left && (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)) {
+                                            self.dragging = false;
+                                        }
+                                    }
+                                    moved => {
+                                        if (self.dragging) {
+                                            root.drag-select-candidates(index, (self.mouse-y - self.pressed-y) / 1px, self.drag-selecting);
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -219,7 +239,7 @@ export component AppWindow inherits Window {
 
         if root.selected-page == 3 : VerticalLayout {
             spacing: 8px;
-            HorizontalLayout { Text { text: "Run Logs"; color: white; font-size: 20px; } Rectangle { horizontal-stretch: 1; } Button { text: "Back to Candidates"; enabled: root.has-export; clicked => { root.selected-page = 1; } } }
+            HorizontalLayout { Text { text: "Parser/Analyzer Logs"; color: white; font-size: 20px; } Rectangle { horizontal-stretch: 1; } Button { text: "Back to Candidates"; enabled: root.has-export; clicked => { root.selected-page = 1; } } }
             AutoScrollLog { log-text: root.log-text; vertical-stretch: 1; }
         }
     }

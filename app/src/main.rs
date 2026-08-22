@@ -15,7 +15,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use slint::{ModelRc, SharedString, VecModel, Weak};
+use slint::{Model, ModelRc, SharedString, VecModel, Weak};
 use std::{
     fs::File,
     io::{BufRead, BufReader},
@@ -244,11 +244,35 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         }
     });
     let weak = ui.as_weak();
+    let state_for_drag = state.clone();
+    ui.on_drag_select_candidates(move |start_index, delta_pixels, selecting| {
+        let Some(ui) = weak.upgrade() else { return };
+        let mut state = state_for_drag.lock();
+        if state.visible.is_empty() { return }
+        let last = state.visible.len().saturating_sub(1) as i32;
+        let start = start_index.clamp(0, last);
+        let target = (start + (delta_pixels / 30.0).round() as i32).clamp(0, last);
+        let first_row = start.min(target) as usize;
+        let last_row = start.max(target) as usize;
+        let model = ui.get_candidate_rows();
+        for visible_row in first_row..=last_row {
+            if let Some(candidate_index) = state.visible.get(visible_row).copied() {
+                state.selected[candidate_index] = selecting;
+                if let Some(mut row) = model.row_data(visible_row) {
+                    row.selected = selecting;
+                    model.set_row_data(visible_row, row);
+                }
+            }
+        }
+        ui.set_selected_count(state.selected.iter().filter(|selected| **selected).count().min(i32::MAX as usize) as i32);
+    });
+    let weak = ui.as_weak();
     let state_for_all = state.clone();
     ui.on_select_all_visible(move || {
         let mut state = state_for_all.lock();
         let visible = state.visible.clone();
-        for index in visible { state.selected[index] = true; }
+        let deselect = !visible.is_empty() && visible.iter().all(|index| state.selected.get(*index).copied().unwrap_or(false));
+        for index in visible { state.selected[index] = !deselect; }
         drop(state);
         if let Some(ui) = weak.upgrade() {
             let filter = ui.get_filter_text().to_string();
@@ -258,10 +282,39 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let weak = ui.as_weak();
     let state_for_preview = state.clone();
     ui.on_preview_selected(move || {
-        let state = state_for_preview.lock();
-        let selected = selected_candidates(&state);
-        let result = if selected.len() == 1 { preview_candidate(selected[0], &state.settings) } else { Err(anyhow::anyhow!("select exactly one candidate to preview")) };
-        if let Some(ui) = weak.upgrade() { ui.set_status_text(result.map(|_| "TF2 preview launched".into()).unwrap_or_else(|error| error.to_string()).into()); }
+        let Some(ui) = weak.upgrade() else { return };
+        let (candidate, mut settings) = {
+            let state = state_for_preview.lock();
+            let selected = selected_candidates(&state);
+            if selected.len() != 1 {
+                ui.set_status_text("Select exactly one candidate to preview".into());
+                return;
+            }
+            (selected[0].clone(), state.settings.clone())
+        };
+
+        let entered_path = PathBuf::from(ui.get_tf2_path().to_string());
+        if entered_path.is_file() {
+            settings.tf2_executable = entered_path;
+        }
+        if !settings.tf2_executable.is_file() {
+            let mut dialog = rfd::FileDialog::new().set_title("Select the Team Fortress 2 Executable");
+            if cfg!(target_os = "windows") {
+                dialog = dialog.add_filter("Team Fortress 2 executable", &["exe"]);
+            }
+            let Some(path) = dialog.pick_file() else {
+                ui.set_status_text("TF2 preview cancelled; no executable was selected".into());
+                return;
+            };
+            settings.tf2_executable = path.clone();
+            ui.set_tf2_path(path.display().to_string().into());
+            let mut state = state_for_preview.lock();
+            state.settings.tf2_executable = path;
+            let _ = state.settings.save();
+        }
+
+        let result = preview_candidate(&candidate, &settings);
+        ui.set_status_text(result.map(|_| "TF2 preview launched".into()).unwrap_or_else(|error| error.to_string()).into());
     });
     let weak = ui.as_weak();
     let state_for_record = state.clone();

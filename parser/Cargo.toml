@@ -44,9 +44,4 @@ schema = ["schemars", "bitbuffer/schemars_1"]
 trace = ["tracing", "tracing-subscriber"]
 write = []
 
-[profile.release]
-lto = "thin"
-
-[profile.dev]
-opt-level = 2
 

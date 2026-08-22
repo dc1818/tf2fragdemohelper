@@ -4,7 +4,7 @@ Rust desktop application for parsing TF2 `.dem` files, ranking clip candidates, 
 
 ## Build
 
-Install stable [Rust](https://rustup.rs/), then run:
+Install [Rust 1.88 or newer](https://rustup.rs/), then run:
 
 - Windows: `BUILD_RUST_APP.bat`
 - Linux/macOS: `./build_rust_app.sh`

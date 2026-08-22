@@ -1124,6 +1124,71 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(candidate["point_of_kill_ticks"], [70386, 70386])
         self.assertEqual(candidate["point_of_kill_server_ticks"], [71302, 71302])
 
+    def test_bookmark_candidates_inherit_nearby_frag_identifiers_and_add_score(self):
+        base = {
+            "candidate_id": "r1-p4-t1000",
+            "overall_score": 42.0,
+            "point_of_kill_ticks": [1000, 1060],
+            "clip_start_tick": 700,
+            "clip_end_tick": 1260,
+            "tags": ["multi_kill", "airshot"],
+            "score_breakdown": [{"reason": "multi_kill", "points": 42.0}],
+            "metrics": {"kills": 2},
+            "kills": [{"tick": 1000}],
+            "attacker_user_id": 4,
+            "attacker_class": "demoman",
+            "attacker_team": "blu",
+        }
+        bookmarks = ANALYZER.extract_bookmark_records({"bookmarks": [{"tick": 1100, "comment": "pipe airshot"}]})
+        candidates = ANALYZER.build_bookmark_candidates(bookmarks, [], {"analysis_scope": "all_players"}, [base])
+
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate["overall_score"], 72.0)
+        self.assertEqual(candidate["attacker_user_id"], 4)
+        self.assertEqual(candidate["kills"], [{"tick": 1000}])
+        self.assertTrue({"bookmark", "multi_kill", "airshot"}.issubset(candidate["tags"]))
+        self.assertEqual(candidate["bookmark_comment"], "pipe airshot")
+        self.assertEqual(candidate["metrics"]["bookmark_linked_candidate_id"], "r1-p4-t1000")
+
+    def test_bookmark_without_nearby_frag_remains_a_standalone_candidate(self):
+        candidates = ANALYZER.build_bookmark_candidates(
+            [{"tick": 9000, "comment": "funny moment"}], [], {"analysis_scope": "all_players"}, []
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["overall_score"], ANALYZER.BOOKMARK_SCORE)
+        self.assertEqual(candidates[0]["attacker_class"], "bookmark")
+        self.assertEqual(candidates[0]["tags"], ["bookmark"])
+
+    def test_rgl_sixes_mode_requires_roster_and_rgl_signature(self):
+        timeline = ANALYZER.StateTimeline()
+        user_id = 1
+        for team in ("red", "blu"):
+            for player_class in ("scout", "scout", "soldier", "soldier", "demoman", "medic"):
+                timeline.players[user_id].append((0, {"team": team, "class": player_class, "life_state": "alive", "health": 125}))
+                user_id += 1
+        rounds = [{"round_index": 1, "live_start_tick": 0, "end_tick": 12000}]
+        with tempfile.TemporaryDirectory() as temp:
+            export = Path(temp)
+            (export / "header.json").write_text(json.dumps({"server": "RGL 6s Match Server"}), encoding="utf-8")
+            mode = ANALYZER.competitive_mode_context(export, [], timeline, rounds)
+        self.assertEqual(mode["mode"], "rgl_6v6")
+        self.assertEqual(mode["mode_label"], "RGL 6v6")
+        self.assertEqual(mode["mode_confidence"], "high")
+
+    def test_highlander_roster_without_league_signature_is_not_labeled_rgl(self):
+        timeline = ANALYZER.StateTimeline()
+        user_id = 1
+        for team in ("red", "blu"):
+            for player_class in sorted(ANALYZER.COMPETITIVE_CLASSES):
+                timeline.players[user_id].append((0, {"team": team, "class": player_class, "life_state": "alive", "health": 125}))
+                user_id += 1
+        rounds = [{"round_index": 1, "live_start_tick": 0, "end_tick": 12000}]
+        with tempfile.TemporaryDirectory() as temp:
+            mode = ANALYZER.competitive_mode_context(Path(temp), [], timeline, rounds)
+        self.assertEqual(mode["mode"], "highlander")
+        self.assertEqual(mode["mode_label"], "Highlander Competitive")
+
 
 if __name__ == "__main__":
     unittest.main()

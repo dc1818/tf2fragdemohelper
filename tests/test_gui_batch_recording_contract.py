@@ -11,6 +11,7 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         cls.program = (ROOT / "gui" / "Program.cs").read_text(encoding="utf-8")
         cls.batch = (ROOT / "gui" / "BatchSupport.cs").read_text(encoding="utf-8")
         cls.profile = (ROOT / "gui" / "RecordingProfile.cs").read_text(encoding="utf-8")
+        cls.analyzer = (ROOT / "analyze_frags.py").read_text(encoding="utf-8")
         cls.benchmark = (ROOT / "gui" / "BenchmarkSupport.cs").read_text(encoding="utf-8")
         cls.candidate_filter = (ROOT / "gui" / "CandidateFilter.cs").read_text(encoding="utf-8")
         cls.build = (ROOT / "Build_Parser_GUI.bat").read_text(encoding="utf-8")
@@ -269,6 +270,19 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('+recorded:true', self.program)
         self.assertIn('String.Equals(field, "recorded", StringComparison.OrdinalIgnoreCase)', self.program)
 
+    def test_candidate_view_exposes_filterable_demo_mode(self):
+        self.assertIn('AddColumn("Mode", 165);', self.program)
+        self.assertIn('+mode:rgl_6v6', self.program)
+        self.assertIn('String.Equals(field, "mode", StringComparison.OrdinalIgnoreCase)', self.program)
+        self.assertIn('CandidateModeLabel(candidate)', self.program)
+        self.assertIn('competitive_mode_context', self.analyzer)
+
+    def test_candidate_view_exposes_filterable_demo_capture_type(self):
+        self.assertIn('AddColumn("Demo Type", 90);', self.program)
+        self.assertIn('+type:stv', self.program)
+        self.assertIn('CandidateDemoTypeLabel(candidate)', self.program)
+        self.assertIn('String.Equals(field, "type", StringComparison.OrdinalIgnoreCase)', self.program)
+
     def test_recordings_use_browseable_output_folders_without_an_output_index(self):
         self.assertIn('"Recording Metadata"', self.batch)
         self.assertIn('"Videos"', self.batch)
@@ -288,6 +302,9 @@ class GuiBatchRecordingContractTests(unittest.TestCase):
         self.assertIn('VideoWithRecordingKeyExists(recordingKey)', self.batch)
         self.assertIn('RecordedClipIndexPath()', self.batch)
         self.assertIn('paths.RemoveAll(delegate(string path) { return !OutputStillExists(path); });', self.batch)
+        self.assertIn('output_fingerprint', self.batch)
+        self.assertIn('OutputFingerprint', self.batch)
+        self.assertIn('FindRenamedVideoByFingerprint(recordingKey)', self.batch)
 
     def test_each_selected_clip_has_one_terminal_vdm(self):
         self.assertIn('demo.Clips.Add(clip);\n                result.Add(demo);', self.batch)

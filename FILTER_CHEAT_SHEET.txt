@@ -11,6 +11,8 @@ word           Generic include search (legacy behavior, now tokenized).
 
 Supported fields:
   map      Map name shown in the Map column
+  mode     Demo classification (for example rgl_6v6, highlander, or community_public)
+  type     Capture type (stv, pov, or unknown; demo_type and capture also work)
   class    Attacker class
   team     Attacker team
   demo     Demo filename/path
@@ -60,6 +62,21 @@ Exclude multiple classes:
 Include only Product:
   +map:koth_product_final
 
+Only RGL 6v6 demos:
+  +mode:rgl_6v6
+
+Only SourceTV / STV demos:
+  +type:stv
+
+Only POV demos:
+  +type:pov
+
+Any Highlander demo (including RGL Highlander):
+  +mode:highlander
+
+Hide public-server demos:
+  -mode:public
+
 Exclude Steel and Upward:
   -map:cp_steel -map:pl_upward
 
@@ -104,3 +121,9 @@ Use the team value shown by the viewer. Both blu and blue are accepted for BLU.
 PLAYER NOTE
 -----------
 For attacker user IDs, player matching is exact so +player:3 does not accidentally match player #35.
+
+MODE NOTE
+---------
+Mode is a confidence-based demo classification. RGL labels require both a positive RGL
+signal recorded in the demo and a matching 6v6 or Highlander roster; a matching roster
+without an RGL signal is labeled simply 6v6 Competitive or Highlander Competitive.

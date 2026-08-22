@@ -27,6 +27,9 @@ TICKS_PER_SECOND = 66.6666667
 SEQUENCE_GAP_TICKS = round(TICKS_PER_SECOND * 4.0)
 PRE_ROLL_TICKS = round(TICKS_PER_SECOND * 5.0)
 POST_ROLL_TICKS = round(TICKS_PER_SECOND * 3.0)
+BOOKMARK_SCORE = 30.0
+BOOKMARK_LINK_BEFORE_TICKS = round(TICKS_PER_SECOND * 8.0)
+BOOKMARK_LINK_AFTER_TICKS = round(TICKS_PER_SECOND * 2.0)
 OBJECTIVE_CONVERSION_TICKS = round(TICKS_PER_SECOND * 8.0)
 CAPTURE_DENIAL_TICKS = round(TICKS_PER_SECOND * 2.0)
 ROUND_CLINCH_TICKS = round(TICKS_PER_SECOND * 3.0)
@@ -42,6 +45,8 @@ PLAYER_SWING_MIN_WINDOW_TICKS = round(TICKS_PER_SECOND * 4.0)
 CHARGE_MELEE_FOLLOWUP_TICKS = round(TICKS_PER_SECOND * 0.85)
 BACKSTAB_CUSTOM_KILL = 2
 SHIELD_BASH_CUSTOM_KILL = 23
+COMPETITIVE_CLASSES = {"scout", "soldier", "pyro", "demoman", "heavy", "engineer", "medic", "sniper", "spy"}
+SIXES_COMPOSITION = {"scout": 2, "soldier": 2, "demoman": 1, "medic": 1}
 
 ROUND_END_EVENTS = {
     "teamplay_round_win", "teamplay_round_stalemate", "teamplay_game_over",
@@ -1344,6 +1349,109 @@ def analysis_context(export_directory: Path, names: Dict[int, List[Tuple[int, st
     }
 
 
+def competitive_roster_at(timeline: StateTimeline, tick: int) -> Dict[str, Dict[str, int]]:
+    result: Dict[str, Dict[str, int]] = {"red": defaultdict(int), "blu": defaultdict(int)}
+    for user_id in timeline.players:
+        state = timeline.player_at(user_id, tick, require_alive=False)
+        if state is None:
+            continue
+        team = canonical_team(state.get("team"))
+        player_class = as_text(state.get("class")).lower()
+        if team in result and player_class in COMPETITIVE_CLASSES:
+            result[team][player_class] += 1
+    return {team: dict(classes) for team, classes in result.items()}
+
+
+def competitive_mode_context(export_directory: Path, events: List[Dict[str, Any]], timeline: StateTimeline, rounds: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Classify the demo from sustained team composition and positive server evidence.
+
+    Config names are not an authoritative field in Source demos.  RGL is only
+    asserted when an RGL signature is actually present; otherwise the result
+    is the verified format rather than a league guess.
+    """
+    header = read_json_if_present(export_directory / "header.json")
+    server_name = as_text(header.get("server"))
+    evidence_text = server_name.lower()
+    for item in events:
+        # Server config announcements are usually emitted as text/chat events.
+        # Keep this narrow and deterministic instead of assuming every STV is RGL.
+        name = event_name(item)
+        if name in {"player_say", "say_text", "server_message", "server_cvar"}:
+            evidence_text += " " + json.dumps(event_fields(item), ensure_ascii=False).lower()
+    rgl_signature = "rgl" in evidence_text
+    valve_signature = any(token in evidence_text for token in ("valve", "matchmaking", "casual"))
+
+    sample_ticks: List[int] = []
+    for round_data in rounds:
+        start = as_int(round_data.get("live_start_tick"))
+        end = as_int(round_data.get("end_tick"))
+        if end <= start:
+            continue
+        count = min(12, max(3, int((end - start) / max(1, round(TICKS_PER_SECOND * 30.0))) + 1))
+        for index in range(1, count + 1):
+            sample_ticks.append(start + ((end - start) * index // (count + 1)))
+
+    sixes_samples = 0
+    highlander_samples = 0
+    observed_samples = 0
+    for tick in sample_ticks:
+        rosters = competitive_roster_at(timeline, tick)
+        if not rosters["red"] or not rosters["blu"]:
+            continue
+        observed_samples += 1
+        if all(rosters[team] == SIXES_COMPOSITION for team in ("red", "blu")):
+            sixes_samples += 1
+        if all(sum(rosters[team].values()) == 9 and set(rosters[team]) == COMPETITIVE_CLASSES and all(count == 1 for count in rosters[team].values()) for team in ("red", "blu")):
+            highlander_samples += 1
+
+    sixes_ratio = sixes_samples / observed_samples if observed_samples else 0.0
+    highlander_ratio = highlander_samples / observed_samples if observed_samples else 0.0
+    mode = "unknown"
+    label = "Unknown / Mixed"
+    confidence = "low"
+    evidence = []
+    if highlander_samples >= 3 and highlander_ratio >= 0.60:
+        mode = "rgl_highlander" if rgl_signature else "highlander"
+        label = "RGL Highlander" if rgl_signature else "Highlander Competitive"
+        confidence = "high" if highlander_ratio >= 0.85 else "medium"
+        evidence.append("{} of {} sampled live states were exact 9v9 one-of-each-class rosters.".format(highlander_samples, observed_samples))
+    elif sixes_samples >= 3 and sixes_ratio >= 0.60:
+        mode = "rgl_6v6" if rgl_signature else "6v6"
+        label = "RGL 6v6" if rgl_signature else "6v6 Competitive"
+        confidence = "high" if sixes_ratio >= 0.85 else "medium"
+        evidence.append("{} of {} sampled live states were 2 Scout, 2 Soldier, 1 Demoman, 1 Medic per team.".format(sixes_samples, observed_samples))
+    elif rgl_signature:
+        mode = "rgl_competitive"
+        label = "RGL Competitive"
+        confidence = "medium"
+        evidence.append("RGL signature found, but the captured roster was not stable enough to prove a format.")
+    elif valve_signature:
+        mode = "valve_public"
+        label = "Valve Public"
+        confidence = "medium"
+        evidence.append("Valve/matchmaking signature found in the demo server metadata.")
+    elif server_name.strip():
+        mode = "community_public"
+        label = "Community Public"
+        confidence = "medium"
+        evidence.append("Non-Valve server metadata with no sustained competitive roster pattern.")
+
+    if rgl_signature:
+        evidence.insert(0, "RGL signature found in recorded server or server-message data.")
+    elif mode in {"6v6", "highlander"}:
+        evidence.insert(0, "No RGL signature was recorded; format is roster-confirmed only.")
+    return {
+        "mode": mode,
+        "mode_label": label,
+        "mode_confidence": confidence,
+        "mode_evidence": evidence,
+        "mode_roster_samples": observed_samples,
+        "mode_6v6_samples": sixes_samples,
+        "mode_highlander_samples": highlander_samples,
+        "server_name": server_name or None,
+    }
+
+
 def normalized_deaths(events: Iterable[Dict[str, Any]], rounds: Any, classes: Dict[int, List[Tuple[int, str]]], teams: Dict[int, List[Tuple[int, Optional[str]]]], names: Dict[int, List[Tuple[int, str]]], context: Dict[str, Any], debug: bool = False, item_slots: Optional[Dict[int, str]] = None, profile: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     deaths: List[Dict[str, Any]] = []
     pov_user_id = context.get("pov_player_user_id") if context.get("analysis_scope") == "pov_player_only" else None
@@ -2013,6 +2121,170 @@ def group_kills(kills: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     return groups
 
 
+def read_demo_bookmarks(export_directory: Path) -> List[Dict[str, Any]]:
+    """Read TF2 Demo Support (ds_mark) sidecar data for this exported demo.
+
+    TF2 stores Demo Support marks next to the .dem, not inside its packet
+    stream.  The exact JSON nesting has changed across client builds, so this
+    accepts both an explicit bookmarks collection and bookmark event records.
+    """
+    manifest = read_json_if_present(export_directory / "manifest.json")
+    source_demo = as_text(manifest.get("source_demo"))
+    if not source_demo:
+        return []
+    demo_path = Path(source_demo).expanduser()
+    sidecars = [demo_path.with_suffix(".json"), Path(str(demo_path) + ".json")]
+    seen_paths = set()
+    records: List[Dict[str, Any]] = []
+    for sidecar in sidecars:
+        try:
+            resolved = sidecar.resolve()
+        except OSError:
+            resolved = sidecar
+        normalized = os.path.normcase(str(resolved))
+        if normalized in seen_paths or not resolved.is_file():
+            continue
+        seen_paths.add(normalized)
+        try:
+            with resolved.open("r", encoding="utf-8-sig") as source:
+                payload = json.load(source)
+        except (OSError, ValueError, TypeError):
+            continue
+        records.extend(extract_bookmark_records(payload))
+
+    unique: Dict[Tuple[int, str], Dict[str, Any]] = {}
+    for record in records:
+        tick = as_int(record.get("tick"), -1)
+        if tick < 0:
+            continue
+        comment = as_text(record.get("comment")).strip() or "Bookmark"
+        unique[(tick, comment)] = {"tick": tick, "comment": comment}
+    return [unique[key] for key in sorted(unique)]
+
+
+def extract_bookmark_records(value: Any, inherited_bookmark: bool = False) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        result: List[Dict[str, Any]] = []
+        for item in value:
+            result.extend(extract_bookmark_records(item, inherited_bookmark))
+        return result
+    if not isinstance(value, dict):
+        return []
+
+    lowered = {str(key).lower(): item for key, item in value.items()}
+    labels = " ".join(
+        as_text(lowered.get(key)) for key in ("event", "event_type", "type", "kind", "category", "name")
+    ).lower()
+    is_bookmark = inherited_bookmark or "bookmark" in labels or any("bookmark" in key for key in lowered)
+    tick = -1
+    for key in ("tick", "demo_tick", "demotick", "demo tick"):
+        if key in lowered:
+            tick = as_int(lowered[key], -1)
+            if tick >= 0:
+                break
+    result: List[Dict[str, Any]] = []
+    if is_bookmark and tick >= 0:
+        comment = ""
+        for key in ("comment", "description", "text", "label", "message", "value"):
+            candidate = lowered.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                comment = candidate.strip()
+                break
+        result.append({"tick": tick, "comment": comment or "Bookmark"})
+    for key, child in value.items():
+        if isinstance(child, (dict, list)):
+            result.extend(extract_bookmark_records(child, is_bookmark or "bookmark" in str(key).lower()))
+    return result
+
+
+def linked_bookmark_candidate(tick: int, candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    nearby = []
+    for candidate in candidates:
+        if candidate.get("candidate_type") == "bookmark":
+            continue
+        kill_ticks = candidate.get("point_of_kill_ticks") or []
+        if not kill_ticks:
+            continue
+        first_tick, last_tick = min(kill_ticks), max(kill_ticks)
+        if first_tick - BOOKMARK_LINK_AFTER_TICKS <= tick <= last_tick + BOOKMARK_LINK_BEFORE_TICKS:
+            nearby.append(candidate)
+    if not nearby:
+        return None
+    return min(nearby, key=lambda item: (abs(tick - max(item.get("point_of_kill_ticks") or [tick])), -float(item.get("overall_score", 0.0))))
+
+
+def build_bookmark_candidates(bookmarks: List[Dict[str, Any]], rounds: List[Dict[str, Any]], context: Dict[str, Any], identified_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    for index, bookmark in enumerate(bookmarks, start=1):
+        tick = as_int(bookmark.get("tick"), -1)
+        if tick < 0:
+            continue
+        linked = linked_bookmark_candidate(tick, identified_candidates)
+        round_data = next((item for item in rounds if item["live_start_tick"] <= tick <= item["end_tick"]), None)
+        comment = as_text(bookmark.get("comment")).strip() or "Bookmark"
+        if linked is not None:
+            candidate = dict(linked)
+            candidate["candidate_id"] = "bookmark-t{}-{}".format(tick, index)
+            candidate["candidate_type"] = "bookmark"
+            candidate["bookmark_comment"] = comment
+            candidate["bookmark_tick"] = tick
+            candidate["clip_start_tick"] = min(as_int(linked.get("clip_start_tick"), tick), max(0, tick - PRE_ROLL_TICKS))
+            candidate["start_tick"] = candidate["clip_start_tick"]
+            candidate["clip_end_tick"] = max(as_int(linked.get("clip_end_tick"), tick), tick + POST_ROLL_TICKS)
+            candidate["end_tick"] = candidate["clip_end_tick"]
+            candidate["overall_score"] = round(float(linked.get("overall_score", 0.0)) + BOOKMARK_SCORE, 2)
+            candidate["tags"] = sorted(set(list(linked.get("tags") or []) + ["bookmark"]))
+            candidate["score_breakdown"] = list(linked.get("score_breakdown") or []) + [{"reason": "manual_demo_bookmark", "points": BOOKMARK_SCORE, "event_tick": tick, "comment": comment}]
+            metrics = dict(linked.get("metrics") or {})
+            metrics.update({"bookmarks": 1, "bookmark_comment": comment, "bookmark_tick": tick, "bookmark_linked_candidate_id": linked.get("candidate_id")})
+            candidate["metrics"] = metrics
+            candidates.append(candidate)
+            continue
+        candidates.append({
+            "candidate_id": "bookmark-t{}-{}".format(tick, index),
+            "candidate_type": "bookmark",
+            "round_index": round_data["round_index"] if round_data else -1,
+            "live_round": round_data is not None,
+            "demo_context": context,
+            "round_state": {
+                "classification": "live" if round_data else "bookmark_outside_live_round",
+                "start_tick": round_data["live_start_tick"] if round_data else None,
+                "start_event": round_data["live_start_event"] if round_data else None,
+                "round_active_tick": round_data["round_active_tick"] if round_data else None,
+                "setup_finished_tick": round_data["setup_finished_tick"] if round_data else None,
+                "activation_trigger": round_data["activation_trigger"] if round_data else {},
+                "ready_up": round_data["ready_up"] if round_data else {},
+                "end_tick": round_data["end_tick"] if round_data else None,
+                "end_event": round_data["end_reason"] if round_data else None,
+            },
+            "clip_start_tick": max(0, tick - PRE_ROLL_TICKS),
+            "clip_end_tick": tick + POST_ROLL_TICKS,
+            "start_tick": max(0, tick - PRE_ROLL_TICKS),
+            "first_kill_tick": tick,
+            "last_kill_tick": tick,
+            "first_kill_server_tick": tick,
+            "last_kill_server_tick": tick,
+            "point_of_kill_ticks": [tick],
+            "point_of_kill_server_ticks": [tick],
+            "point_of_kill_events": [{"tick": tick, "demo_tick": tick, "server_tick": tick, "packet_sequence": -1, "event_index_in_packet": -1}],
+            "end_tick": tick + POST_ROLL_TICKS,
+            "attacker_user_id": 0,
+            "attacker_class": "bookmark",
+            "attacker_team": "bookmark",
+            "overall_score": BOOKMARK_SCORE,
+            "score_breakdown": [{"reason": "manual_demo_bookmark", "points": BOOKMARK_SCORE, "event_tick": tick, "comment": comment}],
+            "tags": ["bookmark"],
+            "metrics": {"bookmarks": 1, "bookmark_comment": comment, "bookmark_tick": tick},
+            "bookmark_comment": comment,
+            "bookmark_tick": tick,
+            "kills": [],
+            "building_destructions": [],
+            "objective_followups": [],
+            "state_pass": {"status": "not_applicable", "confirmed_airshots": 0, "confirmed_uber_drops": 0, "enemy_alive_before": 0, "enemy_alive_after_sequence": 0, "medic_force": False, "player_count_swing": False, "sack_uber_recovery": False, "sack_uber_medic_equalizer": False},
+        })
+    return candidates
+
+
 def _score_group_work(item: Tuple[List[Dict[str, Any]], Dict[str, Any], Optional[List[Dict[str, Any]]], Optional[List[Dict[str, Any]]]]) -> Tuple[float, List[str], Dict[str, Any], List[Dict[str, Any]]]:
     group, round_data, building_destructions, objective_events = item
     return score_candidate(group, round_data, building_destructions, objective_events)
@@ -2182,7 +2454,10 @@ def main() -> int:
     stage_started = time.perf_counter()
     rounds = build_rounds(events, state_timeline, teams)
     live_round_index = LiveRoundIndex(rounds)
+    context.update(competitive_mode_context(export_directory, events, state_timeline, rounds))
     profile["live_round_count"] = len(rounds)
+    profile["mode"] = context["mode"]
+    profile["mode_confidence"] = context["mode_confidence"]
     profile["stage_seconds"]["build_live_rounds"] = round(time.perf_counter() - stage_started, 6)
 
     stage_started = time.perf_counter()
@@ -2208,6 +2483,11 @@ def main() -> int:
 
     stage_started = time.perf_counter()
     candidates = build_candidates(deaths, rounds, context, building_destructions, objective_events, arguments.debug, arguments.candidate_workers, profile)
+    bookmarks = read_demo_bookmarks(export_directory)
+    bookmark_candidates = build_bookmark_candidates(bookmarks, rounds, context, candidates)
+    candidates = sorted(candidates + bookmark_candidates, key=lambda item: (-item["overall_score"], item["start_tick"]))
+    profile["demo_bookmark_count"] = len(bookmarks)
+    profile["bookmark_candidate_count"] = len(bookmark_candidates)
     profile["stage_seconds"]["candidate_grouping_and_scoring"] = round(time.perf_counter() - stage_started, 6)
 
     profile["state_sample_count"] = state_timeline.sample_count
@@ -2234,6 +2514,8 @@ def main() -> int:
         "live_round_kills": len(deaths),
         "live_round_building_destructions": len(building_destructions),
         "live_round_objective_events": len(objective_events),
+        "demo_bookmarks": len(bookmarks),
+        "bookmark_candidates": len(bookmark_candidates),
         "state_sample_count": state_timeline.sample_count,
         "state_samples_ignored_out_of_range": state_timeline.ignored_out_of_range_samples,
         "state_backed_analysis": state_timeline.sample_count > 0,
@@ -2245,6 +2527,7 @@ def main() -> int:
             "Kills must be inside an event-confirmed interval or a state-confirmed in-progress public-server interval; ready-up and countdown events never open an interval by themselves.",
             "Kill ticks are the original player_death event ticks. Packet sequence and event-index fields preserve ordering when multiple events share one tick.",
             "POV-only filtering is enabled only when the demo is identified as POV and its header nickname resolves to exactly one player event; otherwise all players are retained.",
+            "Demo Support (ds_mark) bookmarks are read from the .json sidecar next to the source .dem. Each bookmark becomes a candidate worth 30 points and inherits identifiers from a nearby analyzed frag candidate when one is found.",
         ],
     }
     with (export_directory / "frag_summary.json").open("w", encoding="utf-8", newline="\n") as output:

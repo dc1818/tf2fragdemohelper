@@ -6,6 +6,26 @@ export struct CandidateRow {
     tags: string, selected: bool,
 }
 
+component AutoScrollLog inherits ScrollView {
+    in property <string> log-text;
+    vertical-scrollbar-policy: always-on;
+    horizontal-scrollbar-policy: always-off;
+    viewport-width: self.width;
+    viewport-height: log-content.height + 8px;
+    viewport-y: Math.min(0px, self.height - self.viewport-height);
+
+    log-content := Text {
+        x: 4px;
+        y: 4px;
+        width: root.width - 20px;
+        height: self.preferred-height;
+        text: root.log-text;
+        color: #e2e8ee;
+        font-family: "monospace";
+        wrap: word-wrap;
+    }
+}
+
 export component AppWindow inherits Window {
     title: "TF2 Frag Demo Helper — Rust + Slint";
     preferred-width: 1480px;
@@ -91,7 +111,7 @@ export component AppWindow inherits Window {
                 Row { Text { text: "Item schema (optional)"; color: #e2e8ee; vertical-alignment: center; } LineEdit { text <=> root.item-schema; horizontal-stretch: 1; } Button { text: "Select schema"; clicked => { root.choose-item-schema(); } } }
             }
             Text { text: "Rust two-phase pipeline: adaptive parallel parsing followed by adaptive Rust analysis. Worker admission responds to this computer's available CPU and RAM during the run."; color: #aeb8c2; wrap: word-wrap; }
-            TextEdit { text: root.log-text; cursor-position <=> root.log-cursor-position; read-only: true; font-family: "monospace"; vertical-stretch: 1; }
+            AutoScrollLog { log-text: root.log-text; vertical-stretch: 1; }
             Rectangle {
                 height: 12px;
                 background: #17191c;
@@ -130,7 +150,7 @@ export component AppWindow inherits Window {
             }
             Text { text: root.recording-estimate; color: #87cefa; }
             ScrollView {
-                horizontal-scrollbar-policy: always;
+                horizontal-scrollbar-policy: always-on;
                 vertical-stretch: 1;
                 Rectangle {
                     width: 1500px;
@@ -200,7 +220,7 @@ export component AppWindow inherits Window {
         if root.selected-page == 3 : VerticalLayout {
             spacing: 8px;
             HorizontalLayout { Text { text: "Run Logs"; color: white; font-size: 20px; } Rectangle { horizontal-stretch: 1; } Button { text: "Back to Candidates"; enabled: root.has-export; clicked => { root.selected-page = 1; } } }
-            TextEdit { text: root.log-text; cursor-position <=> root.log-cursor-position; read-only: true; font-family: "monospace"; vertical-stretch: 1; }
+            AutoScrollLog { log-text: root.log-text; vertical-stretch: 1; }
         }
     }
 }

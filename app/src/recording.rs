@@ -202,16 +202,20 @@ pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> R
 pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Result<PathBuf> {
     recover_interrupted_profile()?;
     let session = prepare_hlae_batch(candidates, settings)?;
+    let diagnostic_log = session.join("hlae_recording_diagnostics.log");
+    log_recording_diagnostic(&diagnostic_log, "Recording session created");
     let game = tf2_game_directory(&settings.tf2_executable)?;
     let hlae_root = settings.hlae_executable.parent().context("could not find the HLAE directory")?;
     let x64 = settings.tf2_executable.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case("tf_win64.exe"));
     let hook = if x64 { hlae_root.join("x64/AfxHookSource.dll") } else { hlae_root.join("AfxHookSource.dll") };
     if !hook.is_file() {
+        log_recording_diagnostic(&diagnostic_log, format!("ERROR: required HLAE hook is missing: {}", hook.display()));
         bail!("required HLAE hook is missing: {}", hook.display());
     }
 
     let tf_process_name = settings.tf2_executable.file_name().and_then(|name| name.to_str()).unwrap_or("tf_win64.exe");
     if windows_process_is_running(tf_process_name) {
+        log_recording_diagnostic(&diagnostic_log, "ERROR: TF2 was already running; recording was not started");
         bail!("close TF2 before starting an isolated recording session");
     }
 
@@ -232,6 +236,7 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         }
     }
     if by_demo.is_empty() {
+        log_recording_diagnostic(&diagnostic_log, "ERROR: no selected candidates referenced an existing demo");
         bail!("none of the selected candidates reference an existing demo");
     }
 
@@ -265,7 +270,12 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf -w {width} -h {height} -dxlevel {dx} +tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +playdemo {}",
         staged_relatives[0]
     );
+    log_recording_diagnostic(&diagnostic_log, format!(
+        "Prepared offline launch\nTF2 executable: {}\nHLAE executable: {}\nGame directory: {}\nHook DLL: {}\nHLAE options: -customLoader -autoStart -noGui -programPath <TF2> -cmdLine <shown below> -hookDllPath <hook DLL>\nCandidates: {}\nDemos in queue: {}\nFormat: {} at {} FPS\nInitial staged demo: {}\nTF2 command line: {}",
+        settings.tf2_executable.display(), settings.hlae_executable.display(), game.display(), hook.display(), candidates.len(), groups.len(), settings.recording_format, settings.capture_fps, staged_relatives[0], game_arguments
+    ));
     let profile = stage_recording_profile(game.as_path(), session_name, tf_process_name, settings)?;
+    log_recording_diagnostic(&diagnostic_log, format!("Recording profile staged; original TF2 files are backed up in {}", profile.backup_directory.display()));
     let launch_log = session.join("hlae_launch.log");
     let launch_log_file = File::create(&launch_log)?;
     let mut launch = Command::new(&settings.hlae_executable);
@@ -287,17 +297,31 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
     }
     let launch_result = launch.spawn();
     let mut child = match launch_result {
-        Ok(child) => child,
+        Ok(child) => {
+            log_recording_diagnostic(&diagnostic_log, format!("HLAE process started with PID {}. Console output is in {}", child.id(), launch_log.display()));
+            child
+        }
         Err(error) => {
+            log_recording_diagnostic(&diagnostic_log, format!("ERROR: HLAE process could not start: {error}"));
             let _ = restore_recording_profile(&profile);
             return Err(error.into());
         }
     };
     thread::spawn(move || {
-        let _ = child.wait();
-        wait_for_tf2_exit(&profile.tf_process_name);
+        match child.wait() {
+            Ok(status) => log_recording_diagnostic(&diagnostic_log, format!("HLAE process exited with status {status}")),
+            Err(error) => log_recording_diagnostic(&diagnostic_log, format!("ERROR: could not wait for HLAE: {error}")),
+        }
+        if wait_for_tf2_exit(&profile.tf_process_name) {
+            log_recording_diagnostic(&diagnostic_log, "TF2 was detected and has exited; restoring original TF2 files");
+        } else {
+            log_recording_diagnostic(&diagnostic_log, "ERROR: TF2 was never detected within 30 seconds of HLAE exiting; restoring original TF2 files");
+        }
         if let Err(error) = restore_recording_profile(&profile) {
+            log_recording_diagnostic(&diagnostic_log, format!("ERROR: restore failed: {error}"));
             let _ = fs::write(profile.backup_directory.join("RESTORE_REQUIRED.txt"), error.to_string());
+        } else {
+            log_recording_diagnostic(&diagnostic_log, "Restore verification passed; original TF2 files were restored");
         }
     });
     Ok(session)
@@ -812,14 +836,28 @@ fn tf2_game_directory(executable: &Path) -> Result<PathBuf> {
     bail!("could not locate TF2's tf/cfg directory from {}", executable.display())
 }
 
-fn wait_for_tf2_exit(image_name: &str) {
+fn wait_for_tf2_exit(image_name: &str) -> bool {
+    let mut was_seen = false;
     for _ in 0..30 {
-        if windows_process_is_running(image_name) { break; }
+        if windows_process_is_running(image_name) {
+            was_seen = true;
+            break;
+        }
         thread::sleep(Duration::from_secs(1));
     }
     while windows_process_is_running(image_name) {
+        was_seen = true;
         thread::sleep(Duration::from_secs(1));
     }
+    was_seen
+}
+
+fn log_recording_diagnostic(path: &Path, message: impl AsRef<str>) {
+    let result = (|| -> io::Result<()> {
+        let mut log = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(log, "[{}] {}", Utc::now().to_rfc3339(), message.as_ref())
+    })();
+    let _ = result;
 }
 
 fn clip_window(candidate: &Candidate, settings: &AppSettings) -> (i64, i64) {

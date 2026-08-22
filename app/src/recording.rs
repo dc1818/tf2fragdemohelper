@@ -585,7 +585,15 @@ fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
 
 fn windows_process_is_running(image_name: &str) -> bool {
     if !cfg!(target_os = "windows") { return false; }
-    Command::new("tasklist").args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"])
+    let mut tasklist = Command::new("tasklist");
+    tasklist.args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        tasklist.creation_flags(CREATE_NO_WINDOW);
+    }
+    tasklist
         .output().ok().is_some_and(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains(&image_name.to_ascii_lowercase()))
 }
 

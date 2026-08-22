@@ -11,7 +11,7 @@ use crate::{
     batch::{BatchController, ProgressEvent},
     filter::CandidateFilter,
     models::{AppSettings, Candidate},
-    recording::{launch_hlae_batch, preview_candidate, recover_interrupted_profile, shutdown_active_recording, RecordingIndex},
+    recording::{launch_hlae_batch, preview_candidate, recover_interrupted_profile, shutdown_active_recording, RecordingIndex, RecordingProgress, RecordingProgressSink},
     scheduler::PerformanceProfile,
 };
 use anyhow::{Context, Result};
@@ -361,7 +361,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let state_for_record = state.clone();
     ui.on_record_selected(move || {
         let Some(ui) = weak.upgrade() else { return };
-        let (selected, mut settings) = {
+        let (mut selected, mut settings) = {
             let state = state_for_record.lock();
             (selected_candidates(&state).into_iter().cloned().collect::<Vec<_>>(), state.settings.clone())
         };
@@ -375,7 +375,64 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         settings.jpg_quality = ui.get_jpg_quality().clamp(1, 100) as u8;
         settings.recording_format = ui.get_recording_format().to_string();
         settings.performance_profile = ui.get_performance_profile().to_string();
-        let result = launch_hlae_batch(&selected, &settings);
+        let recorded_count = {
+            let state = state_for_record.lock();
+            selected.iter().filter(|candidate| state.recording_index.is_recorded_indexed(candidate)).count()
+        };
+        if recorded_count > 0 {
+            let choice = rfd::MessageDialog::new()
+                .set_title("Previously Recorded Candidates")
+                .set_description(format!("{recorded_count} selected candidate(s) already have a matching recording.\n\nYes: skip them\nNo: record them again\nCancel: do not start"))
+                .set_buttons(rfd::MessageButtons::YesNoCancel)
+                .show();
+            match choice {
+                rfd::MessageDialogResult::Yes => {
+                    let state = state_for_record.lock();
+                    selected.retain(|candidate| !state.recording_index.is_recorded_indexed(candidate));
+                }
+                rfd::MessageDialogResult::No => {}
+                _ => {
+                    ui.set_status_text("Recording cancelled".into());
+                    return;
+                }
+            }
+        }
+        if selected.is_empty() {
+            ui.set_status_text("All selected candidates already have matching recordings".into());
+            return;
+        }
+        {
+            let mut state = state_for_record.lock();
+            state.settings = settings.clone();
+            let _ = state.settings.save();
+        }
+        let progress_weak = weak.clone();
+        let progress_state = state_for_record.clone();
+        let progress: RecordingProgressSink = Arc::new(move |event| {
+            let weak = progress_weak.clone();
+            let state = progress_state.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                match event {
+                    RecordingProgress::Status(message) => ui.set_status_text(message.into()),
+                    RecordingProgress::ClipCompleted { candidate_id, output_path } => {
+                        state.lock().recording_index = RecordingIndex::load();
+                        let filter = ui.get_filter_text().to_string();
+                        let score = ui.get_minimum_score();
+                        refresh_candidates(&ui, &state, &filter, score);
+                        ui.set_status_text(format!("Recorded {candidate_id}: {}", output_path.display()).into());
+                    }
+                    RecordingProgress::Finished { completed, failed, session } => {
+                        state.lock().recording_index = RecordingIndex::load();
+                        let filter = ui.get_filter_text().to_string();
+                        let score = ui.get_minimum_score();
+                        refresh_candidates(&ui, &state, &filter, score);
+                        ui.set_status_text(format!("Recording finished: {completed} completed, {failed} failed. Logs: {}", session.display()).into());
+                    }
+                }
+            });
+        });
+        let result = launch_hlae_batch(&selected, &settings, Some(progress));
         ui.set_status_text(result.map(|path| format!("Offline HLAE recording launched: {}", path.display())).unwrap_or_else(|error| error.to_string()).into());
     });
 }

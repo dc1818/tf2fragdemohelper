@@ -53,6 +53,7 @@ export component AppWindow inherits Window {
     in-out property <int> minimum-score: 0;
     in-out property <string> candidate-summary;
     in-out property <int> selected-count: 0;
+    in-out property <length> candidate-horizontal-offset: 0px;
 
     in-out property <int> lead-seconds: 8;
     in-out property <int> outro-seconds: 3;
@@ -152,66 +153,67 @@ export component AppWindow inherits Window {
                 Button { text: "View Parser/Analyzer Logs"; clicked => { root.selected-page = 3; } }
             }
             Text { text: root.recording-estimate; color: #87cefa; }
-            candidate-scroll := ScrollView {
-                horizontal-scrollbar-policy: always-on;
-                vertical-scrollbar-policy: always-off;
-                mouse-drag-pan-enabled: false;
-                vertical-stretch: 1;
-                Rectangle {
+            Rectangle {
+                height: 30px;
+                background: #2b3036;
+                clip: true;
+                HorizontalLayout {
+                    x: -root.candidate-horizontal-offset;
                     width: 1500px;
-                    height: candidate-scroll.height;
-                    VerticalLayout {
-                        spacing: 0px;
-                        Rectangle {
-                            height: 30px;
-                            background: #2b3036;
-                            HorizontalLayout {
-                                padding-left: 5px; padding-right: 5px; spacing: 8px;
-                                Text { text: "#"; width: 34px; color: white; } Text { text: "Score"; width: 55px; color: white; } Text { text: "Kills"; width: 45px; color: white; }
-                                Text { text: "Attacker"; width: 70px; color: white; } Text { text: "Class"; width: 80px; color: white; } Text { text: "Team"; width: 55px; color: white; }
-                                Text { text: "Demo"; width: 180px; color: white; } Text { text: "Map"; width: 140px; color: white; } Text { text: "Mode"; width: 170px; color: white; }
-                                Text { text: "Type"; width: 60px; color: white; } Text { text: "Recorded"; width: 70px; color: white; horizontal-alignment: center; }
-                                Text { text: "Ticks"; width: 150px; color: white; } Text { text: "Tags"; width: 300px; color: white; }
+                    padding-left: 5px; padding-right: 5px; spacing: 8px;
+                    Text { text: "#"; width: 34px; color: white; } Text { text: "Score"; width: 55px; color: white; } Text { text: "Kills"; width: 45px; color: white; }
+                    Text { text: "Attacker"; width: 70px; color: white; } Text { text: "Class"; width: 80px; color: white; } Text { text: "Team"; width: 55px; color: white; }
+                    Text { text: "Demo"; width: 180px; color: white; } Text { text: "Map"; width: 140px; color: white; } Text { text: "Mode"; width: 170px; color: white; }
+                    Text { text: "Type"; width: 60px; color: white; } Text { text: "Recorded"; width: 70px; color: white; horizontal-alignment: center; }
+                    Text { text: "Ticks"; width: 150px; color: white; } Text { text: "Tags"; width: 300px; color: white; }
+                }
+            }
+            candidate-list := ListView {
+                vertical-stretch: 1;
+                for row[index] in root.candidate-rows : Rectangle {
+                    height: 30px;
+                    clip: true;
+                    background: row.selected ? #2c8252 : (Math.mod(index, 2) == 0 ? #17191c : #202328);
+                    HorizontalLayout {
+                        x: -root.candidate-horizontal-offset;
+                        width: 1500px;
+                        padding-left: 5px; padding-right: 5px; spacing: 8px;
+                        Text { text: "" + row.rank; width: 34px; color: #e5e9ed; } Text { text: row.score; width: 55px; color: #e5e9ed; } Text { text: row.kills; width: 45px; color: #e5e9ed; }
+                        Text { text: row.attacker; width: 70px; color: #e5e9ed; } Text { text: row.class-name; width: 80px; color: #e5e9ed; } Text { text: row.team; width: 55px; color: #e5e9ed; }
+                        Text { text: row.demo; width: 180px; color: #e5e9ed; overflow: elide; } Text { text: row.map-name; width: 140px; color: #e5e9ed; overflow: elide; }
+                        Text { text: row.mode; width: 170px; color: #e5e9ed; overflow: elide; } Text { text: row.demo-type; width: 60px; color: #e5e9ed; }
+                        Text { text: row.recorded; width: 70px; color: #e5e9ed; horizontal-alignment: center; } Text { text: row.ticks; width: 150px; color: #e5e9ed; overflow: elide; }
+                        Text { text: row.tags; width: 300px; color: #e5e9ed; overflow: elide; }
+                    }
+                    drag-area := TouchArea {
+                        property <bool> drag-selecting;
+                        property <bool> dragging;
+                        pointer-event(event) => {
+                            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                                self.drag-selecting = !row.selected;
+                                self.dragging = true;
+                                root.drag-select-candidates(index, 0, self.drag-selecting);
+                            }
+                            if (event.button == PointerEventButton.left && (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)) {
+                                self.dragging = false;
                             }
                         }
-                        ListView {
-                            width: parent.width;
-                            vertical-stretch: 1;
-                            for row[index] in root.candidate-rows : Rectangle {
-                                height: 30px;
-                                background: row.selected ? #2c8252 : (Math.mod(index, 2) == 0 ? #17191c : #202328);
-                                HorizontalLayout {
-                                    padding-left: 5px; padding-right: 5px; spacing: 8px;
-                                    Text { text: "" + row.rank; width: 34px; color: #e5e9ed; } Text { text: row.score; width: 55px; color: #e5e9ed; } Text { text: row.kills; width: 45px; color: #e5e9ed; }
-                                    Text { text: row.attacker; width: 70px; color: #e5e9ed; } Text { text: row.class-name; width: 80px; color: #e5e9ed; } Text { text: row.team; width: 55px; color: #e5e9ed; }
-                                    Text { text: row.demo; width: 180px; color: #e5e9ed; overflow: elide; } Text { text: row.map-name; width: 140px; color: #e5e9ed; overflow: elide; }
-                                    Text { text: row.mode; width: 170px; color: #e5e9ed; overflow: elide; } Text { text: row.demo-type; width: 60px; color: #e5e9ed; }
-                                    Text { text: row.recorded; width: 70px; color: #e5e9ed; horizontal-alignment: center; } Text { text: row.ticks; width: 150px; color: #e5e9ed; overflow: elide; }
-                                    Text { text: row.tags; width: 300px; color: #e5e9ed; overflow: elide; }
-                                }
-                                drag-area := TouchArea {
-                                    property <bool> drag-selecting;
-                                    property <bool> dragging;
-                                    pointer-event(event) => {
-                                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
-                                            self.drag-selecting = !row.selected;
-                                            self.dragging = true;
-                                            root.drag-select-candidates(index, 0, self.drag-selecting);
-                                        }
-                                        if (event.button == PointerEventButton.left && (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel)) {
-                                            self.dragging = false;
-                                        }
-                                    }
-                                    moved => {
-                                        if (self.dragging) {
-                                            root.drag-select-candidates(index, (self.mouse-y - self.pressed-y) / 1px, self.drag-selecting);
-                                        }
-                                    }
-                                }
+                        moved => {
+                            if (self.dragging) {
+                                root.drag-select-candidates(index, (self.mouse-y - self.pressed-y) / 1px, self.drag-selecting);
                             }
                         }
                     }
                 }
+            }
+            horizontal-candidate-scroll := ScrollView {
+                height: 18px;
+                horizontal-scrollbar-policy: always-on;
+                vertical-scrollbar-policy: always-off;
+                viewport-width: 1500px;
+                viewport-height: 1px;
+                viewport-x <=> root.candidate-horizontal-offset;
+                Rectangle { width: 1500px; height: 1px; }
             }
         }
 

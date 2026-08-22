@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -30,6 +30,33 @@ struct DemoSignatureCacheEntry {
 }
 
 static DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignatureCacheEntry>>> = OnceLock::new();
+static PORTABLE_DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignatureCacheEntry>>> = OnceLock::new();
+
+#[derive(Clone, Debug)]
+pub enum RecordingProgress {
+    Status(String),
+    ClipCompleted { candidate_id: String, output_path: PathBuf },
+    Finished { completed: usize, failed: usize, session: PathBuf },
+}
+
+pub type RecordingProgressSink = Arc<dyn Fn(RecordingProgress) + Send + Sync>;
+
+#[derive(Clone, Debug)]
+struct PreparedClip {
+    order: usize,
+    candidate: Candidate,
+    start_tick: i64,
+    end_tick: i64,
+    config_base: String,
+    capture_base: String,
+    recording_key: String,
+    demo_signature: String,
+    recording_identifier: String,
+    working_path: Option<PathBuf>,
+    final_output_path: PathBuf,
+    frames_path: Option<PathBuf>,
+    audio_path: Option<PathBuf>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RecordingProfileSession {
@@ -51,7 +78,8 @@ struct RecordingProfileSession {
     hitsound_files: Vec<PathBuf>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct RecordingEntry {
     pub recording_key: String,
     pub candidate_id: String,
@@ -60,6 +88,7 @@ pub struct RecordingEntry {
     pub clip_end_tick: i64,
     pub output_path: PathBuf,
     pub output_fingerprint: String,
+    #[serde(alias = "recorded_utc")]
     pub completed_utc: String,
 }
 
@@ -87,8 +116,10 @@ impl RecordingIndex {
     /// walking it once for every candidate made large exported batches appear to freeze.
     /// A single background reconciliation pass handles outputs that have not yet been indexed.
     pub fn is_recorded_indexed(&self, candidate: &Candidate) -> bool {
-        let Ok(key) = recording_key(candidate) else { return false };
-        self.entries.get(&key).is_some_and(|entry| entry.output_path.is_file())
+        recording_keys(candidate)
+            .into_iter()
+            .flatten()
+            .any(|key| self.entries.get(&key).is_some_and(|entry| output_still_exists(&entry.output_path)))
     }
 
     /// Scan a recording directory once and add the outputs whose generated clip base names
@@ -98,60 +129,46 @@ impl RecordingIndex {
         if !root.is_dir() {
             return 0;
         }
-
-        let mut targets: HashMap<(String, i64), Vec<&Candidate>> = HashMap::new();
+        let outputs = final_recording_outputs(root);
+        let mut added = 0;
         for candidate in candidates {
-            targets
-                .entry((sanitize(&candidate.candidate_id).to_lowercase(), candidate.clip_start_tick))
-                .or_default()
-                .push(candidate);
+            if self.is_recorded_indexed(candidate) {
+                continue;
+            }
+            let key = match recording_key(candidate) {
+                Ok(key) => key,
+                Err(_) => continue,
+            };
+            let token = recording_key_token(&key);
+            let candidate_id = sanitize(&candidate.candidate_id).to_lowercase();
+            let old_ticks = format!("t{}-{}", candidate.clip_start_tick, candidate.clip_end_tick);
+            if let Some(output) = outputs.iter().find(|path| {
+                let name = recording_output_name(path);
+                name.contains(&format!("__k{token}")) || (name.contains(&candidate_id) && name.contains(&old_ticks))
+            }) {
+                if self.register(candidate, output.clone()).is_ok() {
+                    added += 1;
+                }
+            }
         }
+
         let mut missing_fingerprints: HashMap<String, Vec<String>> = HashMap::new();
         for (key, entry) in &self.entries {
-            if !entry.output_fingerprint.is_empty() && !entry.output_path.is_file() {
+            if !entry.output_fingerprint.is_empty() && !output_still_exists(&entry.output_path) {
                 missing_fingerprints
                     .entry(entry.output_fingerprint.clone())
                     .or_default()
                     .push(key.clone());
             }
         }
-
-        let mut found = Vec::new();
         let mut relocated = Vec::new();
-        for entry in WalkDir::new(root).max_depth(4).into_iter().filter_map(|entry| entry.ok()) {
-            if !entry.file_type().is_file() || !entry.metadata().is_ok_and(|metadata| metadata.len() > 0) {
-                continue;
-            }
-            let Some(stem) = entry.path().file_stem().and_then(|value| value.to_str()) else { continue };
-            if !missing_fingerprints.is_empty() {
-                if let Ok(fingerprint) = file_fingerprint(entry.path()) {
+        if !missing_fingerprints.is_empty() {
+            for output in &outputs {
+                if let Ok(fingerprint) = output_fingerprint(output) {
                     if let Some(keys) = missing_fingerprints.remove(&fingerprint) {
-                        relocated.extend(keys.into_iter().map(|key| (key, entry.path().to_path_buf())));
+                        relocated.extend(keys.into_iter().map(|key| (key, output.clone())));
                     }
                 }
-            }
-            let stem_lower = stem.to_lowercase();
-            let Some((prefix, ticks)) = stem_lower.rsplit_once("_t") else { continue };
-            let Some((order, candidate_id)) = prefix.split_once('_') else { continue };
-            if !order.chars().all(|character| character.is_ascii_digit()) {
-                continue;
-            }
-            let Some((start_text, end_text)) = ticks.split_once('-') else { continue };
-            let Ok(start_tick) = start_text.parse::<i64>() else { continue };
-            let Some(matches) = targets.get(&(candidate_id.to_owned(), start_tick)) else { continue };
-            for candidate in matches {
-                // Movie frame image files add digits after the end tick, so accept a prefix.
-                if end_text.starts_with(&candidate.clip_end_tick.to_string()) {
-                    found.push(((*candidate).clone(), entry.path().to_path_buf()));
-                    break;
-                }
-            }
-        }
-
-        let mut added = 0;
-        for (candidate, path) in found {
-            if !self.is_recorded_indexed(&candidate) && self.register(&candidate, path).is_ok() {
-                added += 1;
             }
         }
         for (key, path) in relocated {
@@ -171,14 +188,18 @@ impl RecordingIndex {
     }
 
     pub fn register(&mut self, candidate: &Candidate, output: PathBuf) -> Result<()> {
+        self.register_with_fingerprint(candidate, output, None)
+    }
+
+    fn register_with_fingerprint(&mut self, candidate: &Candidate, output: PathBuf, fingerprint: Option<String>) -> Result<()> {
         let key = recording_key(candidate)?;
         let entry = RecordingEntry {
             recording_key: key.clone(),
             candidate_id: candidate.candidate_id.clone(),
-            demo_signature: demo_signature(Path::new(&candidate.source_demo))?,
+            demo_signature: portable_demo_signature(Path::new(&candidate.source_demo))?,
             clip_start_tick: candidate.clip_start_tick,
             clip_end_tick: candidate.clip_end_tick,
-            output_fingerprint: file_fingerprint(&output).unwrap_or_default(),
+            output_fingerprint: fingerprint.unwrap_or_else(|| output_fingerprint(&output).unwrap_or_default()),
             output_path: output,
             completed_utc: Utc::now().to_rfc3339(),
         };
@@ -275,44 +296,18 @@ pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> R
     if !settings.tf2_executable.is_file() {
         bail!("select tf_win64.exe in Settings");
     }
-    if settings.recording_format.contains("MP4") && !settings.ffmpeg_executable.is_file() {
-        bail!("select ffmpeg.exe before MP4 recording");
+    if !settings.recording_format.contains("Image") && !settings.ffmpeg_executable.is_file() {
+        bail!("select ffmpeg.exe before encoded video recording");
     }
     fs::create_dir_all(&settings.recording_output_directory)?;
-    let session = settings.recording_output_directory.join(format!("Recording Metadata/session_{}", Utc::now().format("%Y%m%d_%H%M%S")));
+    let session = settings.recording_output_directory.join("Recording Metadata").join(format!("tf2fragdemohelper_batch_{}", Utc::now().format("%Y%m%d_%H%M%S")));
     fs::create_dir_all(&session)?;
-    let queue = candidates.iter().enumerate().map(|(index, candidate)| {
-        let (start_tick, end_tick) = clip_window(candidate, settings);
-        json!({
-        "order":index+1,
-        "candidate_id":candidate.candidate_id,
-        "source_demo":candidate.source_demo,
-        "start_tick":start_tick,
-        "end_tick":end_tick,
-        "fps":settings.capture_fps,
-        "format":settings.recording_format,
-        "status":"Pending",
-    })}).collect::<Vec<_>>();
-    fs::write(session.join("recording_queue.json"), serde_json::to_vec_pretty(&queue)?)?;
     fs::write(session.join("offline_safety.cfg"), b"sv_lan 1\nsv_master_legacy_mode 1\nnet_start 0\n")?;
     fs::write(session.join("tf2fragdemohelper_recording_profile.cfg"), recording_profile_cfg(settings))?;
-    // The VDM/config queue is intentionally generated before launch. Every
-    // clip receives a terminal stop command and the final clip quits TF2,
-    // preventing the old last-frag replay loop.
-    for (index, candidate) in candidates.iter().enumerate() {
-        fs::write(session.join(format!("clip_{:03}_start.cfg", index + 1)), format!(
-            "echo TF2FRAG_RECORD_START {}\nhost_framerate {}\nmirv_streams record fps {}\nmirv_streams record start\n",
-            candidate.candidate_id, settings.capture_fps, settings.capture_fps
-        ))?;
-        fs::write(session.join(format!("clip_{:03}_stop.cfg", index + 1)), format!(
-            "mirv_streams record end\necho TF2FRAG_RECORD_END {}\n",
-            candidate.candidate_id
-        ))?;
-    }
     Ok(session)
 }
 
-pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Result<PathBuf> {
+pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings, progress: Option<RecordingProgressSink>) -> Result<PathBuf> {
     recover_interrupted_profile()?;
     let session = prepare_hlae_batch(candidates, settings)?;
     let diagnostic_log = session.join("hlae_recording_diagnostics.log");
@@ -357,6 +352,9 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         clips.sort_by_key(|(_, candidate)| clip_window(candidate, settings).0);
     }
     let groups = by_demo.into_iter().collect::<Vec<_>>();
+    let prepared_clips = prepare_recording_clips(candidates, session_name, &session, settings)?;
+    let prepared_by_order = prepared_clips.iter().map(|clip| (clip.order, clip)).collect::<HashMap<_, _>>();
+    write_recording_manifest(&session, &prepared_clips, settings, "Pending", None)?;
     let mut staged_relatives = Vec::new();
     for (demo_index, (source, clips)) in groups.iter().enumerate() {
         let stem = sanitize(source.file_stem().and_then(|value| value.to_str()).unwrap_or("demo"));
@@ -368,9 +366,10 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
 
         for (order, candidate) in clips {
             let base = format!("{:03}_{}_t{}-{}", order, sanitize(&candidate.candidate_id), candidate.clip_start_tick, candidate.clip_end_tick);
-            let start_cfg = recording_start_cfg(&settings.recording_output_directory, &base, settings);
+            let prepared = prepared_by_order.get(order).context("recording clip preparation did not match the demo queue")?;
+            let start_cfg = recording_start_cfg(prepared, settings);
             fs::write(cfg_root.join(format!("{base}_start.cfg")), start_cfg)?;
-            fs::write(cfg_root.join(format!("{base}_stop.cfg")), recording_stop_cfg(settings))?;
+            fs::write(cfg_root.join(format!("{base}_stop.cfg")), recording_stop_cfg(settings, &prepared.config_base))?;
         }
     }
 
@@ -392,6 +391,8 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
     ));
     let profile = stage_recording_profile(game.as_path(), session_name, tf_process_name, settings)?;
     log_recording_diagnostic(&diagnostic_log, format!("Recording profile staged; original TF2 files are backed up in {}", profile.backup_directory.display()));
+    let recording_log = game.join("tf2fragdemohelper_recording.log");
+    let _ = fs::remove_file(&recording_log);
     let launch_log = session.join("hlae_launch.log");
     let launch_log_file = File::create(&launch_log)?;
     let mut launch = Command::new(&settings.hlae_executable);
@@ -415,6 +416,9 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
     let mut child = match launch_result {
         Ok(child) => {
             log_recording_diagnostic(&diagnostic_log, format!("HLAE process started with PID {}. Console output is in {}", child.id(), launch_log.display()));
+            if let Some(sink) = &progress {
+                sink(RecordingProgress::Status(format!("HLAE started; recording {} selected clip(s)", prepared_clips.len())));
+            }
             child
         }
         Err(error) => {
@@ -423,21 +427,28 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
             return Err(error.into());
         }
     };
+    let finalizer_settings = settings.clone();
+    let finalizer_session = session.clone();
+    let finalizer_game = game.clone();
     thread::spawn(move || {
-        match child.wait() {
-            Ok(status) => log_recording_diagnostic(&diagnostic_log, format!("HLAE process exited with status {status}")),
-            Err(error) => log_recording_diagnostic(&diagnostic_log, format!("ERROR: could not wait for HLAE: {error}")),
-        }
-        if wait_for_tf2_exit(&profile.tf_process_name) {
-            log_recording_diagnostic(&diagnostic_log, "TF2 was detected and has exited; restoring original TF2 files");
-        } else {
-            log_recording_diagnostic(&diagnostic_log, "ERROR: TF2 was never detected within 30 seconds of HLAE exiting; restoring original TF2 files");
-        }
+        let (completed, failed) = finalize_recording_session(
+            &mut child,
+            &profile.tf_process_name,
+            &finalizer_game,
+            &finalizer_session,
+            &prepared_clips,
+            &finalizer_settings,
+            progress.as_ref(),
+            &diagnostic_log,
+        );
         if let Err(error) = restore_recording_profile(&profile) {
             log_recording_diagnostic(&diagnostic_log, format!("ERROR: restore failed: {error}"));
             let _ = fs::write(profile.backup_directory.join("RESTORE_REQUIRED.txt"), error.to_string());
         } else {
             log_recording_diagnostic(&diagnostic_log, "Restore verification passed; original TF2 files were restored");
+        }
+        if let Some(sink) = &progress {
+            sink(RecordingProgress::Finished { completed, failed, session: finalizer_session });
         }
     });
     Ok(session)
@@ -976,6 +987,10 @@ fn log_recording_diagnostic(path: &Path, message: impl AsRef<str>) {
     let _ = result;
 }
 
+fn log_recording_finalize(session: &Path, message: impl AsRef<str>) {
+    log_recording_diagnostic(&session.join("recording_finalize.log"), message);
+}
+
 fn clip_window(candidate: &Candidate, settings: &AppSettings) -> (i64, i64) {
     let first = candidate.point_of_kill_ticks.first().copied().unwrap_or(candidate.clip_start_tick);
     let last = candidate.point_of_kill_ticks.last().copied().unwrap_or(candidate.clip_end_tick);
@@ -1067,27 +1082,396 @@ fn add_vdm_action(lines: &mut Vec<String>, action: &mut i32, factory: &str, name
     *action += 1;
 }
 
-fn recording_start_cfg(output_root: &Path, base: &str, settings: &AppSettings) -> String {
-    let fps = settings.capture_fps;
-    let output = output_root.join(if settings.recording_format.contains("Image") { "Image Sequences" } else { "Videos" }).join(base);
-    let output = output.display().to_string().replace('\\', "/");
-    if settings.recording_format.starts_with("TGA") {
-        format!("echo TF2FRAG_RECORD_START {base}; host_framerate {fps}; startmovie \"{output}\" raw; hideconsole\n")
-    } else if settings.recording_format.starts_with("JPG") {
-        format!("echo TF2FRAG_RECORD_START {base}; jpeg_quality {}; host_framerate {fps}; startmovie \"{output}\" jpeg; hideconsole\n", settings.jpg_quality)
-    } else {
-        let preset = if settings.recording_format.contains("Compatible") { "afxFfmpegYuv420p" } else if settings.recording_format.contains("Lossless") { "afxFfmpegLosslessBest" } else if settings.recording_format.contains("AVI") { "afxFfmpegRaw" } else { "afxFfmpeg" };
-        format!("echo TF2FRAG_RECORD_START {base}; host_framerate {fps}; mirv_streams record fps {fps}; mirv_streams record screen enabled 1; mirv_streams record screen settings {preset}; mirv_streams record name \"{output}\"; mirv_streams record start; hideconsole\n")
+fn prepare_recording_clips(candidates: &[Candidate], session_name: &str, session: &Path, settings: &AppSettings) -> Result<Vec<PreparedClip>> {
+    let encoded = !settings.recording_format.contains("Image");
+    let extension = if settings.recording_format.contains("AVI") { "avi" } else { "mp4" };
+    let mut clips = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let source = Path::new(&candidate.source_demo);
+        if !source.is_file() {
+            continue;
+        }
+        let order = index + 1;
+        let (start_tick, end_tick) = clip_window(candidate, settings);
+        let recording_key = recording_key(candidate)?;
+        let demo_signature = portable_demo_signature(source)?;
+        let demo_name = sanitize(source.file_stem().and_then(|value| value.to_str()).unwrap_or("demo"));
+        let candidate_name = sanitize(if candidate.candidate_id.trim().is_empty() { "candidate" } else { &candidate.candidate_id });
+        let base_identifier = format!("{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__k{}", recording_key_token(&recording_key));
+        let recording_identifier = unique_recording_identifier(&settings.recording_output_directory, session, &base_identifier, encoded, extension);
+        let config_base = format!("{:03}_{}_t{}-{}", order, candidate_name, candidate.clip_start_tick, candidate.clip_end_tick);
+        let capture_base = format!("tf2frag_{session_name}_{order:03}");
+        let (working_path, final_output_path, frames_path, audio_path) = if encoded {
+            let working = session.join("working").join(&recording_identifier);
+            let final_path = settings.recording_output_directory.join("Videos").join(format!("{recording_identifier}.{extension}"));
+            fs::create_dir_all(&working)?;
+            fs::create_dir_all(final_path.parent().unwrap())?;
+            (Some(working), final_path, None, None)
+        } else {
+            let sequence = settings.recording_output_directory.join("Image Sequences").join(&recording_identifier);
+            let frames = sequence.join("Frames");
+            let audio = sequence.join("Audio");
+            fs::create_dir_all(&frames)?;
+            fs::create_dir_all(&audio)?;
+            (None, sequence, Some(frames), Some(audio))
+        };
+        clips.push(PreparedClip {
+            order,
+            candidate: candidate.clone(),
+            start_tick,
+            end_tick,
+            config_base,
+            capture_base,
+            recording_key,
+            demo_signature,
+            recording_identifier,
+            working_path,
+            final_output_path,
+            frames_path,
+            audio_path,
+        });
+    }
+    Ok(clips)
+}
+
+fn unique_recording_identifier(root: &Path, session: &Path, base: &str, encoded: bool, extension: &str) -> String {
+    for suffix in 1usize.. {
+        let candidate = if suffix == 1 { base.to_owned() } else { format!("{base}_{suffix}") };
+        let final_path = if encoded {
+            root.join("Videos").join(format!("{candidate}.{extension}"))
+        } else {
+            root.join("Image Sequences").join(&candidate)
+        };
+        if !final_path.exists() && !session.join("working").join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+fn write_recording_manifest(session: &Path, clips: &[PreparedClip], settings: &AppSettings, batch_status: &str, error: Option<&str>) -> Result<()> {
+    let clip_records = clips.iter().map(|clip| json!({
+        "order": clip.order,
+        "source_demo": clip.candidate.source_demo,
+        "candidate_id": clip.candidate.candidate_id,
+        "recording_key": clip.recording_key,
+        "demo_content_signature": clip.demo_signature,
+        "start_tick": clip.start_tick,
+        "end_tick": clip.end_tick,
+        "attacker_user_id": clip.candidate.attacker_user_id,
+        "recording_identifier": clip.recording_identifier,
+        "expected_output_path": clip.final_output_path,
+        "working_path": clip.working_path,
+        "frames_path": clip.frames_path,
+        "audio_path": clip.audio_path,
+        "native_capture_base": clip.capture_base,
+        "status": "Pending",
+        "actual_output_path": null,
+        "output_fingerprint": null,
+        "error": null,
+    })).collect::<Vec<_>>();
+    let manifest = json!({
+        "format": "tf2-hlae-recording-queue",
+        "version": 3,
+        "batch_status": batch_status,
+        "batch_error": error,
+        "offline_only": true,
+        "output_format": settings.recording_format,
+        "fps": settings.capture_fps,
+        "jpg_quality": settings.jpg_quality,
+        "lead_in_seconds": settings.lead_seconds,
+        "outro_seconds": settings.outro_seconds,
+        "updated_utc": Utc::now().to_rfc3339(),
+        "clips": clip_records,
+    });
+    write_json_atomic(&session.join("recording_manifest.json"), &manifest)?;
+    write_json_atomic(&session.join("recording_queue.json"), &manifest)
+}
+
+fn update_recording_manifest(session: &Path, config_base: Option<&str>, status: &str, output: Option<&Path>, fingerprint: Option<&str>, error: Option<&str>) {
+    for name in ["recording_manifest.json", "recording_queue.json"] {
+        let path = session.join(name);
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(mut root) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        root["updated_utc"] = json!(Utc::now().to_rfc3339());
+        if let Some(config_base) = config_base {
+            if let Some(clips) = root.get_mut("clips").and_then(|value| value.as_array_mut()) {
+                if let Some(record) = clips.iter_mut().find(|record| record.get("native_capture_base").and_then(|value| value.as_str()).is_some_and(|value| value == config_base)
+                    || record.get("recording_identifier").and_then(|value| value.as_str()).is_some_and(|value| value == config_base)
+                    || record.get("candidate_id").and_then(|value| value.as_str()).is_some_and(|value| value == config_base)) {
+                    record["status"] = json!(status);
+                    if let Some(output) = output { record["actual_output_path"] = json!(output); }
+                    if let Some(fingerprint) = fingerprint { record["output_fingerprint"] = json!(fingerprint); }
+                    if let Some(error) = error { record["error"] = json!(error); }
+                }
+            }
+        } else {
+            root["batch_status"] = json!(status);
+            if let Some(error) = error { root["batch_error"] = json!(error); }
+        }
+        let _ = write_json_atomic(&path, &root);
     }
 }
 
-fn recording_stop_cfg(settings: &AppSettings) -> String {
+fn write_json_atomic(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        if path.exists() {
+            fs::remove_file(path)?;
+            fs::rename(temporary, path)?;
+        } else {
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+fn finalize_recording_session(
+    child: &mut std::process::Child,
+    tf_process_name: &str,
+    game: &Path,
+    session: &Path,
+    clips: &[PreparedClip],
+    settings: &AppSettings,
+    progress: Option<&RecordingProgressSink>,
+    diagnostic_log: &Path,
+) -> (usize, usize) {
+    update_recording_manifest(session, None, "Running", None, None, None);
+    let recording_log = game.join("tf2fragdemohelper_recording.log");
+    let start_deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < start_deadline && !windows_process_is_running(tf_process_name) {
+        if child.try_wait().ok().flatten().is_some() { break; }
+        thread::sleep(Duration::from_millis(250));
+    }
+    let mut completed = HashSet::new();
+    let mut failed = HashSet::new();
+    let mut processed_lines = 0usize;
+    while windows_process_is_running(tf_process_name) {
+        process_recording_markers(&recording_log, &mut processed_lines, clips, game, session, settings, progress, diagnostic_log, &mut completed, &mut failed);
+        thread::sleep(Duration::from_millis(250));
+    }
+    process_recording_markers(&recording_log, &mut processed_lines, clips, game, session, settings, progress, diagnostic_log, &mut completed, &mut failed);
+    for clip in clips {
+        if !completed.contains(&clip.config_base) && !failed.contains(&clip.config_base) {
+            finalize_one_clip(clip, game, session, settings, progress, diagnostic_log, &mut completed, &mut failed);
+        }
+    }
+    match child.wait() {
+        Ok(status) => log_recording_diagnostic(diagnostic_log, format!("HLAE process exited with status {status}")),
+        Err(error) => log_recording_diagnostic(diagnostic_log, format!("ERROR: could not wait for HLAE: {error}")),
+    }
+    let batch_status = if failed.is_empty() { "Completed" } else if completed.is_empty() { "Failed" } else { "CompletedWithErrors" };
+    update_recording_manifest(session, None, batch_status, None, None, None);
+    (completed.len(), failed.len())
+}
+
+fn process_recording_markers(
+    log_path: &Path,
+    processed_lines: &mut usize,
+    clips: &[PreparedClip],
+    game: &Path,
+    session: &Path,
+    settings: &AppSettings,
+    progress: Option<&RecordingProgressSink>,
+    diagnostic_log: &Path,
+    completed: &mut HashSet<String>,
+    failed: &mut HashSet<String>,
+) {
+    let Ok(text) = fs::read_to_string(log_path) else { return };
+    let lines = text.lines().collect::<Vec<_>>();
+    if *processed_lines > lines.len() { *processed_lines = 0; }
+    for line in &lines[*processed_lines..] {
+        let Some(marker) = line.split("TF2FRAG_RECORD_FINALIZED ").nth(1).and_then(|value| value.split_whitespace().next()) else { continue };
+        if let Some(clip) = clips.iter().find(|clip| clip.config_base == marker) {
+            finalize_one_clip(clip, game, session, settings, progress, diagnostic_log, completed, failed);
+        }
+    }
+    *processed_lines = lines.len();
+}
+
+fn finalize_one_clip(
+    clip: &PreparedClip,
+    game: &Path,
+    session: &Path,
+    settings: &AppSettings,
+    progress: Option<&RecordingProgressSink>,
+    diagnostic_log: &Path,
+    completed: &mut HashSet<String>,
+    failed: &mut HashSet<String>,
+) {
+    if completed.contains(&clip.config_base) || failed.contains(&clip.config_base) { return; }
+    update_recording_manifest(session, Some(&clip.recording_identifier), "Finalizing", None, None, None);
+    let result = if settings.recording_format.contains("Image") {
+        finalize_image_sequence(clip, game)
+    } else {
+        finalize_encoded_video(clip, settings)
+    };
+    match result {
+        Ok(output) => {
+            let fingerprint = output_fingerprint(&output).unwrap_or_default();
+            let mut index = RecordingIndex::load();
+            if let Err(error) = index.register_with_fingerprint(&clip.candidate, output.clone(), Some(fingerprint.clone())) {
+                failed.insert(clip.config_base.clone());
+                update_recording_manifest(session, Some(&clip.recording_identifier), "Failed", None, None, Some(&error.to_string()));
+                log_recording_diagnostic(diagnostic_log, format!("ERROR: {} was finalized but could not be indexed: {error}", clip.candidate.candidate_id));
+                return;
+            }
+            completed.insert(clip.config_base.clone());
+            update_recording_manifest(session, Some(&clip.recording_identifier), "Completed", Some(&output), Some(&fingerprint), None);
+            log_recording_diagnostic(diagnostic_log, format!("Completed {} -> {}", clip.candidate.candidate_id, output.display()));
+            log_recording_finalize(session, format!("COMPLETED {} -> {}", clip.candidate.candidate_id, output.display()));
+            if let Some(sink) = progress {
+                sink(RecordingProgress::ClipCompleted { candidate_id: clip.candidate.candidate_id.clone(), output_path: output });
+            }
+        }
+        Err(error) => {
+            failed.insert(clip.config_base.clone());
+            update_recording_manifest(session, Some(&clip.recording_identifier), "Failed", None, None, Some(&error.to_string()));
+            log_recording_diagnostic(diagnostic_log, format!("ERROR: failed to finalize {}: {error}", clip.candidate.candidate_id));
+            log_recording_finalize(session, format!("FAILED {}: {error}", clip.candidate.candidate_id));
+        }
+    }
+}
+
+fn finalize_image_sequence(clip: &PreparedClip, game: &Path) -> Result<PathBuf> {
+    let frames = clip.frames_path.as_ref().context("image sequence has no Frames directory")?;
+    let audio = clip.audio_path.as_ref().context("image sequence has no Audio directory")?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut sources = Vec::new();
+    while Instant::now() < deadline {
+        sources = fs::read_dir(game)?.filter_map(|entry| entry.ok().map(|entry| entry.path())).filter(|path| {
+            path.file_name().and_then(|value| value.to_str()).is_some_and(|value| value.starts_with(&clip.capture_base))
+        }).collect();
+        if !sources.is_empty() { break; }
+        thread::sleep(Duration::from_millis(250));
+    }
+    let mut frame_count = 0usize;
+    for source in sources {
+        let name = source.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+        let suffix = name.strip_prefix(&clip.capture_base).unwrap_or(name);
+        let extension = source.extension().and_then(|value| value.to_str()).unwrap_or_default();
+        let destination = if extension.eq_ignore_ascii_case("wav") {
+            audio.join(format!("{}.wav", clip.recording_identifier))
+        } else {
+            frame_count += 1;
+            frames.join(format!("frame{suffix}"))
+        };
+        move_file(&source, &destination)?;
+    }
+    if frame_count == 0 || !output_still_exists(frames) {
+        bail!("TF2 produced no non-empty TGA/JPG frames for {}", clip.candidate.candidate_id);
+    }
+    Ok(frames.parent().unwrap_or(frames).to_path_buf())
+}
+
+fn finalize_encoded_video(clip: &PreparedClip, settings: &AppSettings) -> Result<PathBuf> {
+    let working = clip.working_path.as_ref().context("encoded recording has no working directory")?;
+    let media_name = if settings.recording_format.contains("AVI") { "video.avi" } else { "video.mp4" };
+    let take = find_encoded_take_directory(working, media_name);
+    let video = take.join(media_name);
+    let audio = take.join("audio.wav");
+    wait_for_stable_file(&video, Duration::from_secs(20))?;
+    wait_for_stable_file(&audio, Duration::from_secs(20))?;
+    let muxing = take.join(if settings.recording_format.contains("AVI") { "video_muxing.avi" } else { "video_muxing.mp4" });
+    let mut command = Command::new(&settings.ffmpeg_executable);
+    command.args(["-y", "-v", "error", "-i"]).arg(&video).arg("-i").arg(&audio)
+        .args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]);
+    if settings.recording_format.contains("AVI") {
+        command.args(["-c:a", "pcm_s16le", "-shortest"]);
+    } else {
+        command.args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest"]);
+    }
+    command.arg(&muxing).stdout(Stdio::null()).stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        bail!("FFmpeg audio mux failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    wait_for_stable_file(&muxing, Duration::from_secs(20))?;
+    move_file(&muxing, &clip.final_output_path)?;
+    let _ = fs::remove_file(&video);
+    let _ = fs::remove_file(&audio);
+    remove_empty_tree(working);
+    if !output_still_exists(&clip.final_output_path) {
+        bail!("the finalized video is missing or empty");
+    }
+    Ok(clip.final_output_path.clone())
+}
+
+fn find_encoded_take_directory(working: &Path, media_name: &str) -> PathBuf {
+    if working.join(media_name).is_file() { return working.to_path_buf(); }
+    let mut takes = fs::read_dir(working).ok().into_iter().flatten().filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir() && path.file_name().and_then(|value| value.to_str()).is_some_and(|value| value.starts_with("take")))
+        .collect::<Vec<_>>();
+    takes.sort();
+    takes.into_iter().find(|path| path.join(media_name).is_file()).unwrap_or_else(|| working.to_path_buf())
+}
+
+fn wait_for_stable_file(path: &Path, timeout: Duration) -> Result<u64> {
+    let deadline = Instant::now() + timeout;
+    let mut previous = 0u64;
+    let mut stable = 0u8;
+    while Instant::now() < deadline {
+        let size = fs::metadata(path).map(|metadata| metadata.len()).unwrap_or_default();
+        if size > 0 && size == previous {
+            stable += 1;
+            if stable >= 3 { return Ok(size); }
+        } else {
+            stable = 0;
+        }
+        previous = size;
+        thread::sleep(Duration::from_millis(250));
+    }
+    bail!("output did not become stable: {}", path.display())
+}
+
+fn move_file(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+    match fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            fs::copy(source, destination)?;
+            fs::remove_file(source)?;
+            Ok(())
+        }
+    }
+}
+
+fn remove_empty_tree(root: &Path) {
+    if let Ok(entries) = fs::read_dir(root) {
+        for path in entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).filter(|path| path.is_dir()) {
+            remove_empty_tree(&path);
+        }
+    }
+    let _ = fs::remove_dir(root);
+}
+
+fn recording_start_cfg(clip: &PreparedClip, settings: &AppSettings) -> String {
+    let fps = settings.capture_fps;
+    if settings.recording_format.starts_with("TGA") {
+        format!("echo TF2FRAG_RECORD_START {}; host_framerate {fps}; startmovie {} raw; hideconsole\n", clip.config_base, clip.capture_base)
+    } else if settings.recording_format.starts_with("JPG") {
+        format!("echo TF2FRAG_RECORD_START {}; jpeg_quality {}; host_framerate {fps}; startmovie {} jpeg; hideconsole\n", clip.config_base, settings.jpg_quality, clip.capture_base)
+    } else {
+        let output = clip.working_path.as_ref().expect("encoded clip has a working path").display().to_string().replace('\\', "/");
+        let preset = if settings.recording_format.contains("Compatible") { "afxFfmpegYuv420p" } else if settings.recording_format.contains("Lossless") { "afxFfmpegLosslessBest" } else if settings.recording_format.contains("AVI") { "afxFfmpegRaw" } else { "afxFfmpeg" };
+        format!("echo TF2FRAG_RECORD_START {}; host_framerate {fps}; mirv_streams record fps {fps}; mirv_streams record screen enabled 1; mirv_streams record screen settings {preset}; mirv_streams record name \"{output}\"; mirv_streams record start; hideconsole\n", clip.config_base)
+    }
+}
+
+fn recording_stop_cfg(settings: &AppSettings, config_base: &str) -> String {
     let stop = if settings.recording_format.contains("Image") { "endmovie" } else { "mirv_streams record end" };
-    format!("echo TF2FRAG_RECORD_END; {stop}; host_framerate 0\n")
+    format!("echo TF2FRAG_RECORD_END {config_base}; {stop}; host_framerate 0\n")
 }
 
 fn offline_cfg() -> &'static str {
-    "// Generated by TF2 Frag Demo Helper. Offline demo playback only.\nsv_lan 1\nsv_master_legacy_mode 1\nnet_start 0\ncl_allowdownload 0\ncl_downloadfilter none\nalias connect \"echo BLOCKED: recording mode cannot connect to servers\"\nalias retry \"echo BLOCKED: recording mode cannot reconnect\"\nalias openserverbrowser \"echo BLOCKED: recording mode is offline only\"\nengine_no_focus_sleep 0\nsnd_mute_losefocus 0\n"
+    "// Generated by TF2 Frag Demo Helper. Offline demo playback only.\nsv_lan 1\nsv_master_legacy_mode 1\nnet_start 0\ncl_allowdownload 0\ncl_downloadfilter none\nalias connect \"echo BLOCKED: recording mode cannot connect to servers\"\nalias retry \"echo BLOCKED: recording mode cannot reconnect\"\nalias openserverbrowser \"echo BLOCKED: recording mode is offline only\"\ncon_logfile tf2fragdemohelper_recording.log\ncon_timestamp 1\nengine_no_focus_sleep 0\nsnd_mute_losefocus 0\n"
 }
 
 fn parse_resolution(value: &str) -> (u32, u32) {
@@ -1132,6 +1516,20 @@ fn recording_profile_cfg(settings: &AppSettings) -> String {
 fn bool_num(value: bool) -> u8 { if value { 1 } else { 0 } }
 
 fn recording_key(candidate: &Candidate) -> Result<String> {
+    let demo = portable_demo_signature(Path::new(&candidate.source_demo))?;
+    let mut identity = vec!["v1".to_owned(), demo, candidate.attacker_user_id.to_string()];
+    if candidate.point_of_kill_ticks.is_empty() {
+        identity.push(candidate.clip_start_tick.to_string());
+        identity.push(candidate.clip_end_tick.to_string());
+    } else {
+        identity.extend(candidate.point_of_kill_ticks.iter().map(ToString::to_string));
+    }
+    let mut hash = Sha256::new();
+    hash.update(identity.join("|").as_bytes());
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn legacy_recording_key(candidate: &Candidate) -> Result<String> {
     let demo = demo_signature(Path::new(&candidate.source_demo))?;
     let mut hash = Sha256::new();
     hash.update(demo.as_bytes());
@@ -1139,6 +1537,42 @@ fn recording_key(candidate: &Candidate) -> Result<String> {
     hash.update(candidate.clip_end_tick.to_le_bytes());
     hash.update(candidate.attacker_user_id.to_le_bytes());
     Ok(hex::encode(hash.finalize()))
+}
+
+fn recording_keys(candidate: &Candidate) -> [Option<String>; 2] {
+    [recording_key(candidate).ok(), legacy_recording_key(candidate).ok()]
+}
+
+fn recording_key_token(key: &str) -> &str {
+    key.get(..24).unwrap_or(key)
+}
+
+fn portable_demo_signature(path: &Path) -> Result<String> {
+    let metadata = fs::metadata(path).with_context(|| format!("demo missing: {}", path.display()))?;
+    let cache_key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let modified = metadata.modified().ok();
+    let cache = PORTABLE_DEMO_SIGNATURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(entry) = cache.lock().get(&cache_key) {
+        if entry.length == metadata.len() && entry.modified == modified {
+            return Ok(entry.signature.clone());
+        }
+    }
+    let mut file = File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let head_read = file.read(&mut buffer)?;
+    hash.update(&buffer[..head_read]);
+    if metadata.len() > buffer.len() as u64 {
+        file.seek(SeekFrom::End(-(buffer.len() as i64)))?;
+        let tail_read = file.read(&mut buffer)?;
+        hash.update(&buffer[..tail_read]);
+    }
+    hash.update(metadata.len().to_string().as_bytes());
+    let signature = format!("{}:{}", metadata.len(), hex::encode(hash.finalize()));
+    cache.lock().insert(cache_key, DemoSignatureCacheEntry {
+        length: metadata.len(), modified, signature: signature.clone(),
+    });
+    Ok(signature)
 }
 
 fn demo_signature(path: &Path) -> Result<String> {
@@ -1176,6 +1610,70 @@ fn file_fingerprint(path: &Path) -> Result<String> {
         hash.update(&buffer[..read]);
     }
     Ok(hex::encode(hash.finalize()))
+}
+
+fn output_still_exists(path: &Path) -> bool {
+    if path.is_file() {
+        return fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0);
+    }
+    path.is_dir() && WalkDir::new(path).max_depth(3).into_iter().filter_map(|entry| entry.ok()).any(|entry| {
+        entry.file_type().is_file()
+            && entry.path().extension().and_then(|value| value.to_str()).is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "tga" | "jpg" | "jpeg")
+            })
+            && fs::metadata(entry.path()).is_ok_and(|metadata| metadata.len() > 0)
+    })
+}
+
+fn output_fingerprint(path: &Path) -> Result<String> {
+    if path.is_file() {
+        return file_fingerprint(path);
+    }
+    if !path.is_dir() {
+        bail!("recording output is missing: {}", path.display());
+    }
+    let mut files = WalkDir::new(path).max_depth(3).into_iter().filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file()).map(|entry| entry.path().to_path_buf()).collect::<Vec<_>>();
+    files.sort();
+    let mut hash = Sha256::new();
+    for file in files {
+        let relative = file.strip_prefix(path).unwrap_or(&file).to_string_lossy().replace('\\', "/");
+        let metadata = fs::metadata(&file)?;
+        hash.update(relative.as_bytes());
+        hash.update(metadata.len().to_le_bytes());
+        let mut input = File::open(&file)?;
+        let mut sample = [0_u8; 4096];
+        let read = input.read(&mut sample)?;
+        hash.update(&sample[..read]);
+        if metadata.len() > sample.len() as u64 {
+            input.seek(SeekFrom::End(-(sample.len() as i64)))?;
+            let read = input.read(&mut sample)?;
+            hash.update(&sample[..read]);
+        }
+    }
+    Ok(hex::encode(hash.finalize()))
+}
+
+fn recording_output_name(path: &Path) -> String {
+    let named_path = if path.file_name().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("Frames")) {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+    named_path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase()
+}
+
+fn final_recording_outputs(root: &Path) -> Vec<PathBuf> {
+    let mut outputs = Vec::new();
+    let videos = root.join("Videos");
+    if let Ok(entries) = fs::read_dir(videos) {
+        outputs.extend(entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).filter(|path| output_still_exists(path)));
+    }
+    let sequences = root.join("Image Sequences");
+    if let Ok(entries) = fs::read_dir(sequences) {
+        outputs.extend(entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).filter(|path| output_still_exists(path)));
+    }
+    outputs
 }
 
 fn index_path() -> PathBuf {

@@ -24,6 +24,8 @@ Keep those three items together. On Windows the binaries have `.exe` extensions.
 - Recording launches TF2 with `-insecure` and `+sv_lan 1` for offline demo playback.
 - The recorder temporarily installs selected bundled resources and restores the original `tf/custom` content and recording CFG after TF2 exits.
 - If recording is interrupted, the next launch uses the saved recovery marker to restore the original TF2 files.
+- Final videos are written to `Videos/`. Native TGA/JPG captures are written to `Image Sequences/<clip>/Frames/` with WAV audio under `Audio/`; manifests, queues, working captures, and finalizer logs remain under `Recording Metadata/tf2fragdemohelper_batch_<timestamp>/`.
+- Completed recordings use a demo-content SHA-256 candidate key, a full output fingerprint, and candidate/tick filename fallback. The recorded state therefore survives ordinary video renames and moves after the output has been indexed.
 
 ## Source layout
 

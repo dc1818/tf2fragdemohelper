@@ -208,7 +208,7 @@ export component AppWindow inherits Window {
                 height: 290px;
                 for row[index] in root.candidate-rows : Rectangle {
                     height: 30px;
-                    background: row.selected ? #2c8252 : (index % 2 == 0 ? #17191c : #202328);
+                    background: row.selected ? #2c8252 : (Math.mod(index, 2) == 0 ? #17191c : #202328);
                     HorizontalLayout {
                         padding-left: 5px; padding-right: 5px; spacing: 8px;
                         Text { text: "" + row.rank; width: 34px; color: #e5e9ed; }

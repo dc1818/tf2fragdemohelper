@@ -7,11 +7,30 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::Command,
+    thread,
+    time::Duration,
 };
 use walkdir::WalkDir;
+use zip::ZipArchive;
+
+const PROFILE_FOLDER: &str = "tf2fragdemohelper_recording";
+const PROFILE_CFG: &str = "tf2fragdemohelper_recording_profile.cfg";
+const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct RecordingProfileSession {
+    session_id: String,
+    game_directory: PathBuf,
+    backup_directory: PathBuf,
+    original_custom_existed: bool,
+    original_profile_existed: bool,
+    original_profile_cfg_existed: bool,
+    isolated_custom: bool,
+    tf_process_name: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RecordingEntry {
@@ -171,6 +190,7 @@ pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> R
 }
 
 pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Result<PathBuf> {
+    recover_interrupted_profile()?;
     let session = prepare_hlae_batch(candidates, settings)?;
     let tf_root = settings.tf2_executable.parent().context("could not find the TF2 directory")?;
     let game = tf_root.join("tf");
@@ -184,6 +204,11 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         bail!("required HLAE hook is missing: {}", hook.display());
     }
 
+    let tf_process_name = settings.tf2_executable.file_name().and_then(|name| name.to_str()).unwrap_or("tf_win64.exe");
+    if windows_process_is_running(tf_process_name) {
+        bail!("close TF2 before starting an isolated recording session");
+    }
+
     let session_name = session.file_name().and_then(|name| name.to_str()).unwrap_or("rust_session");
     let staged_root = game.join("demos/tf2fragdemohelper_batch").join(session_name);
     let cfg_root = game.join("cfg/tf2fragdemohelper_batch").join(session_name);
@@ -193,7 +218,6 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
     fs::create_dir_all(settings.recording_output_directory.join("Image Sequences"))?;
     fs::create_dir_all(game.join("cfg"))?;
     fs::write(game.join("cfg/tf2fragdemohelper_offline.cfg"), offline_cfg())?;
-    fs::write(game.join("cfg/tf2fragdemohelper_recording_profile.cfg"), recording_profile_cfg(settings))?;
 
     let mut by_demo: BTreeMap<PathBuf, Vec<(usize, Candidate)>> = BTreeMap::new();
     for (order, candidate) in candidates.iter().cloned().enumerate() {
@@ -236,7 +260,8 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf -w {width} -h {height} -dxlevel {dx} +tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +playdemo {}",
         staged_relatives[0]
     );
-    Command::new(&settings.hlae_executable)
+    let profile = stage_recording_profile(game.as_path(), session_name, tf_process_name, settings)?;
+    let launch_result = Command::new(&settings.hlae_executable)
         .current_dir(hlae_root)
         .args(["-customLoader", "-autoStart", "-noGui", "-programPath"])
         .arg(&settings.tf2_executable)
@@ -244,8 +269,299 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         .arg(game_arguments)
         .arg("-hookDllPath")
         .arg(hook)
-        .spawn()?;
+        .spawn();
+    let mut child = match launch_result {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = restore_recording_profile(&profile);
+            return Err(error.into());
+        }
+    };
+    thread::spawn(move || {
+        let _ = child.wait();
+        wait_for_tf2_exit(&profile.tf_process_name);
+        if let Err(error) = restore_recording_profile(&profile) {
+            let _ = fs::write(profile.backup_directory.join("RESTORE_REQUIRED.txt"), error.to_string());
+        }
+    });
     Ok(session)
+}
+
+pub fn recover_interrupted_profile() -> Result<bool> {
+    let pointer = active_profile_path();
+    if !pointer.is_file() {
+        return Ok(false);
+    }
+    let profile: RecordingProfileSession = serde_json::from_slice(&fs::read(&pointer)?)
+        .context("the interrupted recording recovery file is invalid")?;
+    if windows_process_is_running(&profile.tf_process_name) {
+        bail!("a TF2 recording session is still active; close TF2 before reopening the helper");
+    }
+    restore_recording_profile(&profile)?;
+    Ok(true)
+}
+
+fn stage_recording_profile(game: &Path, session_id: &str, tf_process_name: &str, settings: &AppSettings) -> Result<RecordingProfileSession> {
+    let custom = game.join("custom");
+    let cfg = game.join("cfg").join(PROFILE_CFG);
+    let backup = game.join("tf2fragdemohelper_backups").join(session_id);
+    let custom_backup = backup.join("custom_original");
+    let profile = custom.join(PROFILE_FOLDER);
+    let profile_backup = backup.join("custom_profile_original");
+    let cfg_backup = backup.join(PROFILE_CFG);
+    fs::create_dir_all(&backup)?;
+    let session = RecordingProfileSession {
+        session_id: session_id.to_owned(),
+        game_directory: game.to_path_buf(),
+        backup_directory: backup,
+        original_custom_existed: custom.is_dir(),
+        original_profile_existed: profile.is_dir(),
+        original_profile_cfg_existed: cfg.is_file(),
+        isolated_custom: settings.isolate_custom_resources,
+        tf_process_name: tf_process_name.to_owned(),
+    };
+    write_active_profile(&session)?;
+
+    let result = (|| -> Result<()> {
+        if session.original_profile_cfg_existed {
+            fs::rename(&cfg, &cfg_backup)?;
+        }
+        if session.isolated_custom {
+            if session.original_custom_existed {
+                fs::rename(&custom, &custom_backup).context("could not back up TF2's custom folder")?;
+            }
+            fs::create_dir_all(&custom)?;
+            for selected in &settings.custom_resources {
+                let source = if selected.exists() { selected.clone() } else { custom_backup.join(selected.file_name().unwrap_or_default()) };
+                let destination = custom.join(source.file_name().unwrap_or_default());
+                copy_path(&source, &destination)?;
+            }
+        } else {
+            fs::create_dir_all(&custom)?;
+            if session.original_profile_existed {
+                fs::rename(&profile, &profile_backup)?;
+            }
+        }
+        install_recording_resources(&custom, settings)?;
+        fs::create_dir_all(game.join("cfg"))?;
+        fs::write(&cfg, recording_profile_cfg(settings))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = restore_recording_profile(&session);
+        return Err(error);
+    }
+    Ok(session)
+}
+
+fn restore_recording_profile(session: &RecordingProfileSession) -> Result<()> {
+    let custom = session.game_directory.join("custom");
+    let cfg = session.game_directory.join("cfg").join(PROFILE_CFG);
+    let custom_backup = session.backup_directory.join("custom_original");
+    let profile = custom.join(PROFILE_FOLDER);
+    let profile_backup = session.backup_directory.join("custom_profile_original");
+    let cfg_backup = session.backup_directory.join(PROFILE_CFG);
+
+    if session.isolated_custom {
+        if custom.exists() {
+            fs::remove_dir_all(&custom)?;
+        }
+        if session.original_custom_existed {
+            fs::rename(&custom_backup, &custom).context("could not restore TF2's custom folder")?;
+        }
+    } else {
+        if profile.exists() {
+            fs::remove_dir_all(&profile)?;
+        }
+        if session.original_profile_existed {
+            fs::rename(&profile_backup, &profile)?;
+        }
+    }
+    if cfg.exists() {
+        fs::remove_file(&cfg)?;
+    }
+    if session.original_profile_cfg_existed {
+        fs::rename(&cfg_backup, &cfg)?;
+    }
+    let pointer = active_profile_path();
+    if pointer.exists() {
+        fs::remove_file(pointer)?;
+    }
+    Ok(())
+}
+
+fn write_active_profile(session: &RecordingProfileSession) -> Result<()> {
+    let pointer = active_profile_path();
+    if let Some(parent) = pointer.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = pointer.with_extension("json.tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(session)?)?;
+    if pointer.exists() {
+        fs::remove_file(&pointer)?;
+    }
+    fs::rename(temporary, pointer)?;
+    Ok(())
+}
+
+fn active_profile_path() -> PathBuf {
+    dirs::data_local_dir().unwrap_or_else(|| PathBuf::from(".")).join("TF2FragDemoHelper").join("active_recording_profile.json")
+}
+
+fn install_recording_resources(custom: &Path, settings: &AppSettings) -> Result<()> {
+    let needs_assets = settings.disable_announcer_voices
+        || settings.disable_applause_sounds
+        || settings.disable_domination_sounds
+        || !settings.skybox.eq_ignore_ascii_case("Default")
+        || (!settings.hud.eq_ignore_ascii_case("Keep current") && !settings.hud.eq_ignore_ascii_case("Default TF2 HUD"));
+    if !needs_assets {
+        return Ok(());
+    }
+    let resources = find_recording_resources()?;
+    let profile = custom.join(PROFILE_FOLDER);
+    fs::create_dir_all(&profile)?;
+    for (enabled, name) in [
+        (settings.disable_announcer_voices, "no_announcer_voices.vpk"),
+        (settings.disable_applause_sounds, "no_applause_sounds.vpk"),
+        (settings.disable_domination_sounds, "no_domination_sounds.vpk"),
+    ] {
+        let source = resources.join("custom").join(name);
+        if enabled && source.is_file() {
+            fs::copy(source, profile.join(name))?;
+        }
+    }
+    if settings.hud.eq_ignore_ascii_case("Kill notices only") {
+        copy_directory(&resources.join("hud/hud_killnotices"), &profile)?;
+    } else if settings.hud.eq_ignore_ascii_case("Medic recording HUD") {
+        copy_directory(&resources.join("hud/hud_medic"), &profile)?;
+    }
+    if !settings.skybox.eq_ignore_ascii_case("Default") {
+        install_skybox(&resources.join("skybox"), &profile.join("materials/skybox"), &settings.skybox)?;
+    }
+    Ok(())
+}
+
+fn find_recording_resources() -> Result<PathBuf> {
+    let executable = std::env::current_exe()?;
+    let executable_directory = executable.parent().context("application directory is unavailable")?;
+    for candidate in [
+        executable_directory.join("recording_resources"),
+        executable_directory.join("../recording_resources"),
+        PathBuf::from("recording_resources"),
+    ] {
+        if candidate.join("custom").is_dir() {
+            return Ok(candidate);
+        }
+    }
+    let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from(".")).join("TF2FragDemoHelper").join(RESOURCE_CACHE_VERSION);
+    if cache.join("complete.marker").is_file() && cache.join("custom").is_dir() {
+        return Ok(cache);
+    }
+    let archive_directory = [
+        executable_directory.join("recording_resources_archive"),
+        executable_directory.join("../recording_resources_archive"),
+        executable_directory.join("../../recording_resources_archive"),
+        PathBuf::from("recording_resources_archive"),
+    ].into_iter().find(|path| path.join("resources.part000").is_file())
+        .context("bundled recording resources are missing; keep recording_resources_archive beside the application")?;
+    extract_resource_archive(&archive_directory, &cache)?;
+    Ok(cache)
+}
+
+fn extract_resource_archive(parts_directory: &Path, cache: &Path) -> Result<()> {
+    let parent = cache.parent().context("resource cache has no parent")?;
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!("{RESOURCE_CACHE_VERSION}_staging"));
+    let joined = parent.join(format!("{RESOURCE_CACHE_VERSION}.zip"));
+    if staging.exists() { fs::remove_dir_all(&staging)?; }
+    if joined.exists() { fs::remove_file(&joined)?; }
+    fs::create_dir_all(&staging)?;
+
+    let mut parts = fs::read_dir(parts_directory)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("resources.part")))
+        .collect::<Vec<_>>();
+    parts.sort();
+    if parts.is_empty() { bail!("recording resource archive has no parts"); }
+    let mut output = File::create(&joined)?;
+    for part in parts {
+        io::copy(&mut File::open(part)?, &mut output)?;
+    }
+    drop(output);
+
+    let mut archive = ZipArchive::new(File::open(&joined)?)?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let relative = entry.enclosed_name().context("recording resource archive contains an unsafe path")?;
+        let destination = staging.join(relative);
+        if entry.is_dir() {
+            fs::create_dir_all(destination)?;
+        } else {
+            if let Some(parent) = destination.parent() { fs::create_dir_all(parent)?; }
+            io::copy(&mut entry, &mut File::create(destination)?)?;
+        }
+    }
+    fs::write(staging.join("complete.marker"), b"TF2 Frag Demo Helper recording resources v2\n")?;
+    if cache.exists() { fs::remove_dir_all(cache)?; }
+    fs::rename(&staging, cache)?;
+    fs::remove_file(joined)?;
+    Ok(())
+}
+
+fn install_skybox(source: &Path, destination: &Path, selected: &str) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("vmt")) {
+            fs::copy(&path, destination.join(path.file_name().unwrap_or_default()))?;
+        }
+    }
+    for side in ["bk", "dn", "ft", "lf", "rt", "up"] {
+        let texture = source.join(format!("{selected}{side}.vtf"));
+        if !texture.is_file() { bail!("selected recording skybox is incomplete: {}", texture.display()); }
+        for entry in fs::read_dir(destination)? {
+            let path = entry?.path();
+            if path.file_stem().and_then(|value| value.to_str()).is_some_and(|value| value.ends_with(side))
+                && path.extension().and_then(|value| value.to_str()) == Some("vmt") {
+                fs::copy(&texture, path.with_extension("vtf"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_path(source: &Path, destination: &Path) -> Result<()> {
+    if source.is_dir() { copy_directory(source, destination) }
+    else if source.is_file() { fs::copy(source, destination).map(|_| ()).map_err(Into::into) }
+    else { bail!("selected custom resource is missing: {}", source.display()) }
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    if !source.is_dir() { bail!("required recording resource is missing: {}", source.display()); }
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let path = entry?.path();
+        let target = destination.join(path.file_name().unwrap_or_default());
+        if path.is_dir() { copy_directory(&path, &target)?; }
+        else { fs::copy(path, target)?; }
+    }
+    Ok(())
+}
+
+fn windows_process_is_running(image_name: &str) -> bool {
+    if !cfg!(target_os = "windows") { return false; }
+    Command::new("tasklist").args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"])
+        .output().ok().is_some_and(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains(&image_name.to_ascii_lowercase()))
+}
+
+fn wait_for_tf2_exit(image_name: &str) {
+    for _ in 0..30 {
+        if windows_process_is_running(image_name) { break; }
+        thread::sleep(Duration::from_secs(1));
+    }
+    while windows_process_is_running(image_name) {
+        thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn clip_window(candidate: &Candidate, settings: &AppSettings) -> (i64, i64) {

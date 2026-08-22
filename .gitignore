@@ -1,13 +1,7 @@
 # Rust build output
-parser/target/
-
-# Python bytecode
-__pycache__/
-*.py[cod]
+target/
+dist/
 
 # Local demo exports and recordings
 *_export_*/
 *.dem
-
-# Windows build output
-TF2_STV_Parser_GUI.exe

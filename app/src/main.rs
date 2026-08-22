@@ -9,7 +9,7 @@ use crate::{
     batch::{BatchController, ProgressEvent},
     filter::CandidateFilter,
     models::{AppSettings, Candidate},
-    recording::{launch_hlae_batch, preview_candidate, RecordingIndex},
+    recording::{launch_hlae_batch, preview_candidate, recover_interrupted_profile, RecordingIndex},
 };
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -45,6 +45,7 @@ fn main() -> Result<()> {
         }
     }
 
+    let recovered_recording_profile = recover_interrupted_profile()?;
     let ui = AppWindow::new()?;
     let settings = AppSettings::load();
     ui.set_export_directory(settings.output_directory.display().to_string().into());
@@ -77,6 +78,9 @@ fn main() -> Result<()> {
     ui.set_disable_announcer(settings.disable_announcer_voices);
     ui.set_disable_applause(settings.disable_applause_sounds);
     ui.set_disable_domination(settings.disable_domination_sounds);
+    if recovered_recording_profile {
+        ui.set_status_text("Recovered TF2 files from an interrupted recording session".into());
+    }
 
     let state = Arc::new(Mutex::new(State {
         demos: Vec::new(), export_root: None, candidates: Vec::new(), visible: Vec::new(), selected: Vec::new(),

@@ -1189,6 +1189,48 @@ class RoundStateTests(unittest.TestCase):
         self.assertEqual(mode["mode"], "highlander")
         self.assertEqual(mode["mode_label"], "Highlander Competitive")
 
+    def test_sixes_temporary_offclass_still_classifies_as_competitive(self):
+        timeline = ANALYZER.StateTimeline()
+        user_id = 1
+        for team in ("red", "blu"):
+            # One Scout has temporarily switched to Sniper.  This should not
+            # turn an otherwise stable sixes roster into Community Public.
+            for player_class in ("scout", "sniper", "soldier", "soldier", "demoman", "medic"):
+                timeline.players[user_id].append((0, {"team": team, "class": player_class, "life_state": "alive", "health": 125}))
+                user_id += 1
+        rounds = [{"round_index": 1, "live_start_tick": 0, "end_tick": 12000}]
+        with tempfile.TemporaryDirectory() as temp:
+            mode = ANALYZER.competitive_mode_context(Path(temp), [], timeline, rounds)
+        self.assertEqual(mode["mode"], "6v6")
+
+    def test_disconnected_players_do_not_inflate_competitive_roster(self):
+        timeline = ANALYZER.StateTimeline()
+        user_id = 1
+        for team in ("red", "blu"):
+            for player_class in ("scout", "scout", "soldier", "soldier", "demoman", "medic", "spy"):
+                timeline.players[user_id].append((0, {"team": team, "class": player_class, "life_state": "alive", "health": 125}))
+                user_id += 1
+        events = [
+            {"tick": 1, "event_type": "player_disconnect", "event": {"user_id": 7}},
+            {"tick": 1, "event_type": "player_disconnect", "event": {"user_id": 14}},
+        ]
+        rounds = [{"round_index": 1, "live_start_tick": 0, "end_tick": 12000}]
+        with tempfile.TemporaryDirectory() as temp:
+            mode = ANALYZER.competitive_mode_context(Path(temp), events, timeline, rounds)
+        self.assertEqual(mode["mode"], "6v6")
+
+    def test_stable_small_rosters_are_competitive_when_format_is_unclear(self):
+        timeline = ANALYZER.StateTimeline()
+        user_id = 1
+        for team in ("red", "blu"):
+            for player_class in ("scout", "soldier", "pyro", "demoman", "heavy", "engineer", "medic"):
+                timeline.players[user_id].append((0, {"team": team, "class": player_class, "life_state": "alive", "health": 125}))
+                user_id += 1
+        rounds = [{"round_index": 1, "live_start_tick": 0, "end_tick": 12000}]
+        with tempfile.TemporaryDirectory() as temp:
+            mode = ANALYZER.competitive_mode_context(Path(temp), [], timeline, rounds)
+        self.assertEqual(mode["mode"], "competitive_uncertain")
+
 
 if __name__ == "__main__":
     unittest.main()

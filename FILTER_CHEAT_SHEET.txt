@@ -74,6 +74,9 @@ Only POV demos:
 Any Highlander demo (including RGL Highlander):
   +mode:highlander
 
+Competitive demos where the roster format could not be proved:
+  +mode:competitive_uncertain
+
 Hide public-server demos:
   -mode:public
 
@@ -124,6 +127,8 @@ For attacker user IDs, player matching is exact so +player:3 does not accidental
 
 MODE NOTE
 ---------
-Mode is a confidence-based demo classification. RGL labels require both a positive RGL
-signal recorded in the demo and a matching 6v6 or Highlander roster; a matching roster
-without an RGL signal is labeled simply 6v6 Competitive or Highlander Competitive.
+Mode is a confidence-based demo classification. It uses roster patterns across the
+entire live round and allows temporary off-classes. Disconnected players are excluded
+from later samples. RGL labels require both a positive RGL signal recorded in the demo
+and a matching 6v6 or Highlander roster; a matching roster without an RGL signal is
+labeled simply 6v6 Competitive or Highlander Competitive.

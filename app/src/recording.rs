@@ -44,25 +44,30 @@ impl RecordingIndex {
         Self { path, entries }
     }
 
-    pub fn is_recorded(&mut self, candidate: &Candidate) -> bool {
+    pub fn is_recorded(&mut self, candidate: &Candidate, recording_root: Option<&Path>) -> bool {
         let Ok(key) = recording_key(candidate) else { return false };
-        let Some(mut entry) = self.entries.get(&key).cloned() else { return false };
-        if entry.output_path.exists() {
-            if entry.output_fingerprint.is_empty() {
-                entry.output_fingerprint = file_fingerprint(&entry.output_path).unwrap_or_default();
-                self.entries.insert(key, entry.clone());
-                let _ = self.append(entry);
+        if let Some(mut entry) = self.entries.get(&key).cloned() {
+            if entry.output_path.exists() {
+                if entry.output_fingerprint.is_empty() {
+                    entry.output_fingerprint = file_fingerprint(&entry.output_path).unwrap_or_default();
+                    self.entries.insert(key, entry.clone());
+                    let _ = self.append(entry);
+                }
+                return true;
             }
-            return true;
+            if !entry.output_fingerprint.is_empty() {
+                if let Some(found) = find_fingerprint_near(&entry.output_path, &entry.output_fingerprint) {
+                    entry.output_path = found;
+                    self.entries.insert(key, entry.clone());
+                    let _ = self.append(entry);
+                    return true;
+                }
+            }
         }
-        if entry.output_fingerprint.is_empty() {
-            return false;
-        }
-        if let Some(found) = find_fingerprint_near(&entry.output_path, &entry.output_fingerprint) {
-            entry.output_path = found;
-            self.entries.insert(key, entry.clone());
-            let _ = self.append(entry);
-            return true;
+        if let Some(root) = recording_root.and_then(|root| (!root.as_os_str().is_empty()).then_some(root)) {
+            if let Some(output) = find_unindexed_output(root, candidate) {
+                return self.register(candidate, output).is_ok();
+            }
         }
         false
     }
@@ -387,6 +392,24 @@ fn find_fingerprint_near(original: &Path, fingerprint: &str) -> Option<PathBuf> 
         .filter(|entry| entry.file_type().is_file())
         .map(|entry| entry.into_path())
         .find(|path| file_fingerprint(path).ok().as_deref() == Some(fingerprint))
+}
+
+fn find_unindexed_output(root: &Path, candidate: &Candidate) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let id = sanitize(&candidate.candidate_id).to_lowercase();
+    let ticks = format!("t{}-{}", candidate.clip_start_tick, candidate.clip_end_tick);
+    WalkDir::new(root)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        .map(|entry| entry.into_path())
+        .find(|path| {
+            let name = path.file_stem().and_then(|value| value.to_str()).unwrap_or_default().to_lowercase();
+            name.contains(&id) && name.contains(&ticks)
+        })
 }
 
 fn index_path() -> PathBuf {

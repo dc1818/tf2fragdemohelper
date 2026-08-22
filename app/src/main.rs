@@ -352,7 +352,8 @@ fn refresh_candidates(ui: &AppWindow, state: &Arc<Mutex<State>>, filter: &str, m
     for index in 0..state.candidates.len() {
         let recorded = {
             let candidate = state.candidates[index].clone();
-            state.recording_index.is_recorded(&candidate)
+            let root = state.settings.recording_output_directory.clone();
+            state.recording_index.is_recorded(&candidate, Some(&root))
         };
         let candidate = &state.candidates[index];
         if candidate.overall_score < minimum_score as f64 || !expression.matches(candidate, recorded) { continue }

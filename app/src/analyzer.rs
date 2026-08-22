@@ -318,6 +318,7 @@ fn scan_state_stream(path: &Path, deaths: &[Death], rounds: &[Round]) -> Result<
     }
     let source = BufReader::new(File::open(path)?);
     let mut current: HashMap<i64, Map<String, Value>> = HashMap::new();
+    let mut entity_users: HashMap<i64, i64> = HashMap::new();
     let mut result = StateScan::default();
     let mut pending_targets = targets.into_iter().peekable();
     let mut pending_rosters = roster_ticks.into_iter().peekable();
@@ -334,11 +335,21 @@ fn scan_state_stream(path: &Path, deaths: &[Death], rounds: &[Round]) -> Result<
                 if user <= 0 {
                     continue;
                 }
+                if let Some(entity) = player.get("entity_id").and_then(Value::as_i64) {
+                    entity_users.insert(entity, user);
+                }
                 let state = current.entry(user).or_default();
                 if let Some(update) = player.as_object() {
                     for (key, value) in update {
                         state.insert(key.clone(), value.clone());
                     }
+                }
+            }
+        }
+        if let Some(removed) = record.get("removed_players").and_then(Value::as_array) {
+            for entity in removed.iter().filter_map(Value::as_i64) {
+                if let Some(user) = entity_users.remove(&entity) {
+                    current.remove(&user);
                 }
             }
         }

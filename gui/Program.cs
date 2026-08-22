@@ -1493,7 +1493,7 @@ namespace Tf2StvParserGui
             filterControls.FlowDirection = FlowDirection.LeftToRight;
             filterControls.WrapContents = false;
             Label filterLabel = new Label();
-            filterLabel.Text = "Filter (field-specific: +class:demoman -map:cp_steel +recorded:true; combine multiple filters)";
+            filterLabel.Text = "Filter (field-specific: +class:demoman -map:cp_steel +mode:rgl_6v6 +type:stv +recorded:true; combine multiple filters)";
             filterLabel.AutoSize = true;
             filterLabel.Margin = new Padding(3, 9, 4, 2);
             filterControls.Controls.Add(filterLabel);
@@ -1654,6 +1654,8 @@ namespace Tf2StvParserGui
             AddColumn("Team", 72);
             AddColumn("Demo", 170);
             AddColumn("Map", 170);
+            AddColumn("Mode", 165);
+            AddColumn("Demo Type", 90);
             AddColumn("Recorded", 76);
             AddColumn("Exact kill-event ticks", 175);
             AddColumn("Tags", 400);
@@ -1791,6 +1793,8 @@ namespace Tf2StvParserGui
                     DisplayValue(candidate, "attacker_team"),
                     BatchCandidateSupport.CandidateDemoName(candidate, demoPath),
                     mapName,
+                    CandidateModeLabel(candidate),
+                    CandidateDemoTypeLabel(candidate),
                     HlaeBatchRecorder.IsCandidateAlreadyRecorded(candidate, demoPath) ? "Recorded" : "",
                     JoinValues(killTicks),
                     JoinCandidateTags(Value(candidate, "tags")));
@@ -1843,6 +1847,30 @@ namespace Tf2StvParserGui
                 ClipTick(candidate, "clip_end_tick", "end_tick");
         }
 
+        private static string CandidateMode(IDictionary candidate)
+        {
+            return TextValue(Map(candidate, "demo_context"), "mode");
+        }
+
+        private static string CandidateModeLabel(IDictionary candidate)
+        {
+            string label = TextValue(Map(candidate, "demo_context"), "mode_label");
+            return String.IsNullOrEmpty(label) ? "Unknown / Mixed" : label;
+        }
+
+        private static string CandidateDemoType(IDictionary candidate)
+        {
+            return TextValue(Map(candidate, "demo_context"), "capture_type");
+        }
+
+        private static string CandidateDemoTypeLabel(IDictionary candidate)
+        {
+            string captureType = CandidateDemoType(candidate);
+            if (String.Equals(captureType, "stv", StringComparison.OrdinalIgnoreCase)) return "STV";
+            if (String.Equals(captureType, "pov", StringComparison.OrdinalIgnoreCase)) return "POV";
+            return "Unknown";
+        }
+
         private static bool CandidateMatchesFilter(CandidateRecord record, IDictionary candidate, string mapName, string fallbackDemoPath, string filter)
         {
             if (String.IsNullOrWhiteSpace(filter)) return true;
@@ -1855,6 +1883,10 @@ namespace Tf2StvParserGui
                 mapName ?? "",
                 demoName ?? "",
                 demoPathValue ?? "",
+                CandidateMode(candidate) ?? "",
+                CandidateModeLabel(candidate) ?? "",
+                CandidateDemoType(candidate) ?? "",
+                CandidateDemoTypeLabel(candidate) ?? "",
                 TextValue(candidate, "attacker_class"),
                 TextValue(candidate, "attacker_team"),
                 TextValue(candidate, "attacker_user_id"),
@@ -1882,6 +1914,14 @@ namespace Tf2StvParserGui
 
             if (String.Equals(field, "map", StringComparison.OrdinalIgnoreCase))
                 return ContainsFilterValue(mapName, value);
+
+            if (String.Equals(field, "mode", StringComparison.OrdinalIgnoreCase))
+                return ContainsFilterValue(CandidateMode(candidate), value) || ContainsFilterValue(CandidateModeLabel(candidate), value);
+
+            if (String.Equals(field, "type", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "demo_type", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(field, "capture", StringComparison.OrdinalIgnoreCase))
+                return ContainsFilterValue(CandidateDemoType(candidate), value) || ContainsFilterValue(CandidateDemoTypeLabel(candidate), value);
 
             if (String.Equals(field, "class", StringComparison.OrdinalIgnoreCase))
             {
@@ -2479,6 +2519,9 @@ namespace Tf2StvParserGui
             text.AppendLine("Candidate " + DisplayValue(candidate, "candidate_id"));
             text.AppendLine("Score " + DisplayValue(candidate, "overall_score") + " | attacker #" + DisplayValue(candidate, "attacker_user_id") + " | " + DisplayValue(candidate, "attacker_team") + " " + DisplayValue(candidate, "attacker_class"));
             text.AppendLine("Tags: " + JoinCandidateTags(Value(candidate, "tags")));
+            string bookmarkComment = TextValue(candidate, "bookmark_comment");
+            if (!String.IsNullOrEmpty(bookmarkComment))
+                text.AppendLine("Demo bookmark at tick " + DisplayValue(candidate, "bookmark_tick") + ": " + bookmarkComment);
             text.AppendLine();
             IList kills = List(candidate, "kills");
             text.AppendLine("Kill count: " + kills.Count);
@@ -2696,6 +2739,9 @@ namespace Tf2StvParserGui
         {
             if (context == null) return;
             text.AppendLine("Demo scope: " + DisplayValue(context, "capture_type") + " (" + DisplayValue(context, "capture_confidence") + ") | " + DisplayValue(context, "analysis_scope"));
+            text.AppendLine("Mode: " + DisplayValue(context, "mode_label") + " (" + DisplayValue(context, "mode_confidence") + ")");
+            IList modeEvidence = List(context, "mode_evidence");
+            foreach (object item in modeEvidence) text.AppendLine("  mode evidence: " + Convert.ToString(item));
             text.AppendLine("  POV recorder: " + DisplayValue(context, "header_nick") + " | user ID " + DisplayValue(context, "pov_player_user_id"));
             text.AppendLine("  scope reason: " + DisplayValue(context, "scope_reason"));
         }

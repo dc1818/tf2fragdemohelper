@@ -1,0 +1,279 @@
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView, SpinBox, TextEdit } from "std-widgets.slint";
+
+export struct CandidateRow {
+    rank: int,
+    score: string,
+    kills: string,
+    attacker: string,
+    class-name: string,
+    team: string,
+    demo: string,
+    map-name: string,
+    mode: string,
+    demo-type: string,
+    recorded: string,
+    ticks: string,
+    tags: string,
+    selected: bool,
+}
+
+export component AppWindow inherits Window {
+    title: "TF2 Frag Demo Helper — Rust + Slint";
+    preferred-width: 1480px;
+    preferred-height: 860px;
+    min-width: 1180px;
+    min-height: 700px;
+    background: #1e2024;
+
+    in-out property <int> selected-page: 0;
+    in-out property <string> demo-paths;
+    in-out property <string> export-directory;
+    in-out property <string> item-schema;
+    in-out property <string> status-text: "Ready";
+    in-out property <string> log-text;
+    in-out property <float> progress-value: 0;
+    in-out property <bool> busy: false;
+    in-out property <string> resource-plan-text;
+
+    in-out property <[CandidateRow]> candidate-rows;
+    in-out property <string> filter-text;
+    in-out property <int> minimum-score: 0;
+    in-out property <string> candidate-summary;
+    in-out property <string> candidate-details;
+
+    in-out property <int> lead-seconds: 8;
+    in-out property <int> outro-seconds: 3;
+    in-out property <string> capture-fps: "120";
+    in-out property <string> recording-format: "MP4 - Standard";
+    in-out property <int> jpg-quality: 90;
+    in-out property <string> recording-estimate;
+
+    in-out property <string> tf2-path;
+    in-out property <string> hlae-path;
+    in-out property <string> ffmpeg-path;
+    in-out property <string> recording-directory;
+    in-out property <string> resolution: "2560x1440";
+    in-out property <string> dx-level: "98 (highest)";
+    in-out property <string> skybox: "Default";
+    in-out property <string> hud: "Kill notices only";
+    in-out property <string> viewmodels: "On";
+    in-out property <int> viewmodel-fov: 70;
+    in-out property <bool> maximum-graphics: true;
+    in-out property <bool> motion-blur: true;
+    in-out property <bool> disable-hit-sounds: true;
+    in-out property <bool> disable-voice-chat: true;
+    in-out property <bool> minimal-hud: true;
+    in-out property <bool> disable-combat-text: true;
+    in-out property <bool> disable-crosshair: true;
+    in-out property <bool> disable-crosshair-switching: true;
+    in-out property <bool> hud-player-model: false;
+    in-out property <bool> isolate-custom-resources: true;
+    in-out property <bool> disable-announcer: true;
+    in-out property <bool> disable-applause: true;
+    in-out property <bool> disable-domination: true;
+
+    callback choose-demos();
+    callback choose-export-directory();
+    callback choose-item-schema();
+    callback start-batch();
+    callback cancel-batch();
+    callback load-export();
+    callback open-export();
+    callback refresh-filter(string, int);
+    callback toggle-candidate(int);
+    callback select-all-visible();
+    callback preview-selected();
+    callback record-selected();
+    callback choose-setting-path(string);
+    callback save-settings();
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: "Parse demos"; clicked => { root.selected-page = 0; } }
+            Button { text: "Candidates"; clicked => { root.selected-page = 1; } }
+            Button { text: "Recording settings"; clicked => { root.selected-page = 2; } }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: root.status-text; color: #cdd6df; vertical-alignment: center; }
+        }
+
+        Rectangle { height: 1px; background: #41464e; }
+
+        if root.selected-page == 0 : VerticalLayout {
+            spacing: 8px;
+            GridLayout {
+                spacing: 8px;
+                Row {
+                    Text { text: "TF2 demos"; color: #e2e8ee; vertical-alignment: center; }
+                    LineEdit { text <=> root.demo-paths; horizontal-stretch: 1; }
+                    Button { text: "Browse demos"; clicked => { root.choose-demos(); } }
+                }
+                Row {
+                    Text { text: "Export location"; color: #e2e8ee; vertical-alignment: center; }
+                    LineEdit { text <=> root.export-directory; horizontal-stretch: 1; }
+                    Button { text: "Select location"; clicked => { root.choose-export-directory(); } }
+                }
+                Row {
+                    Text { text: "Item schema (optional)"; color: #e2e8ee; vertical-alignment: center; }
+                    LineEdit { text <=> root.item-schema; horizontal-stretch: 1; }
+                    Button { text: "Select schema"; clicked => { root.choose-item-schema(); } }
+                }
+            }
+            Text {
+                text: "Rust two-phase pipeline: bounded parallel parsing followed by streaming Rust analysis. Worker counts use CPU, RAM, actual parsed-export sizes, and guarded benchmark history.";
+                color: #aeb8c2;
+                wrap: word-wrap;
+            }
+            TextEdit {
+                text: root.log-text;
+                read-only: true;
+                font-family: "monospace";
+                vertical-stretch: 1;
+            }
+            Rectangle {
+                height: 12px;
+                background: #17191c;
+                Rectangle { width: parent.width * root.progress-value; height: parent.height; background: #2c8252; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Button { text: "Parse demo(s)"; enabled: !root.busy; clicked => { root.start-batch(); } }
+                Button { text: "Cancel"; enabled: root.busy; clicked => { root.cancel-batch(); } }
+                Button { text: "Open export folder"; clicked => { root.open-export(); } }
+                Button { text: "Load Previously Parsed Export"; enabled: !root.busy; clicked => { root.load-export(); } }
+            }
+            Text { text: root.resource-plan-text; color: #87cefa; wrap: word-wrap; }
+        }
+
+        if root.selected-page == 1 : VerticalLayout {
+            spacing: 7px;
+            Text { text: root.candidate-summary; color: #b8c2cc; }
+            HorizontalLayout {
+                spacing: 7px;
+                Text { text: "Filter"; color: #e2e8ee; vertical-alignment: center; }
+                LineEdit {
+                    text <=> root.filter-text;
+                    horizontal-stretch: 1;
+                    edited(text) => { root.refresh-filter(text, root.minimum-score); }
+                }
+                Text { text: "Minimum score"; color: #e2e8ee; vertical-alignment: center; }
+                SpinBox {
+                    value <=> root.minimum-score;
+                    minimum: 0;
+                    maximum: 1000;
+                    edited(value) => { root.refresh-filter(root.filter-text, value); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 7px;
+                Text { text: "Before"; color: #e2e8ee; vertical-alignment: center; }
+                SpinBox { value <=> root.lead-seconds; minimum: 0; maximum: 60; }
+                Text { text: "After"; color: #e2e8ee; vertical-alignment: center; }
+                SpinBox { value <=> root.outro-seconds; minimum: 0; maximum: 60; }
+                Text { text: "FPS"; color: #e2e8ee; vertical-alignment: center; }
+                ComboBox { model: ["120", "60", "240", "480"]; current-value <=> root.capture-fps; }
+                Text { text: "Output"; color: #e2e8ee; vertical-alignment: center; }
+                ComboBox { model: ["MP4 - Standard", "MP4 - Compatible", "MP4 - Lossless", "TGA Image Sequence", "JPG Image Sequence", "AVI - Raw"]; current-value <=> root.recording-format; }
+                Text { text: "JPG quality"; color: #e2e8ee; vertical-alignment: center; }
+                SpinBox { value <=> root.jpg-quality; minimum: 1; maximum: 100; }
+                Button { text: "Select all visible"; clicked => { root.select-all-visible(); } }
+                Button { text: "Record selected with HLAE"; clicked => { root.record-selected(); } }
+                Button { text: "Preview Selected Clip in TF2"; clicked => { root.preview-selected(); } }
+            }
+            Text { text: root.recording-estimate; color: #87cefa; }
+            Rectangle {
+                height: 30px;
+                background: #2b3036;
+                HorizontalLayout {
+                    padding-left: 5px; padding-right: 5px; spacing: 8px;
+                    Text { text: "#"; width: 34px; color: white; }
+                    Text { text: "Score"; width: 55px; color: white; }
+                    Text { text: "Kills"; width: 45px; color: white; }
+                    Text { text: "Attacker"; width: 70px; color: white; }
+                    Text { text: "Class"; width: 80px; color: white; }
+                    Text { text: "Team"; width: 55px; color: white; }
+                    Text { text: "Demo"; width: 150px; color: white; }
+                    Text { text: "Map"; width: 140px; color: white; }
+                    Text { text: "Mode"; width: 150px; color: white; }
+                    Text { text: "Type"; width: 60px; color: white; }
+                    Text { text: "Recorded"; width: 70px; color: white; horizontal-alignment: center; }
+                    Text { text: "Ticks"; width: 130px; color: white; }
+                    Text { text: "Tags"; horizontal-stretch: 1; color: white; }
+                }
+            }
+            ListView {
+                height: 290px;
+                for row[index] in root.candidate-rows : Rectangle {
+                    height: 30px;
+                    background: row.selected ? #2c8252 : (index % 2 == 0 ? #17191c : #202328);
+                    HorizontalLayout {
+                        padding-left: 5px; padding-right: 5px; spacing: 8px;
+                        Text { text: "" + row.rank; width: 34px; color: #e5e9ed; }
+                        Text { text: row.score; width: 55px; color: #e5e9ed; }
+                        Text { text: row.kills; width: 45px; color: #e5e9ed; }
+                        Text { text: row.attacker; width: 70px; color: #e5e9ed; }
+                        Text { text: row.class-name; width: 80px; color: #e5e9ed; }
+                        Text { text: row.team; width: 55px; color: #e5e9ed; }
+                        Text { text: row.demo; width: 150px; color: #e5e9ed; overflow: elide; }
+                        Text { text: row.map-name; width: 140px; color: #e5e9ed; overflow: elide; }
+                        Text { text: row.mode; width: 150px; color: #e5e9ed; overflow: elide; }
+                        Text { text: row.demo-type; width: 60px; color: #e5e9ed; }
+                        Text { text: row.recorded; width: 70px; color: #e5e9ed; horizontal-alignment: center; }
+                        Text { text: row.ticks; width: 130px; color: #e5e9ed; overflow: elide; }
+                        Text { text: row.tags; horizontal-stretch: 1; color: #e5e9ed; overflow: elide; }
+                    }
+                    TouchArea { clicked => { root.toggle-candidate(index); } }
+                }
+            }
+            TextEdit { text: root.candidate-details; read-only: true; vertical-stretch: 1; font-family: "monospace"; }
+        }
+
+        if root.selected-page == 2 : VerticalLayout {
+            spacing: 8px;
+            Text { text: "HLAE recording and movie settings (offline only)"; color: white; font-size: 20px; }
+            Text {
+                text: "Recording always launches TF2 with -insecure and loopback/LAN safeguards. HLAE recording is Windows-only; parsing, analysis, filtering, and export viewing are supported on Windows, Linux, and macOS.";
+                color: #ffcc66;
+                wrap: word-wrap;
+            }
+            GridLayout {
+                spacing: 8px;
+                Row { Text { text: "TF2 executable"; color: white; } LineEdit { text <=> root.tf2-path; } Button { text: "Browse"; clicked => { root.choose-setting-path("tf2"); } } }
+                Row { Text { text: "HLAE executable"; color: white; } LineEdit { text <=> root.hlae-path; } Button { text: "Browse"; clicked => { root.choose-setting-path("hlae"); } } }
+                Row { Text { text: "FFmpeg executable"; color: white; } LineEdit { text <=> root.ffmpeg-path; } Button { text: "Browse"; clicked => { root.choose-setting-path("ffmpeg"); } } }
+                Row { Text { text: "Recording output"; color: white; } LineEdit { text <=> root.recording-directory; } Button { text: "Browse"; clicked => { root.choose-setting-path("recording-output"); } } }
+                Row { Text { text: "Resolution"; color: white; } ComboBox { model: ["2560x1440", "1920x1080", "3840x2160"]; current-value <=> root.resolution; } Text { text: "DX level"; color: white; } ComboBox { model: ["98 (highest)", "95", "90"]; current-value <=> root.dx-level; } }
+                Row { Text { text: "Skybox"; color: white; } LineEdit { text <=> root.skybox; } Text { text: "HUD"; color: white; } ComboBox { model: ["Kill notices only", "Keep current", "Default TF2 HUD", "Medic recording HUD"]; current-value <=> root.hud; } }
+                Row { Text { text: "Viewmodels"; color: white; } ComboBox { model: ["On", "Off"]; current-value <=> root.viewmodels; } Text { text: "Viewmodel FOV"; color: white; } SpinBox { value <=> root.viewmodel-fov; minimum: 1; maximum: 179; } }
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                VerticalLayout {
+                    CheckBox { text: "Maximum-quality graphics profile"; checked <=> root.maximum-graphics; }
+                    CheckBox { text: "Enable motion blur"; checked <=> root.motion-blur; }
+                    CheckBox { text: "Disable hit sounds"; checked <=> root.disable-hit-sounds; }
+                    CheckBox { text: "Disable voice chat"; checked <=> root.disable-voice-chat; }
+                    CheckBox { text: "Minimal HUD"; checked <=> root.minimal-hud; }
+                }
+                VerticalLayout {
+                    CheckBox { text: "Disable combat text"; checked <=> root.disable-combat-text; }
+                    CheckBox { text: "Disable crosshair"; checked <=> root.disable-crosshair; }
+                    CheckBox { text: "Disable crosshair switching"; checked <=> root.disable-crosshair-switching; }
+                    CheckBox { text: "3D player model in HUD"; checked <=> root.hud-player-model; }
+                    CheckBox { text: "Temporarily isolate custom resources"; checked <=> root.isolate-custom-resources; }
+                }
+                VerticalLayout {
+                    CheckBox { text: "Disable announcer voices"; checked <=> root.disable-announcer; }
+                    CheckBox { text: "Disable applause sounds"; checked <=> root.disable-applause; }
+                    CheckBox { text: "Disable domination/revenge sounds"; checked <=> root.disable-domination; }
+                }
+            }
+            Text { text: "Movie controls retained: TGA/JPG image sequences, MP4 Standard/Compatible/Lossless, AVI Raw, 60/120/240/480 FPS, lead/outro duration, JPG quality, preview, batch selection, and recording reconciliation by video fingerprint."; color: #b8c2cc; wrap: word-wrap; }
+            Rectangle { vertical-stretch: 1; }
+            HorizontalLayout { Button { text: "Save settings"; clicked => { root.save-settings(); } } Rectangle { horizontal-stretch: 1; } }
+        }
+    }
+}

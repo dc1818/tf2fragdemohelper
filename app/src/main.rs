@@ -349,8 +349,13 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             let _ = state.settings.save();
         }
 
+        settings.lead_seconds = ui.get_lead_seconds().max(0) as u32;
+
         let result = preview_candidate(&candidate, &settings);
-        ui.set_status_text(result.map(|_| "TF2 preview launched".into()).unwrap_or_else(|error| error.to_string()).into());
+        ui.set_status_text(result
+            .map(|tick| format!("TF2 preview launched at demo tick {tick}"))
+            .unwrap_or_else(|error| error.to_string())
+            .into());
     });
     let weak = ui.as_weak();
     let state_for_record = state.clone();

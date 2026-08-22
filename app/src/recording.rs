@@ -130,7 +130,8 @@ impl RecordingIndex {
                     }
                 }
             }
-            let Some((prefix, ticks)) = stem.to_lowercase().rsplit_once("_t") else { continue };
+            let stem_lower = stem.to_lowercase();
+            let Some((prefix, ticks)) = stem_lower.rsplit_once("_t") else { continue };
             let Some((order, candidate_id)) = prefix.split_once('_') else { continue };
             if !order.chars().all(|character| character.is_ascii_digit()) {
                 continue;
@@ -196,7 +197,7 @@ impl RecordingIndex {
     }
 }
 
-pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Result<()> {
+pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Result<i64> {
     if !cfg!(target_os = "windows") {
         bail!("TF2 demo preview is currently available only where the native TF2 client is installed");
     }
@@ -204,17 +205,61 @@ pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Resul
     if !tf2.is_file() {
         bail!("select tf_win64.exe in Settings");
     }
+    let source = Path::new(&candidate.source_demo);
+    if !source.is_file() {
+        bail!("the selected candidate's original demo is missing: {}", source.display());
+    }
+    let tf_process_name = tf2.file_name().and_then(|name| name.to_str()).unwrap_or("tf_win64.exe").to_owned();
+    if windows_process_is_running(&tf_process_name)
+        || windows_process_is_running("tf.exe")
+        || windows_process_is_running("tf_win64.exe")
+    {
+        bail!("close TF2 before previewing a candidate so the new demo and VDM seek are not ignored");
+    }
+
     let game = tf2_game_directory(tf2)?;
+    let demo_directory = game.join("demos/tf2fragdemohelper");
+    fs::create_dir_all(&demo_directory)?;
+    for entry in fs::read_dir(&demo_directory)? {
+        let path = entry?.path();
+        let is_stale_vdm = path.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("vdm"))
+            && path.file_stem().and_then(|value| value.to_str()).is_some_and(|value| value.starts_with("tf2fragdemohelper_temp_"));
+        if is_stale_vdm {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    let source_stem = sanitize(source.file_stem().and_then(|value| value.to_str()).unwrap_or("candidate_demo"));
+    let signature = demo_signature(source)?;
+    let signature_prefix = signature.get(..12).unwrap_or(&signature);
+    let staged_name = format!("tf2fragdemohelper_temp_{source_stem}_{signature_prefix}.dem");
+    let staged_path = demo_directory.join(&staged_name);
+    let source_length = fs::metadata(source)?.len();
+    if !staged_path.is_file() || fs::metadata(&staged_path).map(|metadata| metadata.len()).unwrap_or_default() != source_length {
+        fs::copy(source, &staged_path).with_context(|| format!("could not stage {} for TF2 preview", source.display()))?;
+    }
+
+    let (target_tick, _) = clip_window(candidate, settings);
+    let playback_vdm = staged_path.with_extension("vdm");
+    fs::write(&playback_vdm, preview_vdm_text(candidate, target_tick))?;
+
     let cfg = game.join("cfg").join("tf2fragdemohelper_preview.cfg");
-    fs::write(&cfg, format!(
-        "sv_lan 1\nsv_master_legacy_mode 1\ncl_predict 0\ndemo_gototick {}\n",
-        candidate.clip_start_tick
-    ))?;
-    Command::new(tf2)
+    fs::write(&cfg, format!("{}cl_predict 0\n", offline_cfg()))?;
+    let staged_relative = format!("demos/tf2fragdemohelper/{staged_name}");
+    let mut child = Command::new(tf2)
+        .current_dir(tf2.parent().unwrap_or(game.as_path()))
         .args(["-insecure", "-novid", "-console", "+sv_lan", "1", "+exec", "tf2fragdemohelper_preview.cfg", "+playdemo"])
-        .arg(&candidate.source_demo)
+        .arg(staged_relative)
         .spawn()?;
-    Ok(())
+    thread::spawn(move || {
+        let _ = child.wait();
+        thread::sleep(Duration::from_millis(2500));
+        while windows_process_is_running(&tf_process_name) {
+            thread::sleep(Duration::from_secs(1));
+        }
+        let _ = fs::remove_file(playback_vdm);
+    });
+    Ok(target_tick)
 }
 
 pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Result<PathBuf> {
@@ -308,6 +353,9 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         bail!("none of the selected candidates reference an existing demo");
     }
 
+    for clips in by_demo.values_mut() {
+        clips.sort_by_key(|(_, candidate)| clip_window(candidate, settings).0);
+    }
     let groups = by_demo.into_iter().collect::<Vec<_>>();
     let mut staged_relatives = Vec::new();
     for (demo_index, (source, clips)) in groups.iter().enumerate() {
@@ -315,7 +363,7 @@ pub fn launch_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Re
         let staged_name = format!("{:03}_{stem}.dem", demo_index + 1);
         let staged = staged_root.join(&staged_name);
         fs::copy(source, &staged).with_context(|| format!("could not stage {}", source.display()))?;
-        let relative = format!("tf2fragdemohelper_batch/{session_name}/{staged_name}");
+        let relative = format!("demos/tf2fragdemohelper_batch/{session_name}/{staged_name}");
         staged_relatives.push(relative);
 
         for (order, candidate) in clips {
@@ -931,29 +979,67 @@ fn log_recording_diagnostic(path: &Path, message: impl AsRef<str>) {
 fn clip_window(candidate: &Candidate, settings: &AppSettings) -> (i64, i64) {
     let first = candidate.point_of_kill_ticks.first().copied().unwrap_or(candidate.clip_start_tick);
     let last = candidate.point_of_kill_ticks.last().copied().unwrap_or(candidate.clip_end_tick);
-    let start = (first - (settings.lead_seconds as f64 * 66.666_666_7) as i64).max(0);
-    let end = last + (settings.outro_seconds as f64 * 66.666_666_7) as i64;
+    let lead_ticks = (settings.lead_seconds as f64 * 66.666_666_7).round() as i64;
+    let outro_ticks = (settings.outro_seconds as f64 * 66.666_666_7).round() as i64;
+    let start = (first - lead_ticks).max(0);
+    let end = last + outro_ticks;
     (start, end.max(start + 1))
+}
+
+fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
+    let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
+    let mut action = 1;
+    add_vdm_action(
+        &mut lines,
+        &mut action,
+        "SkipAhead",
+        "TF2 Frag Demo Helper seek",
+        1,
+        Some(target_tick),
+        "",
+    );
+    if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") && candidate.attacker_user_id > 0 {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "PlayCommands",
+            "Focus selected STV candidate",
+            target_tick + 1,
+            None,
+            &format!("spec_autodirector 0; spec_player #{}; spec_mode 4", candidate.attacker_user_id),
+        );
+    }
+    lines.push("}".into());
+    lines.join("\n")
 }
 
 fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<&str>, settings: &AppSettings) -> String {
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
-    let mut previous_end = -1;
+    add_vdm_action(&mut lines, &mut action, "PlayCommands", "Apply movie profile", 1, None, "exec tf2fragdemohelper_recording_profile");
+    let recorder_flush_ticks = (66.666_666_7_f64 * 2.0).round() as i64;
+    let mut previous_finalize_tick = -1;
     for (order, candidate) in clips {
-        let (start, end) = clip_window(candidate, settings);
+        let (mut start, mut end) = clip_window(candidate, settings);
+        if start <= previous_finalize_tick {
+            start = previous_finalize_tick + 2;
+        }
+        if end <= start {
+            end = start + 1;
+        }
         let base = format!("{:03}_{}_t{}-{}", order, sanitize(&candidate.candidate_id), candidate.clip_start_tick, candidate.clip_end_tick);
-        let seek_at = if previous_end < 0 { 2 } else { previous_end + 2 };
+        let seek_at = if previous_finalize_tick < 0 { 2 } else { previous_finalize_tick + 2 };
         add_vdm_action(&mut lines, &mut action, "SkipAhead", "Batch seek", seek_at, Some(start), "");
-        let focus = if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") {
+        let focus = if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") && candidate.attacker_user_id > 0 {
             format!("spec_autodirector 0; spec_player #{}; spec_mode 4; ", candidate.attacker_user_id)
         } else { String::new() };
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Start clip", start + 1, None, &format!("{focus}exec tf2fragdemohelper_batch/{session_name}/{base}_start"));
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Stop clip", end, None, &format!("exec tf2fragdemohelper_batch/{session_name}/{base}_stop"));
-        previous_end = end + 2;
+        previous_finalize_tick = end + recorder_flush_ticks;
+        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Finalize clip", previous_finalize_tick, None, &format!("echo TF2FRAG_RECORD_FINALIZED {base}"));
     }
     let finish = next_demo.map(|demo| format!("playdemo {demo}")).unwrap_or_else(|| "quit".into());
-    add_vdm_action(&mut lines, &mut action, "PlayCommands", "Continue batch", previous_end + 2, None, &finish);
+    add_vdm_action(&mut lines, &mut action, "PlayCommands", "Continue batch", previous_finalize_tick + 2, None, &finish);
     lines.push("}".into());
     lines.join("\n")
 }

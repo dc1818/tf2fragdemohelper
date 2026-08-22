@@ -1,5 +1,7 @@
 # TF2 Frag Demo Helper
 
+> **v34 migration:** The primary application is now Rust with a Slint GUI. Build with `BUILD_RUST_APP.bat` or `build_rust_app.sh`; see `RUST_MIGRATION.md` for architecture, benchmark-driven concurrency changes, and platform support. The Python/Windows Forms sources below are retained temporarily as migration references and are not used by the v34 executable.
+
 TF2 Frag Demo Helper turns a Team Fortress 2 SourceTV (`.dem`) file into searchable JSON and a ranked list of potential frag-movie clips.
 
 It is built for reviewing long competitive or public STV demos without manually scrubbing every round. The project keeps the complete decoded packet stream for detailed analysis while also writing compact event and highlight files for practical clip selection.

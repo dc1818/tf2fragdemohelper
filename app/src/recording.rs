@@ -1,5 +1,5 @@
 use crate::{
-    models::{AppSettings, Candidate},
+    models::{AppSettings, CameraStyle, Candidate, CandidateCameraPlan, DemoCameraSource, KillCameraPlan},
     preflight::{disk_space_for, format_bytes, require_disk_space},
 };
 use anyhow::{bail, Context, Result};
@@ -26,6 +26,7 @@ const PROFILE_CFG: &str = "tf2fragdemohelper_recording_profile.cfg";
 const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
 const RECORDING_FLUSH_TICKS: i64 = 133;
 const VDM_ACTION_GAP_TICKS: i64 = 2;
+const KILL_CAMERA_LEAD_TICKS: i64 = 80;
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 
 #[derive(Clone)]
@@ -234,6 +235,7 @@ struct StoredRecordingClip {
     audio_path: Option<PathBuf>,
     native_capture_base: String,
     replace_existing: bool,
+    camera_plan: CandidateCameraPlan,
 }
 
 #[derive(Clone, Debug)]
@@ -582,6 +584,7 @@ struct PreparedClip {
     frames_path: Option<PathBuf>,
     audio_path: Option<PathBuf>,
     replace_existing: bool,
+    camera_plan: CandidateCameraPlan,
 }
 
 #[derive(Default)]
@@ -824,7 +827,11 @@ impl RecordingIndex {
     }
 }
 
-pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Result<i64> {
+pub fn preview_candidate(
+    candidate: &Candidate,
+    camera_plan: &CandidateCameraPlan,
+    settings: &AppSettings,
+) -> Result<i64> {
     if !cfg!(target_os = "windows") {
         bail!("TF2 demo preview is currently available only where the native TF2 client is installed");
     }
@@ -870,7 +877,7 @@ pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Resul
 
     let (target_tick, _) = clip_window(candidate, settings);
     let playback_vdm = staged_path.with_extension("vdm");
-    fs::write(&playback_vdm, preview_vdm_text(candidate, target_tick))?;
+    fs::write(&playback_vdm, preview_vdm_text(candidate, camera_plan, target_tick))?;
 
     let cfg = game.join("cfg").join("tf2fragdemohelper_preview.cfg");
     let previous_preview_cfg = fs::read(&cfg).ok();
@@ -966,6 +973,7 @@ pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> R
 
 pub fn launch_hlae_batch(
     candidates: &[Candidate],
+    camera_plans: &[CandidateCameraPlan],
     settings: &AppSettings,
     replace_existing: bool,
     progress: Option<RecordingProgressSink>,
@@ -1021,7 +1029,7 @@ pub fn launch_hlae_batch(
             groups.push((source.clone(), pass));
         }
     }
-    let prepared_clips = prepare_recording_clips(candidates, session_name, &session, settings, replace_existing)?;
+    let prepared_clips = prepare_recording_clips(candidates, camera_plans, session_name, &session, settings, replace_existing)?;
     let prepared_by_order = prepared_clips.iter().map(|clip| (clip.order, clip)).collect::<HashMap<_, _>>();
     write_recording_manifest(&session, &prepared_clips, settings, &game, "Pending", None)?;
     let mut staged_relatives = Vec::new();
@@ -1061,7 +1069,11 @@ pub fn launch_hlae_batch(
     for (demo_index, (_, clips)) in groups.iter().enumerate() {
         let staged = staged_root.join(Path::new(&staged_relatives[demo_index]).file_name().unwrap());
         let next = staged_relatives.get(demo_index + 1).cloned();
-        fs::write(staged.with_extension("vdm"), vdm_text(clips, session_name, next.as_deref(), settings)?)?;
+        let plans = prepared_clips
+            .iter()
+            .map(|clip| (clip.candidate.camera_plan_key(), clip.camera_plan.clone()))
+            .collect::<HashMap<_, _>>();
+        fs::write(staged.with_extension("vdm"), vdm_text(clips, session_name, next.as_deref(), &plans, settings)?)?;
     }
 
     let (width, height) = parse_resolution(&settings.resolution);
@@ -1899,21 +1911,255 @@ fn partition_recording_windows(windows: &[(i64, i64)]) -> Vec<Vec<usize>> {
 }
 
 fn candidate_needs_spectator_focus(candidate: &Candidate) -> bool {
-    if candidate.attacker_user_id <= 0 {
-        return false;
-    }
-    if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") {
-        return true;
-    }
-    // Older exports could mislabel an STV as POV when dem_usercmd packets were
-    // present.  A supposed POV with no identified POV player and all-player
-    // analysis cannot safely preserve a single recorded POV, so explicitly
-    // focus the selected candidate just as an STV requires.
-    candidate.demo_context.analysis_scope.eq_ignore_ascii_case("all_players")
-        && candidate.demo_context.pov_player_user_id.is_none()
+    candidate.attacker_user_id > 0 && candidate.camera_source() == DemoCameraSource::Stv
 }
 
-fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
+#[derive(Clone, Debug)]
+struct CameraVdmAction {
+    tick: i64,
+    priority: u8,
+    name: String,
+    commands: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CameraPose {
+    position: [f64; 3],
+    angles: [f64; 3],
+    fov: f64,
+}
+
+fn original_camera_commands(candidate: &Candidate) -> String {
+    let cleanup = "mirv_campath enabled 0; mirv_input cfg smooth enabled 0; mirv_input cfg offsetMode current; mirv_input end; mirv_fov default";
+    if candidate_needs_spectator_focus(candidate) {
+        format!(
+            "{cleanup}; spec_autodirector 0; spec_player #{}; spec_mode 4",
+            candidate.attacker_user_id
+        )
+    } else {
+        format!("{cleanup}; firstperson")
+    }
+}
+
+fn camera_pose_command(pose: CameraPose) -> String {
+    format!(
+        "mirv_input position {:.3} {:.3} {:.3}; mirv_input angles {:.3} {:.3} {:.3}; mirv_input fov {:.1}",
+        pose.position[0],
+        pose.position[1],
+        pose.position[2],
+        pose.angles[0],
+        pose.angles[1],
+        pose.angles[2],
+        pose.fov,
+    )
+}
+
+fn begin_smoothed_camera_command(source: DemoCameraSource, pose: CameraPose) -> String {
+    let source_mode = match source {
+        DemoCameraSource::Stv => "spec_autodirector 0; spec_mode 7",
+        DemoCameraSource::Pov => "thirdperson",
+    };
+    format!(
+        "mirv_campath enabled 0; {source_mode}; mirv_input cfg offsetMode ownLast; mirv_input cfg smooth halfTimeVec 0.18; mirv_input cfg smooth halfTimeAng 0.12; mirv_input cfg smooth halfTimeFov 0.14; mirv_input cfg smooth enabled 1; mirv_input camera; {}",
+        camera_pose_command(pose),
+    )
+}
+
+fn look_at_angles(position: [f64; 3], target: [f64; 3]) -> [f64; 3] {
+    let dx = target[0] - position[0];
+    let dy = target[1] - position[1];
+    let dz = target[2] - position[2];
+    let horizontal = (dx * dx + dy * dy).sqrt().max(0.000_1);
+    [
+        -dz.atan2(horizontal).to_degrees(),
+        dy.atan2(dx).to_degrees(),
+        0.0,
+    ]
+}
+
+fn generated_camera_poses(kill: &KillCameraPlan, cinematic: bool) -> Option<(CameraPose, CameraPose)> {
+    let attacker = kill.attacker_position?;
+    let victim = kill.victim_position?;
+    let dx = victim[0] - attacker[0];
+    let dy = victim[1] - attacker[1];
+    let distance = (dx * dx + dy * dy).sqrt();
+    let direction = if distance > 0.001 {
+        [dx / distance, dy / distance]
+    } else {
+        [1.0, 0.0]
+    };
+    let perpendicular = [-direction[1], direction[0]];
+
+    let target = if cinematic {
+        [
+            (attacker[0] + victim[0]) * 0.5,
+            (attacker[1] + victim[1]) * 0.5,
+            (attacker[2] + victim[2]) * 0.5 + 48.0,
+        ]
+    } else {
+        [victim[0], victim[1], victim[2] + 48.0]
+    };
+    let anchor = if cinematic {
+        [
+            (attacker[0] + victim[0]) * 0.5,
+            (attacker[1] + victim[1]) * 0.5,
+            (attacker[2] + victim[2]) * 0.5,
+        ]
+    } else {
+        victim
+    };
+    let (wide_distance, close_distance, wide_height, close_height, wide_fov, close_fov) = if cinematic {
+        (280.0, 210.0, 130.0, 96.0, 78.0, 64.0)
+    } else {
+        (205.0, 145.0, 92.0, 66.0, 72.0, 54.0)
+    };
+    let approach_position = [
+        anchor[0] + perpendicular[0] * wide_distance - direction[0] * 35.0,
+        anchor[1] + perpendicular[1] * wide_distance - direction[1] * 35.0,
+        anchor[2] + wide_height,
+    ];
+    let impact_position = [
+        anchor[0] + perpendicular[0] * close_distance,
+        anchor[1] + perpendicular[1] * close_distance,
+        anchor[2] + close_height,
+    ];
+    Some((
+        CameraPose {
+            position: approach_position,
+            angles: look_at_angles(approach_position, target),
+            fov: wide_fov,
+        },
+        CameraPose {
+            position: impact_position,
+            angles: look_at_angles(impact_position, target),
+            fov: close_fov,
+        },
+    ))
+}
+
+fn camera_actions_for_plan(
+    candidate: &Candidate,
+    plan: &CandidateCameraPlan,
+    start_tick: i64,
+    end_tick: i64,
+) -> Vec<CameraVdmAction> {
+    let mut kills = plan.kills.clone();
+    kills.sort_by_key(|kill| kill.event_tick);
+    let transitions = kills
+        .iter()
+        .map(|kill| (kill.event_tick - KILL_CAMERA_LEAD_TICKS).max(start_tick + 2))
+        .collect::<Vec<_>>();
+    let mut actions = Vec::new();
+
+    for (index, kill) in kills.iter().enumerate() {
+        let transition_tick = transitions[index];
+        let impact_floor = transition_tick + 1;
+        let impact_ceiling = end_tick.saturating_sub(2).max(impact_floor);
+        let impact_tick = kill.event_tick.max(impact_floor).min(impact_ceiling);
+        let hold_ticks = kill.victim_hold_ticks.max(1);
+        let restore_tick = (kill.event_tick + hold_ticks).min(end_tick.saturating_sub(1));
+        match kill.style {
+            CameraStyle::OriginalAttacker => actions.push(CameraVdmAction {
+                tick: transition_tick,
+                priority: 1,
+                name: format!("Kill {} original camera", kill.kill_index + 1),
+                commands: original_camera_commands(candidate),
+            }),
+            CameraStyle::VictimFocus if plan.source == DemoCameraSource::Stv && kill.victim_user_id > 0 => {
+                actions.push(CameraVdmAction {
+                    tick: transition_tick,
+                    priority: 1,
+                    name: format!("Kill {} victim chase", kill.kill_index + 1),
+                    commands: format!(
+                        "mirv_campath enabled 0; mirv_input end; spec_autodirector 0; spec_player #{}; spec_mode 5; mirv_fov 72",
+                        kill.victim_user_id
+                    ),
+                });
+                actions.push(CameraVdmAction {
+                    tick: impact_tick,
+                    priority: 2,
+                    name: format!("Kill {} victim impact zoom", kill.kill_index + 1),
+                    commands: "mirv_fov 54".into(),
+                });
+            }
+            CameraStyle::VictimFocus => {
+                if let Some((approach, impact)) = generated_camera_poses(kill, false) {
+                    actions.push(CameraVdmAction {
+                        tick: transition_tick,
+                        priority: 1,
+                        name: format!("Kill {} smooth victim camera", kill.kill_index + 1),
+                        commands: begin_smoothed_camera_command(plan.source, approach),
+                    });
+                    actions.push(CameraVdmAction {
+                        tick: impact_tick,
+                        priority: 2,
+                        name: format!("Kill {} smooth victim zoom", kill.kill_index + 1),
+                        commands: camera_pose_command(impact),
+                    });
+                } else {
+                    actions.push(CameraVdmAction {
+                        tick: transition_tick,
+                        priority: 1,
+                        name: format!("Kill {} victim fallback", kill.kill_index + 1),
+                        commands: if plan.source == DemoCameraSource::Stv && kill.victim_user_id > 0 {
+                            format!("spec_autodirector 0; spec_player #{}; spec_mode 5; mirv_fov 60", kill.victim_user_id)
+                        } else {
+                            "thirdperson; mirv_fov 60".into()
+                        },
+                    });
+                }
+            }
+            CameraStyle::OutsideCinematic => {
+                if let Some((approach, impact)) = generated_camera_poses(kill, true) {
+                    actions.push(CameraVdmAction {
+                        tick: transition_tick,
+                        priority: 1,
+                        name: format!("Kill {} outside approach", kill.kill_index + 1),
+                        commands: begin_smoothed_camera_command(plan.source, approach),
+                    });
+                    actions.push(CameraVdmAction {
+                        tick: impact_tick,
+                        priority: 2,
+                        name: format!("Kill {} outside impact", kill.kill_index + 1),
+                        commands: camera_pose_command(impact),
+                    });
+                } else {
+                    actions.push(CameraVdmAction {
+                        tick: transition_tick,
+                        priority: 1,
+                        name: format!("Kill {} outside fallback", kill.kill_index + 1),
+                        commands: if plan.source == DemoCameraSource::Stv && kill.victim_user_id > 0 {
+                            format!("spec_autodirector 0; spec_player #{}; spec_mode 5; mirv_fov 64", kill.victim_user_id)
+                        } else {
+                            "thirdperson; mirv_fov 64".into()
+                        },
+                    });
+                }
+            }
+        }
+
+        let next_transition = transitions.get(index + 1).copied().unwrap_or(i64::MAX);
+        if kill.style != CameraStyle::OriginalAttacker && restore_tick + 1 < next_transition {
+            actions.push(CameraVdmAction {
+                tick: restore_tick,
+                priority: 3,
+                name: format!("Kill {} short hold complete", kill.kill_index + 1),
+                commands: original_camera_commands(candidate),
+            });
+        }
+    }
+
+    actions.push(CameraVdmAction {
+        tick: end_tick.saturating_sub(1),
+        priority: 9,
+        name: "Restore camera before clip stop".into(),
+        commands: original_camera_commands(candidate),
+    });
+    actions.sort_by_key(|action| (action.tick, action.priority));
+    actions
+}
+
+fn preview_vdm_text(candidate: &Candidate, camera_plan: &CandidateCameraPlan, target_tick: i64) -> String {
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
     add_vdm_action(
@@ -1925,22 +2171,43 @@ fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         Some(target_tick),
         "",
     );
-    if candidate_needs_spectator_focus(candidate) {
+    add_vdm_action(
+        &mut lines,
+        &mut action,
+        "PlayCommands",
+        "Initialize candidate camera",
+        target_tick + 1,
+        None,
+        &original_camera_commands(candidate),
+    );
+    let preview_end = candidate
+        .point_of_kill_ticks
+        .last()
+        .copied()
+        .unwrap_or(candidate.clip_end_tick)
+        + 80;
+    for camera_action in camera_actions_for_plan(candidate, camera_plan, target_tick, preview_end) {
         add_vdm_action(
             &mut lines,
             &mut action,
             "PlayCommands",
-            "Focus selected STV candidate",
-            target_tick + 1,
+            &camera_action.name,
+            camera_action.tick,
             None,
-            &format!("spec_autodirector 0; spec_player #{}; spec_mode 4", candidate.attacker_user_id),
+            &camera_action.commands,
         );
     }
     lines.push("}".into());
     lines.join("\n")
 }
 
-fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<&str>, settings: &AppSettings) -> Result<String> {
+fn vdm_text(
+    clips: &[(usize, Candidate)],
+    session_name: &str,
+    next_demo: Option<&str>,
+    camera_plans: &HashMap<String, CandidateCameraPlan>,
+    settings: &AppSettings,
+) -> Result<String> {
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
     add_vdm_action(
@@ -1968,10 +2235,23 @@ fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<
         if start > seek_at {
             add_vdm_action(&mut lines, &mut action, "SkipAhead", "Batch seek", seek_at, Some(start), "");
         }
-        let focus = if candidate_needs_spectator_focus(candidate) {
-            format!("spec_autodirector 0; spec_player #{}; spec_mode 4; ", candidate.attacker_user_id)
-        } else { String::new() };
+        let focus = format!("{}; ", original_camera_commands(candidate));
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Start clip", start + 1, None, &format!("{focus}exec tf2fragdemohelper_batch/{session_name}/{base}_start"));
+        let camera_plan = camera_plans
+            .get(&candidate.camera_plan_key())
+            .cloned()
+            .unwrap_or_else(|| candidate.default_camera_plan());
+        for camera_action in camera_actions_for_plan(candidate, &camera_plan, start, end) {
+            add_vdm_action(
+                &mut lines,
+                &mut action,
+                "PlayCommands",
+                &camera_action.name,
+                camera_action.tick,
+                None,
+                &camera_action.commands,
+            );
+        }
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Stop clip", end, None, &format!("exec tf2fragdemohelper_batch/{session_name}/{base}_stop"));
         previous_finalize_tick = end + RECORDING_FLUSH_TICKS;
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Finalize clip", previous_finalize_tick, None, &format!("echo TF2FRAG_RECORD_FINALIZED {base}"));
@@ -2004,6 +2284,7 @@ fn add_vdm_action(lines: &mut Vec<String>, action: &mut i32, factory: &str, name
 
 fn prepare_recording_clips(
     candidates: &[Candidate],
+    camera_plans: &[CandidateCameraPlan],
     session_name: &str,
     session: &Path,
     settings: &AppSettings,
@@ -2012,6 +2293,10 @@ fn prepare_recording_clips(
     let encoded = !settings.recording_format.contains("Image");
     let extension = encoded_extension(settings);
     let mut clips = Vec::new();
+    let camera_plans = camera_plans
+        .iter()
+        .map(|plan| (plan.candidate_key.clone(), plan.clone()))
+        .collect::<HashMap<_, _>>();
     for (index, candidate) in candidates.iter().enumerate() {
         let source = Path::new(&candidate.source_demo);
         if !source.is_file() {
@@ -2023,7 +2308,24 @@ fn prepare_recording_clips(
         let demo_signature = portable_demo_signature(source)?;
         let demo_name = sanitize(source.file_stem().and_then(|value| value.to_str()).unwrap_or("demo"));
         let candidate_name = sanitize(if candidate.candidate_id.trim().is_empty() { "candidate" } else { &candidate.candidate_id });
-        let base_identifier = format!("{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__k{}", recording_key_token(&recording_key));
+        let camera_plan = camera_plans
+            .get(&candidate.camera_plan_key())
+            .cloned()
+            .unwrap_or_else(|| candidate.default_camera_plan());
+        let camera_token = camera_plan
+            .kills
+            .iter()
+            .take(12)
+            .map(|kill| match kill.style {
+                CameraStyle::OriginalAttacker => 'o',
+                CameraStyle::VictimFocus => 'v',
+                CameraStyle::OutsideCinematic => 'c',
+            })
+            .collect::<String>();
+        let base_identifier = format!(
+            "{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__cam{camera_token}__k{}",
+            recording_key_token(&recording_key)
+        );
         let recording_identifier = unique_recording_identifier(&settings.recording_output_directory, session, &base_identifier, encoded, extension);
         let config_base = format!("{:03}_{}_t{}-{}", order, candidate_name, candidate.clip_start_tick, candidate.clip_end_tick);
         let capture_base = format!("tf2frag_{session_name}_{order:03}");
@@ -2053,6 +2355,7 @@ fn prepare_recording_clips(
             frames_path,
             audio_path,
             replace_existing,
+            camera_plan,
         });
     }
     Ok(clips)
@@ -2092,6 +2395,7 @@ fn write_recording_manifest(session: &Path, clips: &[PreparedClip], settings: &A
         "audio_path": clip.audio_path,
         "native_capture_base": clip.capture_base,
         "replace_existing": clip.replace_existing,
+        "camera_plan": clip.camera_plan,
         "status": "Pending",
         "actual_output_path": null,
         "output_fingerprint": null,
@@ -2099,7 +2403,7 @@ fn write_recording_manifest(session: &Path, clips: &[PreparedClip], settings: &A
     })).collect::<Vec<_>>();
     let manifest = json!({
         "format": "tf2-hlae-recording-queue",
-        "version": 6,
+        "version": 7,
         "batch_status": batch_status,
         "batch_error": error,
         "offline_only": true,
@@ -3172,6 +3476,7 @@ fn prepared_clip_from_manifest(stored: &StoredRecordingClip) -> PreparedClip {
         frames_path: stored.frames_path.clone(),
         audio_path: stored.audio_path.clone(),
         replace_existing: stored.replace_existing,
+        camera_plan: stored.camera_plan.clone(),
     }
 }
 
@@ -3201,6 +3506,138 @@ fn index_path() -> PathBuf {
 #[cfg(test)]
 mod recording_tests {
     use super::*;
+
+    fn camera_test_candidate(source: DemoCameraSource) -> Candidate {
+        let mut candidate = Candidate {
+            candidate_id: "camera-candidate".into(),
+            attacker_user_id: 17,
+            clip_start_tick: 900,
+            clip_end_tick: 1_200,
+            point_of_kill_ticks: vec![1_000],
+            ..Candidate::default()
+        };
+        match source {
+            DemoCameraSource::Stv => {
+                candidate.demo_context.capture_type = "stv".into();
+                candidate.demo_context.analysis_scope = "all_players".into();
+            }
+            DemoCameraSource::Pov => {
+                candidate.demo_context.capture_type = "pov".into();
+                candidate.demo_context.pov_player_user_id = Some(17);
+            }
+        }
+        candidate
+    }
+
+    fn camera_test_plan(source: DemoCameraSource, style: CameraStyle) -> CandidateCameraPlan {
+        CandidateCameraPlan {
+            candidate_key: "camera-candidate".into(),
+            candidate_id: "camera-candidate".into(),
+            source,
+            kills: vec![KillCameraPlan {
+                kill_index: 0,
+                event_tick: 1_000,
+                victim_user_id: 42,
+                victim_name: "Victim".into(),
+                style,
+                victim_hold_ticks: 20,
+                attacker_position: Some([0.0, 0.0, 0.0]),
+                victim_position: Some([256.0, 0.0, 0.0]),
+            }],
+        }
+    }
+
+    #[test]
+    fn stv_victim_focus_targets_each_killed_player_and_holds_briefly() {
+        let candidate = camera_test_candidate(DemoCameraSource::Stv);
+        let plan = camera_test_plan(DemoCameraSource::Stv, CameraStyle::VictimFocus);
+        let actions = camera_actions_for_plan(&candidate, &plan, 900, 1_200);
+        assert!(actions.iter().any(|action| {
+            action.tick == 920
+                && action.commands.contains("spec_player #42")
+                && action.commands.contains("spec_mode 5")
+        }));
+        assert!(actions.iter().any(|action| action.tick == 1_000 && action.commands.contains("mirv_fov 54")));
+        assert!(actions.iter().any(|action| {
+            action.tick == 1_020
+                && action.name.contains("short hold complete")
+                && action.commands.contains("spec_player #17")
+                && action.commands.contains("spec_mode 4")
+        }));
+    }
+
+    #[test]
+    fn pov_victim_focus_uses_smoothed_drive_camera_instead_of_spec_player() {
+        let candidate = camera_test_candidate(DemoCameraSource::Pov);
+        let plan = camera_test_plan(DemoCameraSource::Pov, CameraStyle::VictimFocus);
+        let actions = camera_actions_for_plan(&candidate, &plan, 900, 1_200);
+        let approach = actions.iter().find(|action| action.name.contains("smooth victim camera")).expect("POV approach");
+        assert!(approach.commands.contains("thirdperson"));
+        assert!(approach.commands.contains("mirv_input cfg smooth enabled 1"));
+        assert!(approach.commands.contains("mirv_input camera"));
+        assert!(approach.commands.contains("mirv_input position"));
+        assert!(!approach.commands.contains("spec_player"));
+    }
+
+    #[test]
+    fn outside_camera_generates_world_space_approach_and_impact_for_stv_and_pov() {
+        for source in [DemoCameraSource::Stv, DemoCameraSource::Pov] {
+            let candidate = camera_test_candidate(source);
+            let plan = camera_test_plan(source, CameraStyle::OutsideCinematic);
+            let actions = camera_actions_for_plan(&candidate, &plan, 900, 1_200);
+            assert!(actions.iter().any(|action| action.name.contains("outside approach") && action.commands.contains("mirv_input camera")));
+            assert!(actions.iter().any(|action| action.name.contains("outside impact") && action.commands.contains("mirv_input fov 64.0")));
+        }
+    }
+
+    #[test]
+    fn one_kill_plan_preserves_all_three_selectable_camera_styles() {
+        let candidate = camera_test_candidate(DemoCameraSource::Stv);
+        for style in [CameraStyle::OriginalAttacker, CameraStyle::VictimFocus, CameraStyle::OutsideCinematic] {
+            let plan = camera_test_plan(DemoCameraSource::Stv, style);
+            let text = preview_vdm_text(&candidate, &plan, 900);
+            match style {
+                CameraStyle::OriginalAttacker => assert!(text.contains("Kill 1 original camera")),
+                CameraStyle::VictimFocus => assert!(text.contains("Kill 1 victim chase")),
+                CameraStyle::OutsideCinematic => assert!(text.contains("Kill 1 outside approach")),
+            }
+        }
+    }
+
+    #[test]
+    fn multi_kill_plan_applies_each_selected_camera_independently() {
+        let mut candidate = camera_test_candidate(DemoCameraSource::Stv);
+        candidate.clip_end_tick = 1_400;
+        candidate.point_of_kill_ticks = vec![1_000, 1_100, 1_200];
+        let mut plan = camera_test_plan(DemoCameraSource::Stv, CameraStyle::OriginalAttacker);
+        plan.kills.push(KillCameraPlan {
+            kill_index: 1,
+            event_tick: 1_100,
+            victim_user_id: 43,
+            victim_name: "Second Victim".into(),
+            style: CameraStyle::VictimFocus,
+            victim_hold_ticks: 20,
+            attacker_position: Some([0.0, 0.0, 0.0]),
+            victim_position: Some([192.0, 64.0, 0.0]),
+        });
+        plan.kills.push(KillCameraPlan {
+            kill_index: 2,
+            event_tick: 1_200,
+            victim_user_id: 44,
+            victim_name: "Third Victim".into(),
+            style: CameraStyle::OutsideCinematic,
+            victim_hold_ticks: 20,
+            attacker_position: Some([0.0, 0.0, 0.0]),
+            victim_position: Some([256.0, -64.0, 0.0]),
+        });
+
+        let actions = camera_actions_for_plan(&candidate, &plan, 900, 1_400);
+        assert!(actions.iter().any(|action| action.name == "Kill 1 original camera"));
+        assert!(actions.iter().any(|action| {
+            action.name == "Kill 2 victim chase" && action.commands.contains("spec_player #43")
+        }));
+        assert!(actions.iter().any(|action| action.name == "Kill 3 outside approach"));
+    }
 
     #[test]
     fn overlapping_windows_are_split_without_changing_ticks() {
@@ -3255,6 +3692,7 @@ mod recording_tests {
 
     #[test]
     fn retained_manifest_preserves_candidate_identity_for_reindexing() {
+        let camera_plan = camera_test_plan(DemoCameraSource::Stv, CameraStyle::OutsideCinematic);
         let stored = StoredRecordingClip {
             order: 3,
             source_demo: "C:/demos/match.dem".into(),
@@ -3270,6 +3708,7 @@ mod recording_tests {
             expected_output_path: PathBuf::from("C:/outputs/clip.mp4"),
             native_capture_base: "capture-base".into(),
             replace_existing: true,
+            camera_plan: camera_plan.clone(),
             ..StoredRecordingClip::default()
         };
 
@@ -3282,6 +3721,9 @@ mod recording_tests {
         assert_eq!(clip.end_tick, 10_400);
         assert_eq!(clip.final_output_path, PathBuf::from("C:/outputs/clip.mp4"));
         assert!(clip.replace_existing);
+        assert_eq!(clip.camera_plan.source, DemoCameraSource::Stv);
+        assert_eq!(clip.camera_plan.kills.len(), 1);
+        assert_eq!(clip.camera_plan.kills[0].style, CameraStyle::OutsideCinematic);
     }
 
     #[test]

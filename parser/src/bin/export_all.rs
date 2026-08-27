@@ -20,6 +20,7 @@ struct PlayerStateSample {
     entity_id: u32,
     user_id: Option<u16>,
     name: Option<String>,
+    steam_id: Option<String>,
     team: String,
     class: String,
     position: [f32; 3],
@@ -51,6 +52,7 @@ impl PlayerStateSample {
             entity_id: u32::from(player.entity),
             user_id: player.info.as_ref().map(|info| u16::from(info.user_id)),
             name: player.info.as_ref().map(|info| info.name.clone()),
+            steam_id: player.info.as_ref().map(|info| info.steam_id.clone()).filter(|value| !value.is_empty()),
             team: player.team.to_string(),
             class: player.class.to_string(),
             position: player.position.into(),
@@ -85,6 +87,15 @@ struct ProjectileStateSample {
     initial_velocity: [f32; 3],
     launcher_handle: i64,
     critical: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DemoBookmark {
+    tick: u32,
+    server_tick: Option<u32>,
+    comment: String,
+    command: String,
+    source: String,
 }
 
 impl ProjectileStateSample {
@@ -228,16 +239,26 @@ fn packet_server_tick(packet: &Packet<'_>) -> Option<u32> {
     })
 }
 
-fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::Value {
+fn capture_metadata(header: &Header, usercmd_packet_count: u64, server_info_stv: Option<bool>) -> serde_json::Value {
     let nick = header.nick.trim();
     let normalized_nick = nick.to_ascii_lowercase();
-    if normalized_nick.contains("sourcetv") || normalized_nick.contains("source tv") {
+    if server_info_stv == Some(true) {
+        json!({
+            "classification": "stv",
+            "confidence": "high",
+            "evidence": ["The decoded server-info message identifies this client as SourceTV."],
+            "header_nick": nick,
+            "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": true,
+        })
+    } else if normalized_nick.contains("sourcetv") || normalized_nick.contains("source tv") {
         json!({
             "classification": "stv",
             "confidence": "high",
             "evidence": ["Demo header nickname identifies a SourceTV recorder."],
             "header_nick": nick,
             "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": server_info_stv,
         })
     } else if usercmd_packet_count > 0 {
         json!({
@@ -246,6 +267,7 @@ fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::V
             "evidence": ["Demo contains dem_usercmd packets, which record a client player's input."],
             "header_nick": nick,
             "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": server_info_stv,
         })
     } else {
         json!({
@@ -254,7 +276,112 @@ fn capture_metadata(header: &Header, usercmd_packet_count: u64) -> serde_json::V
             "evidence": ["Header is not explicitly SourceTV and no dem_usercmd packets were found."],
             "header_nick": nick,
             "usercmd_packet_count": usercmd_packet_count,
+            "server_info_stv": server_info_stv,
         })
+    }
+}
+
+fn packet_server_info_stv(packet: &Packet<'_>) -> Option<bool> {
+    let messages = match packet {
+        Packet::Signon(message_packet) | Packet::Message(message_packet) => &message_packet.messages,
+        _ => return None,
+    };
+    messages.iter().find_map(|message| match message {
+        Message::ServerInfo(server_info) => Some(server_info.stv),
+        _ => None,
+    })
+}
+
+fn bookmark_from_command(
+    command: &str,
+    demo_tick: u32,
+    server_tick: Option<u32>,
+    source: &str,
+) -> Option<DemoBookmark> {
+    let trimmed = command.trim().trim_matches('\0').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let prefixes = ["ds_mark", "demo_mark", "demomark", "demo_bookmark"];
+    let mut comment = prefixes.iter().find_map(|prefix| {
+        (lower == *prefix || lower.starts_with(&format!("{prefix} ")))
+            .then(|| trimmed[prefix.len()..].trim())
+    });
+    if comment.is_none() {
+        for marker in ["#demobookmark", "#demo_bookmark", "demo bookmark:"] {
+            if let Some(index) = lower.find(marker) {
+                comment = Some(trimmed[index + marker.len()..].trim_start_matches([' ', ':', '=']).trim());
+                break;
+            }
+        }
+    }
+    let comment = comment?
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_owned();
+    Some(DemoBookmark {
+        tick: demo_tick,
+        server_tick,
+        comment,
+        command: trimmed.to_owned(),
+        source: source.to_owned(),
+    })
+}
+
+fn packet_bookmarks(packet: &Packet<'_>, server_tick: Option<u32>) -> Vec<DemoBookmark> {
+    let demo_tick = u32::from(packet.tick());
+    let mut result = Vec::new();
+    if let Packet::ConsoleCmd(console) = packet {
+        if let Some(bookmark) = bookmark_from_command(&console.command, demo_tick, server_tick, "console_command") {
+            result.push(bookmark);
+        }
+    }
+    let messages = match packet {
+        Packet::Signon(message_packet) | Packet::Message(message_packet) => Some(&message_packet.messages),
+        _ => None,
+    };
+    if let Some(messages) = messages {
+        for message in messages {
+            if let Message::StringCmd(string_command) = message {
+                if let Some(bookmark) = bookmark_from_command(&string_command.command, demo_tick, server_tick, "string_command") {
+                    result.push(bookmark);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn packet_mode_signals(packet: &Packet<'_>) -> Vec<String> {
+    let mut signals = Vec::new();
+    if let Packet::ConsoleCmd(console) = packet { consider_mode_signal(&mut signals, "console", &console.command); }
+    let messages = match packet {
+        Packet::Signon(message_packet) | Packet::Message(message_packet) => Some(&message_packet.messages),
+        _ => None,
+    };
+    if let Some(messages) = messages {
+        for message in messages {
+            match message {
+                Message::StringCmd(command) => consider_mode_signal(&mut signals, "stringcmd", &command.command),
+                Message::SetConVar(values) => for value in &values.vars {
+                    let combined = format!("{}={}", value.key, value.value);
+                    consider_mode_signal(&mut signals, "cvar", &combined);
+                },
+                Message::ServerInfo(info) => {
+                    signals.push(format!("server_name:{}", info.server_name));
+                    signals.push(format!("server_max_players:{}", info.max_player_count));
+                }
+                _ => {}
+            }
+        }
+    }
+    signals
+}
+
+fn consider_mode_signal(signals: &mut Vec<String>, source: &str, command: &str) {
+    let lower = command.to_ascii_lowercase();
+    if ["rgl", "mp_tournament", "tf_tournament", "whitelist", "highlander", "etf2l", "ugc", "ozfortress", "readyup"]
+        .iter().any(|token| lower.contains(token)) {
+        signals.push(format!("{source}:{command}"));
     }
 }
 
@@ -321,6 +448,9 @@ fn main() -> Result<(), MainError> {
     let mut state_delta_writer = StateDeltaWriter::default();
     let mut packet_count: u64 = 0;
     let mut usercmd_packet_count: u64 = 0;
+    let mut server_info_stv: Option<bool> = None;
+    let mut bookmarks = Vec::<DemoBookmark>::new();
+    let mut mode_signals = BTreeSet::<String>::new();
 
     loop {
         // RawPacketStream positions are bit positions in the original demo stream.
@@ -340,6 +470,11 @@ fn main() -> Result<(), MainError> {
         if matches!(&packet, Packet::UserCmd(_)) {
             usercmd_packet_count += 1;
         }
+        if let Some(stv) = packet_server_info_stv(&packet) {
+            server_info_stv = Some(server_info_stv.unwrap_or(false) || stv);
+        }
+        bookmarks.extend(packet_bookmarks(&packet, packet_server_tick));
+        mode_signals.extend(packet_mode_signals(&packet));
 
         // Write the complete decoded packet as one independent JSON line.
         // This streams to disk and does not keep the full match in memory.
@@ -396,13 +531,23 @@ fn main() -> Result<(), MainError> {
         .collect();
     let players_file = File::create(output_dir.join("players.json"))?;
     serde_json::to_writer_pretty(BufWriter::new(players_file), &players)?;
+    let bookmarks_file = File::create(output_dir.join("bookmarks.json"))?;
+    serde_json::to_writer_pretty(
+        BufWriter::new(bookmarks_file),
+        &json!({
+            "format": "tf2-frag-demo-bookmarks",
+            "format_version": 1,
+            "bookmarks": bookmarks,
+        }),
+    )?;
     let manifest = json!({
         "format": "tf-demo-parser-decoded-packet-stream",
         "format_version": 1,
         "source_demo": input_path.to_string_lossy(),
         "packet_count": packet_count,
         "state_sample_count": state_delta_writer.sample_count,
-        "demo_capture": capture_metadata(&header, usercmd_packet_count),
+        "demo_capture": capture_metadata(&header, usercmd_packet_count, server_info_stv),
+        "mode_signals": mode_signals,
         "parser_reported_incomplete": packet_stream.incomplete,
         "files": {
             "header": "header.json",
@@ -411,6 +556,7 @@ fn main() -> Result<(), MainError> {
             "events": "events.ndjson",
             "state_samples": "state_samples.ndjson",
             "players": "players.json",
+            "bookmarks": "bookmarks.json",
             "frag_candidates": "frag_candidates.ndjson",
             "frag_summary": "frag_summary.json"
         },
@@ -419,7 +565,8 @@ fn main() -> Result<(), MainError> {
             "packet_index.ndjson contains packet order, tick, type, and original stream bit ranges",
             "events.ndjson contains normalized decoded game events for highlight analysis",
             "state_samples.ndjson contains parser-reconstructed player and projectile state deltas",
-            "frag_candidates.ndjson and frag_summary.json are written by analyze_frags.py after parsing",
+            "bookmarks.json contains every supported bookmark command embedded in the demo",
+            "frag_candidates.ndjson and frag_summary.json are written by the Rust analyzer after parsing",
             "keep the original .dem file as the bit-exact source archive"
         ]
     });

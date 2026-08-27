@@ -12,6 +12,17 @@ export struct FilterOption {
     selected: bool,
 }
 
+export struct CameraKillRow {
+    candidate-key: string,
+    candidate-label: string,
+    kill-index: int,
+    kill-number: int,
+    victim: string,
+    tick: int,
+    demo-type: string,
+    camera: string,
+}
+
 component AutoScrollLog inherits ScrollView {
     in property <string> log-text;
     vertical-scrollbar-policy: always-on;
@@ -440,6 +451,9 @@ export component AppWindow inherits Window {
     in-out property <int> selected-count: 0;
     in-out property <bool> all-visible-selected: false;
     in-out property <length> candidate-horizontal-offset: 0px;
+    in-out property <bool> camera-options-open: false;
+    in-out property <[CameraKillRow]> camera-kill-rows;
+    in-out property <string> camera-options-summary: "Original camera for every selected kill";
 
     in-out property <int> lead-seconds: 8;
     in-out property <int> outro-seconds: 3;
@@ -500,6 +514,7 @@ export component AppWindow inherits Window {
     callback set-tag-filter(string); callback toggle-class-filter(string); callback toggle-map-filter(string); callback search-map-filters(string);
     callback toggle-server-type-filter(string); callback search-server-type-filters(string); callback set-recorded-filter(string);
     callback preview-selected(); callback record-selected(); callback choose-setting-path(string); callback save-settings(); callback recording-settings-changed();
+    callback open-camera-options(); callback set-kill-camera(string, int, string); callback apply-camera-to-all(string);
     callback view-selected-details(); callback view-recording-logs(); callback update-recording-estimate(); callback choose-custom-resources(string);
 
     changed tf2-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
@@ -720,8 +735,9 @@ export component AppWindow inherits Window {
                 height: 34px; spacing: 5px;
                 Tf2LineEdit { text <=> root.tag-filter; placeholder: "FILTER TAGS"; centered: true; edited(value) => { root.set-tag-filter(value); } focus-lost => { root.tag-filter = ""; root.set-tag-filter(""); } }
                 Tf2Button { width: 98px; height: 32px; text: root.candidate-filters-open ? "CLOSE" : "FILTERS"; clicked => { root.candidate-filters-open = !root.candidate-filters-open; } }
-                Tf2Button { width: 110px; height: 32px; text: "PREVIEW"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
-                Tf2Button { width: 110px; height: 32px; text: "RECORD"; enabled: root.selected-count > 0; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
+                Tf2Button { width: 100px; height: 32px; label-font-size: 11px; text: "CAMERA"; enabled: root.selected-count > 0; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.open-camera-options(); } }
+                Tf2Button { width: 100px; height: 32px; text: "PREVIEW"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
+                Tf2Button { width: 100px; height: 32px; text: "RECORD"; enabled: root.selected-count > 0; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
             }
             if root.compact && root.candidate-filters-open : Tf2Panel {
                 height: 112px;
@@ -739,6 +755,7 @@ export component AppWindow inherits Window {
                 height: 40px; spacing: 7px;
                 Tf2Button { width: 170px; text: root.all-visible-selected ? "DESELECT ALL" : "SELECT ALL"; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.select-all-visible(); } }
                 Tf2Button { width: 190px; text: "PREVIEW IN TF2"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
+                Tf2Button { width: 175px; text: "CAMERA OPTIONS"; enabled: root.selected-count > 0; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.open-camera-options(); } }
                 Tf2Button { width: 205px; text: "RECORD WITH HLAE"; enabled: root.selected-count > 0; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
                 Tf2Button { width: 145px; text: "VIEW DETAILS"; enabled: root.selected-count == 1; clicked => { root.view-selected-details(); } }
                 Rectangle { horizontal-stretch: 1; } Tf2Body { text: root.selected-count + " SELECTED"; color: Tf2Colors.muted; }
@@ -1080,6 +1097,87 @@ export component AppWindow inherits Window {
                         CandidateDetailSection { heading: "WHY IT RECEIVED THIS SCORE"; body: root.candidate-detail-score-breakdown; section-floor-height: 110px; }
                         CandidateDetailSection { heading: "FRAG TAGS"; body: root.candidate-detail-tags; section-floor-height: 72px; }
                     }
+                }
+            }
+        }
+
+        if root.camera-options-open : Rectangle {
+            x: 0px; y: 0px; width: root.width; height: root.height;
+            z: 100;
+            background: #b8000000;
+            TouchArea { }
+            Tf2Panel {
+                x: Math.max(12px, (parent.width - Math.min(1060px, parent.width - 24px)) / 2);
+                y: Math.max(12px, (parent.height - Math.min(680px, parent.height - 24px)) / 2);
+                width: Math.min(1060px, parent.width - 24px);
+                height: Math.min(680px, parent.height - 24px);
+                VerticalLayout {
+                    padding: root.compact ? 10px : 16px;
+                    spacing: root.compact ? 7px : 10px;
+                    HorizontalLayout {
+                        height: root.compact ? 34px : 42px;
+                        Tf2Heading { text: "KILL CAMERA OPTIONS"; font-size: root.compact ? 17px : 22px; }
+                        Rectangle { horizontal-stretch: 1; }
+                        Tf2Button { width: root.compact ? 90px : 115px; height: root.compact ? 32px : 38px; text: "CLOSE"; clicked => { root.camera-options-open = false; } }
+                    }
+                    Tf2Body {
+                        height: root.compact ? 36px : 42px;
+                        text: "Every kill has all three choices. STV uses spectator targeting; POV uses a smoothed HLAE camera when a victim or outside view is selected.";
+                        color: Tf2Colors.muted; font-size: root.compact ? 11px : 13px; wrap: word-wrap;
+                    }
+                    Tf2Panel {
+                        height: root.compact ? 82px : 96px;
+                        VerticalLayout {
+                            padding: 8px; spacing: 5px;
+                            Tf2Label { height: 18px; text: "APPLY ONE CAMERA TO EVERY SELECTED KILL"; }
+                            HorizontalLayout {
+                                spacing: 7px;
+                                Tf2Button { text: "ORIGINAL / ATTACKER"; label-font-size: root.compact ? 10px : 12px; clicked => { root.apply-camera-to-all("Original / Attacker"); } }
+                                Tf2Button { text: "VICTIM FOCUS"; label-font-size: root.compact ? 10px : 12px; clicked => { root.apply-camera-to-all("Victim Focus"); } }
+                                Tf2Button { text: "OUTSIDE / CINEMATIC"; label-font-size: root.compact ? 10px : 12px; clicked => { root.apply-camera-to-all("Outside / Cinematic"); } }
+                            }
+                        }
+                    }
+                    ListView {
+                        vertical-stretch: 1;
+                        vertical-scrollbar-policy: as-needed;
+                        for kill in root.camera-kill-rows : Rectangle {
+                            height: root.compact ? 86px : 94px;
+                            background: Tf2Colors.panel-dark;
+                            border-width: 1px; border-color: Tf2Colors.border;
+                            VerticalLayout {
+                                padding: 7px; spacing: 5px;
+                                HorizontalLayout {
+                                    height: 24px; spacing: 8px;
+                                    Tf2Label { width: 58px; text: "KILL " + kill.kill-number; }
+                                    Tf2Body { width: 86px; text: kill.demo-type; color: #8ab3cd; }
+                                    Tf2Body { text: kill.candidate-label + "  •  " + kill.victim + "  •  TICK " + kill.tick; color: Tf2Colors.cream; overflow: elide; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 7px;
+                                    Tf2Button {
+                                        text: "ORIGINAL / ATTACKER"; label-font-size: root.compact ? 10px : 12px;
+                                        tone: kill.camera == "Original / Attacker" ? Tf2Colors.gold : Tf2Colors.neutral;
+                                        hover-tone: kill.camera == "Original / Attacker" ? Tf2Colors.gold-hover : Tf2Colors.neutral-hover;
+                                        clicked => { root.set-kill-camera(kill.candidate-key, kill.kill-index, "Original / Attacker"); }
+                                    }
+                                    Tf2Button {
+                                        text: "VICTIM FOCUS"; label-font-size: root.compact ? 10px : 12px;
+                                        tone: kill.camera == "Victim Focus" ? Tf2Colors.gold : Tf2Colors.neutral;
+                                        hover-tone: kill.camera == "Victim Focus" ? Tf2Colors.gold-hover : Tf2Colors.neutral-hover;
+                                        clicked => { root.set-kill-camera(kill.candidate-key, kill.kill-index, "Victim Focus"); }
+                                    }
+                                    Tf2Button {
+                                        text: "OUTSIDE / CINEMATIC"; label-font-size: root.compact ? 10px : 12px;
+                                        tone: kill.camera == "Outside / Cinematic" ? Tf2Colors.gold : Tf2Colors.neutral;
+                                        hover-tone: kill.camera == "Outside / Cinematic" ? Tf2Colors.gold-hover : Tf2Colors.neutral-hover;
+                                        clicked => { root.set-kill-camera(kill.candidate-key, kill.kill-index, "Outside / Cinematic"); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Tf2Body { height: 24px; text: root.camera-options-summary; color: #8ab3cd; font-size: root.compact ? 11px : 13px; overflow: elide; }
                 }
             }
         }

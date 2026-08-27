@@ -10,7 +10,7 @@ mod scheduler;
 
 use crate::{
     batch::{BatchController, ProgressEvent},
-    models::{AppSettings, Candidate},
+    models::{AppSettings, CameraStyle, Candidate, CandidateCameraPlan},
     recording::{estimate_recording_space, has_recoverable_recording_sessions, latest_recording_session, launch_hlae_batch, preview_candidate, recover_interrupted_profile, recover_recording_sessions, shutdown_active_recording, RecordingIndex, RecordingProgress, RecordingProgressSink},
     scheduler::PerformanceProfile,
 };
@@ -21,7 +21,7 @@ use slint::{Model, ModelRc, SharedString, VecModel, Weak};
 use std::{
     any::Any,
     backtrace::Backtrace,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     panic::{self, AssertUnwindSafe},
@@ -486,6 +486,7 @@ struct State {
     recording_index: RecordingIndex,
     last_recording_session: Option<PathBuf>,
     recording_active: bool,
+    camera_plans: BTreeMap<String, CandidateCameraPlan>,
 }
 
 fn crash_log_path() -> PathBuf {
@@ -592,6 +593,7 @@ fn main() -> Result<()> {
     let state = Arc::new(Mutex::new(State {
         demos: Vec::new(), export_root: None, candidates: Vec::new(), recorded: Vec::new(), visible: Vec::new(), selected: Vec::new(),
         candidate_filters: CandidateUiFilters::default(), settings, controller: None, recording_index: RecordingIndex::load(), last_recording_session: None, recording_active: false,
+        camera_plans: BTreeMap::new(),
     }));
     bind_file_callbacks(&ui, &state);
     bind_batch_callbacks(&ui, &state);
@@ -1226,17 +1228,72 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         update_recording_estimate(&ui, &state_for_all);
     });
     let weak = ui.as_weak();
+    let camera_state = state.clone();
+    ui.on_open_camera_options(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let mut state = camera_state.lock();
+        if selected_candidates(&state).is_empty() {
+            ui.set_status_text("Select at least one candidate before choosing kill cameras".into());
+            return;
+        }
+        sync_camera_options_ui(&ui, &mut state);
+        ui.set_camera_options_open(true);
+    });
+    let weak = ui.as_weak();
+    let camera_state = state.clone();
+    ui.on_set_kill_camera(move |candidate_key, kill_index, camera| {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(style) = CameraStyle::from_label(camera.as_str()) else { return };
+        let mut state = camera_state.lock();
+        ensure_selected_camera_plans(&mut state);
+        if let Some(kill) = state
+            .camera_plans
+            .get_mut(candidate_key.as_str())
+            .and_then(|plan| plan.kills.get_mut(kill_index.max(0) as usize))
+        {
+            kill.style = style;
+        }
+        sync_camera_options_ui(&ui, &mut state);
+    });
+    let weak = ui.as_weak();
+    let camera_state = state.clone();
+    ui.on_apply_camera_to_all(move |camera| {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(style) = CameraStyle::from_label(camera.as_str()) else { return };
+        let mut state = camera_state.lock();
+        ensure_selected_camera_plans(&mut state);
+        let selected_keys = state
+            .candidates
+            .iter()
+            .zip(&state.selected)
+            .filter_map(|(candidate, selected)| selected.then(|| candidate.camera_plan_key()))
+            .collect::<BTreeSet<_>>();
+        for plan in state.camera_plans.values_mut().filter(|plan| selected_keys.contains(&plan.candidate_key)) {
+            for kill in &mut plan.kills {
+                kill.style = style;
+            }
+        }
+        sync_camera_options_ui(&ui, &mut state);
+    });
+    let weak = ui.as_weak();
     let state_for_preview = state.clone();
     ui.on_preview_selected(move || {
         let Some(ui) = weak.upgrade() else { return };
-        let (candidate, mut settings) = {
-            let state = state_for_preview.lock();
-            let selected = selected_candidates(&state);
+        let (candidate, camera_plan, mut settings) = {
+            let mut state = state_for_preview.lock();
+            let selected = selected_candidates(&state).into_iter().cloned().collect::<Vec<_>>();
             if selected.len() != 1 {
                 ui.set_status_text("Select exactly one candidate to preview".into());
                 return;
             }
-            (selected[0].clone(), state.settings.clone())
+            let candidate = selected[0].clone();
+            let key = candidate.camera_plan_key();
+            let camera_plan = state
+                .camera_plans
+                .entry(key)
+                .or_insert_with(|| candidate.default_camera_plan())
+                .clone();
+            (candidate, camera_plan, state.settings.clone())
         };
 
         let entered_path = PathBuf::from(ui.get_tf2_path().to_string());
@@ -1267,7 +1324,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
 
         settings.lead_seconds = ui.get_lead_seconds().clamp(0, 60) as u32;
 
-        let result = preview_candidate(&candidate, &settings);
+        let result = preview_candidate(&candidate, &camera_plan, &settings);
         ui.set_status_text(result
             .map(|tick| format!("TF2 preview launched at demo tick {tick}"))
             .unwrap_or_else(|error| error.to_string())
@@ -1335,6 +1392,10 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             ui.set_status_text("All selected candidates already have matching recordings".into());
             return;
         }
+        let camera_plans = {
+            let mut state = state_for_record.lock();
+            selected_camera_plans(&mut state, &selected)
+        };
         let recording_preflight = match estimate_recording_space(&selected, &settings) {
             Ok(estimate) => estimate,
             Err(error) => {
@@ -1405,14 +1466,20 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 }
             });
         });
-        match launch_hlae_batch(&selected, &settings, replace_existing, Some(progress)) {
+        match launch_hlae_batch(&selected, &camera_plans, &settings, replace_existing, Some(progress)) {
             Ok(path) => {
                 state_for_record.lock().last_recording_session = Some(path.clone());
                 ui.set_status_text(format!("Offline HLAE recording launched: {}", path.display()).into());
             }
             Err(error) => {
                 state_for_record.lock().recording_active = false;
-                ui.set_status_text(error.to_string().into());
+                let message = format!("HLAE recording could not start:\n\n{error}");
+                rfd::MessageDialog::new()
+                    .set_title("HLAE Launch Failed")
+                    .set_description(&message)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                ui.set_status_text(message.into());
             }
         }
     });
@@ -1603,6 +1670,95 @@ fn build_candidate_rows(
 
 fn selected_candidates(state: &State) -> Vec<&Candidate> {
     state.candidates.iter().zip(&state.selected).filter_map(|(candidate, selected)| selected.then_some(candidate)).collect()
+}
+
+fn ensure_selected_camera_plans(state: &mut State) {
+    let candidates = state
+        .candidates
+        .iter()
+        .zip(&state.selected)
+        .filter_map(|(candidate, selected)| selected.then(|| candidate.clone()))
+        .collect::<Vec<_>>();
+    for candidate in candidates {
+        let key = candidate.camera_plan_key();
+        state
+            .camera_plans
+            .entry(key)
+            .or_insert_with(|| candidate.default_camera_plan());
+    }
+}
+
+fn selected_camera_plans(state: &mut State, candidates: &[Candidate]) -> Vec<CandidateCameraPlan> {
+    for candidate in candidates {
+        let key = candidate.camera_plan_key();
+        state
+            .camera_plans
+            .entry(key)
+            .or_insert_with(|| candidate.default_camera_plan());
+    }
+    candidates
+        .iter()
+        .filter_map(|candidate| state.camera_plans.get(&candidate.camera_plan_key()).cloned())
+        .collect()
+}
+
+fn sync_camera_options_ui(ui: &AppWindow, state: &mut State) {
+    ensure_selected_camera_plans(state);
+    let mut rows = Vec::new();
+    let selected_keys = state
+        .candidates
+        .iter()
+        .zip(&state.selected)
+        .filter_map(|(candidate, selected)| selected.then(|| candidate.camera_plan_key()))
+        .collect::<BTreeSet<_>>();
+
+    for candidate in state
+        .candidates
+        .iter()
+        .zip(&state.selected)
+        .filter_map(|(candidate, selected)| selected.then_some(candidate))
+    {
+        let key = candidate.camera_plan_key();
+        let Some(plan) = state.camera_plans.get(&key) else { continue };
+        let candidate_label = if candidate.candidate_id.trim().is_empty() {
+            Path::new(&candidate.source_demo)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Candidate")
+                .to_owned()
+        } else {
+            candidate.candidate_id.clone()
+        };
+        for kill in &plan.kills {
+            rows.push(CameraKillRow {
+                candidate_key: key.clone().into(),
+                candidate_label: candidate_label.clone().into(),
+                kill_index: kill.kill_index.min(i32::MAX as usize) as i32,
+                kill_number: kill.kill_index.saturating_add(1).min(i32::MAX as usize) as i32,
+                victim: kill.victim_name.clone().into(),
+                tick: kill.event_tick.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                demo_type: plan.source.label().into(),
+                camera: kill.style.label().into(),
+            });
+        }
+    }
+
+    let mut original = 0usize;
+    let mut victim = 0usize;
+    let mut outside = 0usize;
+    for plan in state.camera_plans.values().filter(|plan| selected_keys.contains(&plan.candidate_key)) {
+        for kill in &plan.kills {
+            match kill.style {
+                CameraStyle::OriginalAttacker => original += 1,
+                CameraStyle::VictimFocus => victim += 1,
+                CameraStyle::OutsideCinematic => outside += 1,
+            }
+        }
+    }
+    ui.set_camera_kill_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_camera_options_summary(
+        format!("Camera plan: {original} original/attacker, {victim} victim focus, {outside} outside/cinematic").into(),
+    );
 }
 
 fn load_candidates(path: &Path) -> Result<Vec<Candidate>> {

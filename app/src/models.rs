@@ -82,6 +82,182 @@ impl Candidate {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DemoCameraSource {
+    Stv,
+    #[default]
+    Pov,
+}
+
+impl DemoCameraSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stv => "STV",
+            Self::Pov => "POV",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraStyle {
+    #[default]
+    OriginalAttacker,
+    VictimFocus,
+    OutsideCinematic,
+}
+
+impl CameraStyle {
+    pub const ORIGINAL_LABEL: &'static str = "Original / Attacker";
+    pub const VICTIM_LABEL: &'static str = "Victim Focus";
+    pub const OUTSIDE_LABEL: &'static str = "Outside / Cinematic";
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::OriginalAttacker => Self::ORIGINAL_LABEL,
+            Self::VictimFocus => Self::VICTIM_LABEL,
+            Self::OutsideCinematic => Self::OUTSIDE_LABEL,
+        }
+    }
+
+    pub fn from_label(value: &str) -> Option<Self> {
+        match value.trim() {
+            Self::ORIGINAL_LABEL => Some(Self::OriginalAttacker),
+            Self::VICTIM_LABEL => Some(Self::VictimFocus),
+            Self::OUTSIDE_LABEL => Some(Self::OutsideCinematic),
+            _ => None,
+        }
+    }
+
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct KillCameraPlan {
+    pub kill_index: usize,
+    pub event_tick: i64,
+    pub victim_user_id: i64,
+    pub victim_name: String,
+    pub style: CameraStyle,
+    pub victim_hold_ticks: i64,
+    pub attacker_position: Option<[f64; 3]>,
+    pub victim_position: Option<[f64; 3]>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CandidateCameraPlan {
+    pub candidate_key: String,
+    pub candidate_id: String,
+    pub source: DemoCameraSource,
+    pub kills: Vec<KillCameraPlan>,
+}
+
+impl Candidate {
+    pub fn camera_source(&self) -> DemoCameraSource {
+        if self.demo_context.capture_type.eq_ignore_ascii_case("stv")
+            || (self.demo_context.analysis_scope.eq_ignore_ascii_case("all_players")
+                && self.demo_context.pov_player_user_id.is_none())
+        {
+            DemoCameraSource::Stv
+        } else {
+            DemoCameraSource::Pov
+        }
+    }
+
+    pub fn camera_plan_key(&self) -> String {
+        if !self.candidate_id.trim().is_empty() {
+            return self.candidate_id.clone();
+        }
+        format!(
+            "{}:{}:{}:{}",
+            self.source_demo, self.round_index, self.clip_start_tick, self.clip_end_tick
+        )
+    }
+
+    pub fn default_camera_plan(&self) -> CandidateCameraPlan {
+        let mut kills = self
+            .kills
+            .iter()
+            .enumerate()
+            .map(|(kill_index, kill)| KillCameraPlan {
+                kill_index,
+                // VDM actions use demo ticks. Server/event ticks are retained
+                // in parsed evidence but can be offset from demo playback.
+                event_tick: json_i64(kill, &["demo_tick", "tick", "event_tick"])
+                    .or_else(|| self.point_of_kill_ticks.get(kill_index).copied())
+                    .unwrap_or(self.clip_start_tick),
+                victim_user_id: json_i64(kill, &["victim_user_id"]).unwrap_or_default(),
+                victim_name: json_string(kill, &["victim_name"])
+                    .unwrap_or_else(|| format!("Victim {}", kill_index + 1)),
+                style: CameraStyle::OriginalAttacker,
+                victim_hold_ticks: 20,
+                attacker_position: json_position(kill, "attacker"),
+                victim_position: json_position(kill, "victim"),
+            })
+            .collect::<Vec<_>>();
+
+        if kills.is_empty() {
+            let ticks = if self.point_of_kill_ticks.is_empty() {
+                vec![self.clip_start_tick]
+            } else {
+                self.point_of_kill_ticks.clone()
+            };
+            kills = ticks
+                .into_iter()
+                .enumerate()
+                .map(|(kill_index, event_tick)| KillCameraPlan {
+                    kill_index,
+                    event_tick,
+                    victim_name: format!("Victim {}", kill_index + 1),
+                    style: CameraStyle::OriginalAttacker,
+                    victim_hold_ticks: 20,
+                    ..KillCameraPlan::default()
+                })
+                .collect();
+        }
+
+        CandidateCameraPlan {
+            candidate_key: self.camera_plan_key(),
+            candidate_id: self.candidate_id.clone(),
+            source: self.camera_source(),
+            kills,
+        }
+    }
+}
+
+fn json_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| value.get(*key).and_then(Value::as_i64))
+}
+
+fn json_string(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn json_position(kill: &Value, player: &str) -> Option<[f64; 3]> {
+    let values = kill
+        .get("state_evidence")?
+        .get(player)?
+        .get("position")?
+        .as_array()?;
+    if values.len() < 3 {
+        return None;
+    }
+    Some([
+        values[0].as_f64()?,
+        values[1].as_f64()?,
+        values[2].as_f64()?,
+    ])
+}
+
 #[derive(Clone, Debug)]
 pub struct DemoJob {
     pub order: usize,
@@ -272,6 +448,55 @@ impl AppSettings {
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+
+    #[test]
+    fn camera_plan_uses_demo_ticks_victims_and_world_positions() {
+        let candidate = Candidate {
+            candidate_id: "r2-p17-t1900".into(),
+            point_of_kill_ticks: vec![1_000],
+            kills: vec![serde_json::json!({
+                "demo_tick": 1_000,
+                "event_tick": 1_913,
+                "victim_user_id": 42,
+                "victim_name": "Victim",
+                "state_evidence": {
+                    "attacker": { "position": [0.0, 16.0, 32.0] },
+                    "victim": { "position": [256.0, 80.0, 40.0] }
+                }
+            })],
+            demo_context: DemoContext {
+                capture_type: "stv".into(),
+                analysis_scope: "all_players".into(),
+                ..DemoContext::default()
+            },
+            ..Candidate::default()
+        };
+
+        let plan = candidate.default_camera_plan();
+        assert_eq!(plan.source, DemoCameraSource::Stv);
+        assert_eq!(plan.kills.len(), 1);
+        assert_eq!(plan.kills[0].event_tick, 1_000);
+        assert_eq!(plan.kills[0].victim_user_id, 42);
+        assert_eq!(plan.kills[0].victim_name, "Victim");
+        assert_eq!(plan.kills[0].attacker_position, Some([0.0, 16.0, 32.0]));
+        assert_eq!(plan.kills[0].victim_position, Some([256.0, 80.0, 40.0]));
+        assert_eq!(plan.kills[0].victim_hold_ticks, 20);
+    }
+
+    #[test]
+    fn pov_export_classification_stays_pov_even_with_roster_match() {
+        let candidate = Candidate {
+            demo_context: DemoContext {
+                capture_type: "pov".into(),
+                analysis_scope: "pov_player_only".into(),
+                pov_player_user_id: Some(663),
+                roster_match_available: true,
+                ..DemoContext::default()
+            },
+            ..Candidate::default()
+        };
+        assert_eq!(candidate.camera_source(), DemoCameraSource::Pov);
+    }
 
     #[test]
     fn older_settings_without_encoding_fields_receive_safe_defaults() {

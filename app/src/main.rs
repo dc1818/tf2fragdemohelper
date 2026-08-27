@@ -1473,7 +1473,13 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             }
             Err(error) => {
                 state_for_record.lock().recording_active = false;
-                ui.set_status_text(error.to_string().into());
+                let message = format!("HLAE recording could not start:\n\n{error}");
+                rfd::MessageDialog::new()
+                    .set_title("HLAE Launch Failed")
+                    .set_description(&message)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                ui.set_status_text(message.into());
             }
         }
     });

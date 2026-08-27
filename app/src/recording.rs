@@ -1029,7 +1029,15 @@ pub fn launch_hlae_batch(
             groups.push((source.clone(), pass));
         }
     }
-    let prepared_clips = prepare_recording_clips(candidates, camera_plans, session_name, &session, settings, replace_existing)?;
+    let prepared_clips = prepare_recording_clips(
+        candidates,
+        camera_plans,
+        session_name,
+        &session,
+        settings,
+        replace_existing,
+    )
+    .context("could not prepare the recording working paths")?;
     let prepared_by_order = prepared_clips.iter().map(|clip| (clip.order, clip)).collect::<HashMap<_, _>>();
     write_recording_manifest(&session, &prepared_clips, settings, &game, "Pending", None)?;
     let mut staged_relatives = Vec::new();
@@ -1073,7 +1081,10 @@ pub fn launch_hlae_batch(
             .iter()
             .map(|clip| (clip.candidate.camera_plan_key(), clip.camera_plan.clone()))
             .collect::<HashMap<_, _>>();
-        fs::write(staged.with_extension("vdm"), vdm_text(clips, session_name, next.as_deref(), &plans, settings)?)?;
+        let vdm = vdm_text(clips, session_name, next.as_deref(), &plans, settings)
+            .context("could not build the per-kill camera VDM")?;
+        fs::write(staged.with_extension("vdm"), vdm)
+            .context("could not write the per-kill camera VDM")?;
     }
 
     let (width, height) = parse_resolution(&settings.resolution);
@@ -1116,7 +1127,8 @@ pub fn launch_hlae_batch(
         tf_process_name,
         settings,
         vec![staged_root.clone(), cfg_root.clone()],
-    )?;
+    )
+    .context("could not stage the temporary TF2 recording profile")?;
     log_recording_diagnostic(&diagnostic_log, format!("Recording profile staged; original TF2 files are backed up in {}", profile.backup_directory.display()));
     let recording_log = game.join("tf2fragdemohelper_recording.log");
     let _ = fs::remove_file(&recording_log);
@@ -2293,6 +2305,7 @@ fn prepare_recording_clips(
     let encoded = !settings.recording_format.contains("Image");
     let extension = encoded_extension(settings);
     let mut clips = Vec::new();
+    let mut reserved_identifiers = HashSet::new();
     let camera_plans = camera_plans
         .iter()
         .map(|plan| (plan.candidate_key.clone(), plan.clone()))
@@ -2312,25 +2325,28 @@ fn prepare_recording_clips(
             .get(&candidate.camera_plan_key())
             .cloned()
             .unwrap_or_else(|| candidate.default_camera_plan());
-        let camera_token = camera_plan
-            .kills
-            .iter()
-            .take(12)
-            .map(|kill| match kill.style {
-                CameraStyle::OriginalAttacker => 'o',
-                CameraStyle::VictimFocus => 'v',
-                CameraStyle::OutsideCinematic => 'c',
-            })
-            .collect::<String>();
+        // Keep the established filename length. The camera plan is persisted in
+        // the recording manifest and does not belong in the working/output path.
+        // Adding one token per kill can push the already-deep AppData session
+        // path past Windows/HLAE/FFmpeg path limits before HLAE is spawned.
         let base_identifier = format!(
-            "{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__cam{camera_token}__k{}",
+            "{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__k{}",
             recording_key_token(&recording_key)
         );
-        let recording_identifier = unique_recording_identifier(&settings.recording_output_directory, session, &base_identifier, encoded, extension);
+        let recording_identifier = unique_recording_identifier(
+            &settings.recording_output_directory,
+            &base_identifier,
+            encoded,
+            extension,
+            &reserved_identifiers,
+        );
+        reserved_identifiers.insert(recording_identifier.clone());
         let config_base = format!("{:03}_{}_t{}-{}", order, candidate_name, candidate.clip_start_tick, candidate.clip_end_tick);
         let capture_base = format!("tf2frag_{session_name}_{order:03}");
         let (working_path, final_output_path, frames_path, audio_path) = if encoded {
-            let working = session.join("working").join(&recording_identifier);
+            // HLAE writes into a short private folder. The descriptive output
+            // name is applied only when the completed file is moved out.
+            let working = session.join("working").join(format!("{order:03}"));
             let final_path = settings.recording_output_directory.join("Videos").join(format!("{recording_identifier}.{extension}"));
             fs::create_dir_all(&working)?;
             (Some(working), final_path, None, None)
@@ -2361,7 +2377,13 @@ fn prepare_recording_clips(
     Ok(clips)
 }
 
-fn unique_recording_identifier(root: &Path, session: &Path, base: &str, encoded: bool, extension: &str) -> String {
+fn unique_recording_identifier(
+    root: &Path,
+    base: &str,
+    encoded: bool,
+    extension: &str,
+    reserved: &HashSet<String>,
+) -> String {
     for suffix in 1usize.. {
         let candidate = if suffix == 1 { base.to_owned() } else { format!("{base}_{suffix}") };
         let final_path = if encoded {
@@ -2369,7 +2391,7 @@ fn unique_recording_identifier(root: &Path, session: &Path, base: &str, encoded:
         } else {
             root.join("Image Sequences").join(&candidate)
         };
-        if !final_path.exists() && !session.join("working").join(&candidate).exists() {
+        if !final_path.exists() && !reserved.contains(&candidate) {
             return candidate;
         }
     }
@@ -3637,6 +3659,24 @@ mod recording_tests {
             action.name == "Kill 2 victim chase" && action.commands.contains("spec_player #43")
         }));
         assert!(actions.iter().any(|action| action.name == "Kill 3 outside approach"));
+    }
+
+    #[test]
+    fn output_identifier_does_not_embed_camera_plan_or_reuse_batch_names() {
+        let root = std::env::temp_dir().join(format!(
+            "tf2frag-recording-identifier-test-{}",
+            std::process::id()
+        ));
+        let base = "demo__candidate__t900-1200__k1234567890abcdef";
+        let mut reserved = HashSet::new();
+
+        let first = unique_recording_identifier(&root, base, true, "mp4", &reserved);
+        assert_eq!(first, base);
+        assert!(!first.contains("__cam"));
+
+        reserved.insert(first);
+        let second = unique_recording_identifier(&root, base, true, "mp4", &reserved);
+        assert_eq!(second, format!("{base}_2"));
     }
 
     #[test]

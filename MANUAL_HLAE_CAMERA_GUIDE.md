@@ -5,7 +5,7 @@ This workflow opens one selected candidate at the chosen lead-in and lets you pl
 ## Launch the candidate
 
 1. Open the Candidates page and select exactly one candidate.
-2. Set `Before first tick` to the amount of setup time you want. The launcher seeks to that point before the first kill.
+2. Set `Before first tick` to the amount of setup time you want. The launcher starts from tick 0 and seeks forward to that point in jumps of no more than 15,000 ticks.
 3. Set `After last tick` for the end-of-clip reference. It is included in the manual capture folder name so the intended window stays visible.
 4. Choose the recording format, FPS, resolution, encoder, HUD, and other recording settings as usual.
 5. Click `Launch TF2 with HLAE`.
@@ -23,7 +23,7 @@ These binds exist only in the isolated session. Your complete original `tf/cfg` 
 | Up Arrow | Toggle the entire HUD off or on |
 | 1 | Print the complete temporary hotkey reminder in the console |
 | 2 | Move demo time back one second with `mirv_skip time -1` |
-| 3 | Return to the selected lead-in before the first kill |
+| 3 | Safely restart at tick 0, advance in steps of at most 15,000 ticks, and pause at the selected lead-in |
 | 4 | Cycle to each distinct kill tick in the candidate |
 | 5 | Pause or resume the demo |
 | 6 | Enter the manual MIRV camera |
@@ -46,7 +46,7 @@ While `mirv_input camera` is active, use W/A/S/D to move, R/F to move up/down, P
 6. For a simultaneous kill, place one view that contains both victims. For kills a few ticks apart, add a key near each victim and leave enough demo time between keys for a readable transition.
 7. Press - and inspect the keyframe list. To remove a bad key, use `mirv_campath remove <id>` in the console.
 8. Press Escape, then 8. Manual camera input must be ended because it overrides campath playback.
-9. Press 3 to rewind to the lead-in, close the console, and resume playback to preview the path.
+9. Press 3 to safely reload from tick 0 and return to the lead-in. The saved in-memory campath is retained and the demo pauses again when the staged seek finishes. Close the console and press 5 to preview the path.
 10. Press = when you want to preserve the path.
 
 Useful console commands:
@@ -62,7 +62,7 @@ mirv_campath load "C:/path/to/camera_path.xml"
 
 ## Record
 
-1. Rewind with 3.
+1. Return to the lead-in with 3. Wait for the staged seek to finish and pause there.
 2. Make sure campath playback is enabled with 8 and the console is closed.
 3. Press Up Arrow if you want the HUD hidden, then press 9 just before the portion you want to keep. The helper sets both `host_framerate` and `mirv_streams record fps` for encoded formats.
 4. Let the complete multi-kill sequence play.

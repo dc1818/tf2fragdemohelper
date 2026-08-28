@@ -1621,22 +1621,77 @@ fn death_json(death: &Death) -> Value {
     })
 }
 
+fn bookmark_entries(value: &Value) -> Vec<(i64, String)> {
+    let mut entries = Vec::new();
+
+    if let Some(bookmarks) = value.get("bookmarks").and_then(Value::as_array) {
+        for bookmark in bookmarks {
+            let tick = int_value(bookmark.get("tick")).unwrap_or_default();
+            if tick <= 0 {
+                continue;
+            }
+            let comment = ["comment", "value", "title", "description"]
+                .into_iter()
+                .find_map(|key| bookmark.get(key).and_then(Value::as_str))
+                .unwrap_or_default()
+                .to_owned();
+            entries.push((tick, comment));
+        }
+    }
+
+    // TF2 Demo Support does not normally embed ds_mark in the .dem stream.
+    // It writes a same-name JSON sidecar with records shaped as
+    // {"events":[{"tick":...,"name":"bookmark","value":"comment"}]}.
+    if let Some(events) = value.get("events").and_then(Value::as_array) {
+        for event in events {
+            let event_type = ["name", "type", "event", "event_type"]
+                .into_iter()
+                .find_map(|key| event.get(key).and_then(Value::as_str))
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            if !event_type.contains("bookmark") && event_type != "mark" && event_type != "ds_mark" {
+                continue;
+            }
+            let tick = int_value(event.get("tick")).unwrap_or_default();
+            if tick <= 0 {
+                continue;
+            }
+            let comment = ["value", "comment", "title", "description"]
+                .into_iter()
+                .find_map(|key| event.get(key).and_then(Value::as_str))
+                .unwrap_or_default()
+                .to_owned();
+            entries.push((tick, comment));
+        }
+    }
+
+    entries
+}
+
 fn append_bookmarks(export: &Path, source_demo: &str, context: &DemoContext, candidates: &mut Vec<Candidate>) -> Result<()> {
-    let mut paths = vec![export.join("bookmarks.json")];
+    let mut paths = BTreeSet::from([export.join("bookmarks.json")]);
     if !source_demo.is_empty() {
         let demo = PathBuf::from(source_demo);
-        paths.push(demo.with_extension("json"));
-        paths.push(PathBuf::from(format!("{}.json", demo.display())));
+        paths.insert(demo.with_extension("json"));
+        paths.insert(PathBuf::from(format!("{}.json", demo.display())));
     }
-    let Some(path) = paths.into_iter().find(|path| path.is_file()) else { return Ok(()) };
-    let value = read_json(&path);
-    let bookmarks = value.get("bookmarks").and_then(Value::as_array).cloned().unwrap_or_default();
-    for (index, bookmark) in bookmarks.into_iter().enumerate() {
-        let tick = bookmark.get("tick").and_then(Value::as_i64).unwrap_or_default();
-        if tick <= 0 {
-            continue;
+
+    // Merge all available sources. The parser-generated bookmarks file can be
+    // valid but empty, so it must never prevent the TF2 sidecar from loading.
+    let mut bookmarks = Vec::new();
+    let mut seen = HashSet::new();
+    for path in paths.into_iter().filter(|path| path.is_file()) {
+        for (tick, comment) in bookmark_entries(&read_json(&path)) {
+            let identity = (tick, comment.trim().to_ascii_lowercase());
+            if seen.insert(identity) {
+                bookmarks.push((tick, comment));
+            }
         }
-        let comment = bookmark.get("comment").and_then(Value::as_str).unwrap_or_default().to_owned();
+    }
+    bookmarks.sort_by_key(|(tick, _)| *tick);
+
+    for (index, (tick, comment)) in bookmarks.into_iter().enumerate() {
         let linked = candidates
             .iter()
             .filter(|candidate| tick >= candidate.clip_start_tick - OBJECTIVE_CONVERSION_TICKS && tick <= candidate.clip_end_tick + CAPTURE_DENIAL_TICKS)
@@ -1732,6 +1787,17 @@ mod tests {
 
     fn position_state(x: f64, y: f64, z: f64) -> Map<String, Value> {
         Map::from_iter([("position".into(), json!([x, y, z]))])
+    }
+
+    fn bookmark_test_directory(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "tf2-frag-helper-bookmark-{name}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -1840,5 +1906,87 @@ mod tests {
         assert!(low < medium);
         assert!(medium < extreme);
         assert_eq!(extreme, 20.0);
+    }
+
+    #[test]
+    fn tf2_demo_support_events_are_read_as_bookmarks() {
+        let value = json!({
+            "events": [
+                {"tick": 1_234, "name": "bookmark", "value": "nice frag"},
+                {"tick": 1_300, "name": "killstreak", "value": "3"}
+            ]
+        });
+        assert_eq!(bookmark_entries(&value), vec![(1_234, "nice frag".into())]);
+    }
+
+    #[test]
+    fn empty_parser_bookmarks_do_not_hide_tf2_sidecar_bookmark() {
+        let root = bookmark_test_directory("sidecar");
+        let export = root.join("export");
+        fs::create_dir_all(&export).unwrap();
+        fs::write(export.join("bookmarks.json"), br#"{"bookmarks":[]}"#).unwrap();
+        let demo = root.join("marked.dem");
+        fs::write(
+            demo.with_extension("json"),
+            br#"{"events":[{"tick":1234,"name":"bookmark","value":"saved play"}]}"#,
+        )
+        .unwrap();
+
+        let mut candidates = Vec::new();
+        append_bookmarks(
+            &export,
+            demo.to_str().unwrap(),
+            &DemoContext::default(),
+            &mut candidates,
+        )
+        .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].bookmark_tick, Some(1_234));
+        assert_eq!(candidates[0].bookmark_comment, "saved play");
+        assert_eq!(candidates[0].overall_score, BOOKMARK_SCORE);
+        assert!(candidates[0].tags.iter().any(|tag| tag == "bookmark"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bookmark_candidate_inherits_nearby_frag_tags_and_score() {
+        let root = bookmark_test_directory("linked");
+        let export = root.join("export");
+        fs::create_dir_all(&export).unwrap();
+        let demo = root.join("marked.dem");
+        fs::write(
+            demo.with_extension("json"),
+            br#"{"events":[{"tick":1000,"name":"Bookmark","value":"airshot"}]}"#,
+        )
+        .unwrap();
+        let original = Candidate {
+            candidate_id: "frag".into(),
+            source_demo: demo.display().to_string(),
+            overall_score: 20.0,
+            clip_start_tick: 900,
+            clip_end_tick: 1_100,
+            point_of_kill_ticks: vec![1_010],
+            tags: vec!["airshot".into()],
+            metrics: json!({"kills":1}),
+            ..Candidate::default()
+        };
+        let mut candidates = vec![original];
+
+        append_bookmarks(
+            &export,
+            demo.to_str().unwrap(),
+            &DemoContext::default(),
+            &mut candidates,
+        )
+        .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        let bookmarked = candidates.iter().find(|candidate| candidate.bookmark_tick == Some(1_000)).unwrap();
+        assert_eq!(bookmarked.overall_score, 20.0 + BOOKMARK_SCORE);
+        assert!(bookmarked.tags.iter().any(|tag| tag == "airshot"));
+        assert!(bookmarked.tags.iter().any(|tag| tag == "bookmark"));
+        assert_eq!(bookmarked.metrics["bookmark_score"], json!(BOOKMARK_SCORE));
+        fs::remove_dir_all(root).unwrap();
     }
 }

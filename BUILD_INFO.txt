@@ -1,5 +1,5 @@
-TF2 Frag Demo Helper - Relative-Height Airshot Scoring Build
-Source build ID: 74178911a18e
+TF2 Frag Demo Helper - TF2 Bookmark Sidecar Fix Build
+Source build ID: eb365875a86e
 Prepared: 2026-08-28 UTC
 
 This archive removes the experimental per-kill camera system from the UI,
@@ -35,6 +35,16 @@ Airshot behavior:
   skyward airshots.
 - Two geometry regression tests verify that a shared high ledge earns no bonus
   and that steeper, higher airshots score progressively more.
+
+Bookmark behavior:
+- TF2 Demo Support's same-name JSON sidecar is read using its real `events`
+  schema, including `ds_mark` bookmark ticks and comments.
+- Empty parser-generated bookmark output no longer masks the TF2 sidecar.
+- Embedded and sidecar bookmarks are merged and deduplicated.
+- Every bookmark creates a qualifying candidate worth 30 points; a bookmark
+  near a frag inherits that frag's applicable tags, score, and event data.
+- Regression tests cover sidecar parsing, empty-parser fallback, standalone
+  bookmark qualification, and nearby-frag inheritance.
 
 Preserved behavior:
 - Recording Settings autosave, including initial default settings persistence.

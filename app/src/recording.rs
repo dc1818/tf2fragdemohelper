@@ -1289,7 +1289,7 @@ pub fn launch_manual_hlae_candidate(
     thread::spawn(move || {
         if let Some(sink) = &monitor_progress {
             sink(RecordingProgress::Status(format!(
-                "Manual HLAE active at tick {target_tick} — 6 camera, 7 keyframe, 9/0 record"
+                "Manual HLAE paused at tick {target_tick} — 6 camera, 7 keyframe, 9/0 record"
             )));
         }
         let startup_deadline = Instant::now() + Duration::from_secs(90);
@@ -2861,10 +2861,12 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         &mut lines,
         &mut action,
         "PlayCommands",
-        "Activate manual HLAE controls",
+        "Activate manual HLAE controls and pause",
         target_tick + 1,
         None,
-        &format!("{focus}exec tf2fragdemohelper_manual"),
+        &format!(
+            "{focus}exec tf2fragdemohelper_manual; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+        ),
     );
     lines.push("}".into());
     lines.join("\n")
@@ -5177,6 +5179,22 @@ mod recording_tests {
         assert!(cfg.contains("bind \"0\" \"tf2frag_manual_stop\""));
         assert!(cfg.contains("bind \"=\" \"tf2frag_manual_save\""));
         assert!(!cfg.contains("bind \"F"));
+    }
+
+    #[test]
+    fn manual_hlae_vdm_pauses_after_seeking_to_selected_start() {
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 500);
+        assert!(vdm.contains("skiptotick \"500\""));
+        assert!(vdm.contains("starttick \"501\""));
+        assert!(vdm.contains(
+            "exec tf2fragdemohelper_manual; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+        ));
+
+        let controls = vdm
+            .find("exec tf2fragdemohelper_manual")
+            .expect("manual controls command");
+        let pause = vdm.find("demo_pause").expect("pause command");
+        assert!(pause > controls);
     }
 
     #[test]

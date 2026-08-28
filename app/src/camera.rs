@@ -3,7 +3,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
@@ -180,6 +180,18 @@ struct KillSpec {
     victim_user_id: i64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TrackWindow {
+    start_tick: i64,
+    end_tick: i64,
+}
+
+impl TrackWindow {
+    fn contains(self, tick: i64) -> bool {
+        tick >= self.start_tick && tick <= self.end_tick
+    }
+}
+
 pub fn plan_candidate(candidate: &Candidate, game_directory: &Path) -> Result<CinematicPlan> {
     plan_candidates(std::slice::from_ref(candidate), game_directory)?
         .into_iter()
@@ -195,15 +207,26 @@ pub fn plan_candidates(candidates: &[Candidate], game_directory: &Path) -> Resul
     let mut output = vec![None; candidates.len()];
     let mut geometry_cache = HashMap::<String, (String, BspGeometry)>::new();
     for (state_path, indices) in groups {
-        let mut users = BTreeSet::new();
+        let mut windows = BTreeMap::<i64, Vec<TrackWindow>>::new();
         for &index in &indices {
             let candidate = &candidates[index];
-            users.insert(candidate.attacker_user_id);
-            for kill in candidate.kills.iter().filter_map(kill_spec) {
-                users.insert(kill.victim_user_id);
-            }
+            let primary = candidate
+                .kills
+                .iter()
+                .filter_map(kill_spec)
+                .last()
+                .context("cinematic angle unavailable: a selected candidate has no usable primary kill")?;
+            let interval = camera_interval(candidate);
+            let padding = ((PRE_KILL_SECONDS + MAX_TRACK_GAP_SECONDS) / interval).ceil() as i64;
+            let window = TrackWindow {
+                start_tick: (primary.demo_tick - padding).max(0),
+                end_tick: primary.demo_tick + (MAX_TRACK_GAP_SECONDS / interval).ceil() as i64,
+            };
+            windows.entry(candidate.attacker_user_id).or_default().push(window);
+            windows.entry(primary.victim_user_id).or_default().push(window);
         }
-        let tracks = read_tracks(&state_path, &users)?;
+        coalesce_track_windows(&mut windows);
+        let tracks = read_tracks(&state_path, &windows)?;
         for index in indices {
             let candidate = &candidates[index];
             let map_key = candidate.map_name.trim().to_ascii_lowercase();
@@ -224,6 +247,23 @@ pub fn plan_candidates(candidates: &[Candidate], game_directory: &Path) -> Resul
         .into_iter()
         .map(|plan| plan.context("cinematic planner did not produce a plan for every candidate"))
         .collect()
+}
+
+fn coalesce_track_windows(windows: &mut BTreeMap<i64, Vec<TrackWindow>>) {
+    for user_windows in windows.values_mut() {
+        user_windows.sort_by_key(|window| window.start_tick);
+        let mut merged = Vec::<TrackWindow>::new();
+        for window in user_windows.drain(..) {
+            if let Some(previous) = merged.last_mut() {
+                if window.start_tick <= previous.end_tick.saturating_add(1) {
+                    previous.end_tick = previous.end_tick.max(window.end_tick);
+                    continue;
+                }
+            }
+            merged.push(window);
+        }
+        *user_windows = merged;
+    }
 }
 
 fn plan_candidate_from_tracks(
@@ -370,7 +410,10 @@ fn camera_state_path(candidate: &Candidate) -> Result<PathBuf> {
         .context("cinematic angle unavailable: state_samples.ndjson is missing; re-parse this demo with the cinematic build")
 }
 
-fn read_tracks(path: &Path, users: &BTreeSet<i64>) -> Result<HashMap<i64, Vec<TrackPoint>>> {
+fn read_tracks(
+    path: &Path,
+    windows: &BTreeMap<i64, Vec<TrackWindow>>,
+) -> Result<HashMap<i64, Vec<TrackPoint>>> {
     let input = BufReader::new(File::open(path)?);
     let mut tracks = HashMap::<i64, Vec<TrackPoint>>::new();
     let mut entity_users = HashMap::<u32, i64>::new();
@@ -385,7 +428,10 @@ fn read_tracks(path: &Path, users: &BTreeSet<i64>) -> Result<HashMap<i64, Vec<Tr
         for player in delta.players {
             let Some(user_id) = player.user_id else { continue };
             entity_users.insert(player.entity_id, user_id);
-            if !users.contains(&user_id) {
+            let Some(user_windows) = windows.get(&user_id) else {
+                continue;
+            };
+            if !user_windows.iter().any(|window| window.contains(delta.demo_tick)) {
                 continue;
             }
             let Some(generation) = player.spawn_generation else {
@@ -410,7 +456,10 @@ fn read_tracks(path: &Path, users: &BTreeSet<i64>) -> Result<HashMap<i64, Vec<Tr
         }
         for entity_id in delta.removed_players {
             if let Some(user_id) = entity_users.remove(&entity_id) {
-                if users.contains(&user_id) {
+                if windows
+                    .get(&user_id)
+                    .is_some_and(|user_windows| user_windows.iter().any(|window| window.contains(delta.demo_tick)))
+                {
                     let generation = tracks
                         .get(&user_id)
                         .and_then(|points| points.last())
@@ -1025,5 +1074,25 @@ mod tests {
         let loaded = read_vpk_file(&path, "MAPS/CP_TEST.BSP").unwrap().unwrap();
         let _ = fs::remove_file(path);
         assert_eq!(loaded, payload);
+    }
+
+    #[test]
+    fn selected_camera_windows_are_coalesced_but_remain_bounded() {
+        let mut windows = BTreeMap::from([(
+            31,
+            vec![
+                TrackWindow { start_tick: 200, end_tick: 260 },
+                TrackWindow { start_tick: 100, end_tick: 180 },
+                TrackWindow { start_tick: 175, end_tick: 220 },
+                TrackWindow { start_tick: 400, end_tick: 420 },
+            ],
+        )]);
+        coalesce_track_windows(&mut windows);
+        let merged = &windows[&31];
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].start_tick, 100);
+        assert_eq!(merged[0].end_tick, 260);
+        assert_eq!(merged[1].start_tick, 400);
+        assert_eq!(merged[1].end_tick, 420);
     }
 }

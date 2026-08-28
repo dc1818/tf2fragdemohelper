@@ -38,6 +38,8 @@ component AppHeader inherits Rectangle {
     in property <bool> has-export;
     in property <string> frame-debug;
     in property <string> recording-save-status;
+    in property <string> background-process-status;
+    in property <bool> background-process-active;
     in-out property <bool> menu-open;
     callback navigate(int);
 
@@ -79,12 +81,25 @@ component AppHeader inherits Rectangle {
         Tf2Button { width: 84px; height: 38px; text: root.menu-open ? "CLOSE" : "MENU"; clicked => { root.menu-open = !root.menu-open; } }
     }
 
-    // Autosave confirmation uses the open top-row space immediately before
-    // the fixed native-window-size diagnostic.
-    if root.page == 2 && root.recording-save-status != "" : Text {
-        x: root.compact ? parent.width - 442px : parent.width - 398px;
+    if root.background-process-status != "" : Text {
+        x: root.compact ? parent.width - 620px : parent.width - 656px;
         y: root.compact ? 7px : 9px;
-        width: root.compact ? 156px : 166px;
+        width: root.compact ? 330px : 420px;
+        height: root.compact ? 38px : 34px;
+        text: root.background-process-active ? "BACKGROUND: " + root.background-process-status : "BACKGROUND: READY";
+        color: root.background-process-active ? Tf2Colors.gold : #8ab3cd;
+        font-family: "TF2 Build";
+        font-size: root.compact ? 10px : 12px;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    // Autosave confirmation remains visible without covering background work.
+    if root.page == 2 && root.recording-save-status != "" : Text {
+        x: root.compact ? parent.width - 790px : parent.width - 860px;
+        y: root.compact ? 7px : 9px;
+        width: root.compact ? 160px : 180px;
         height: root.compact ? 38px : 34px;
         text: root.recording-save-status;
         color: #8ab3cd;
@@ -404,6 +419,9 @@ export component AppWindow inherits Window {
     in-out property <string> item-schema;
     in-out property <string> status-text: "Ready";
     in-out property <string> recording-save-status;
+    in-out property <string> background-process-status: "READY";
+    in-out property <bool> background-process-active: true;
+    in-out property <bool> recording-ready: false;
     in-out property <bool> recording-settings-syncing: false;
     in-out property <string> log-text;
     in-out property <float> progress-value: 0;
@@ -440,7 +458,6 @@ export component AppWindow inherits Window {
     in-out property <int> selected-count: 0;
     in-out property <bool> all-visible-selected: false;
     in-out property <length> candidate-horizontal-offset: 0px;
-
     in-out property <int> lead-seconds: 8;
     in-out property <int> outro-seconds: 3;
     in-out property <string> capture-fps: "120";
@@ -499,7 +516,7 @@ export component AppWindow inherits Window {
     callback refresh-filter(string, int); callback drag-select-candidates(int, float, bool, bool); callback selection-changed(); callback select-all-visible();
     callback set-tag-filter(string); callback toggle-class-filter(string); callback toggle-map-filter(string); callback search-map-filters(string);
     callback toggle-server-type-filter(string); callback search-server-type-filters(string); callback set-recorded-filter(string);
-    callback preview-selected(); callback record-selected(); callback choose-setting-path(string); callback save-settings(); callback recording-settings-changed();
+    callback preview-selected(); callback record-selected(); callback choose-setting-path(string); callback recording-settings-changed();
     callback view-selected-details(); callback view-recording-logs(); callback update-recording-estimate(); callback choose-custom-resources(string);
 
     changed tf2-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
@@ -554,7 +571,7 @@ export component AppWindow inherits Window {
             dismiss-focus := FocusScope { enabled: true; }
             clicked => { dismiss-focus.focus(); }
         }
-        AppHeader { x: 0px; y: 0px; width: root.width; page: root.selected-page; compact: root.compact; has-export: root.has-export; frame-debug: root.frame-debug; recording-save-status: root.recording-save-status; menu-open <=> root.compact-nav-open; navigate(page) => { root.selected-page = page; root.compact-nav-open = false; } }
+        AppHeader { x: 0px; y: 0px; width: root.width; page: root.selected-page; compact: root.compact; has-export: root.has-export; frame-debug: root.frame-debug; recording-save-status: root.recording-save-status; background-process-status: root.background-process-status; background-process-active: root.background-process-active; menu-open <=> root.compact-nav-open; navigate(page) => { root.selected-page = page; root.compact-nav-open = false; } }
 
         if root.compact && root.compact-nav-open : Rectangle {
             x: 0px; y: 64px; width: root.width; height: 48px; background: Tf2Colors.header;
@@ -720,8 +737,8 @@ export component AppWindow inherits Window {
                 height: 34px; spacing: 5px;
                 Tf2LineEdit { text <=> root.tag-filter; placeholder: "FILTER TAGS"; centered: true; edited(value) => { root.set-tag-filter(value); } focus-lost => { root.tag-filter = ""; root.set-tag-filter(""); } }
                 Tf2Button { width: 98px; height: 32px; text: root.candidate-filters-open ? "CLOSE" : "FILTERS"; clicked => { root.candidate-filters-open = !root.candidate-filters-open; } }
-                Tf2Button { width: 110px; height: 32px; text: "PREVIEW"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
-                Tf2Button { width: 110px; height: 32px; text: "RECORD"; enabled: root.selected-count > 0; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
+                Tf2Button { width: 120px; height: 32px; text: "PREVIEW"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
+                Tf2Button { width: 120px; height: 32px; text: "RECORD"; enabled: root.selected-count > 0 && root.recording-ready; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
             }
             if root.compact && root.candidate-filters-open : Tf2Panel {
                 height: 112px;
@@ -739,7 +756,7 @@ export component AppWindow inherits Window {
                 height: 40px; spacing: 7px;
                 Tf2Button { width: 170px; text: root.all-visible-selected ? "DESELECT ALL" : "SELECT ALL"; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.select-all-visible(); } }
                 Tf2Button { width: 190px; text: "PREVIEW IN TF2"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
-                Tf2Button { width: 205px; text: "RECORD WITH HLAE"; enabled: root.selected-count > 0; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
+                Tf2Button { width: 205px; text: "RECORD WITH HLAE"; enabled: root.selected-count > 0 && root.recording-ready; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
                 Tf2Button { width: 145px; text: "VIEW DETAILS"; enabled: root.selected-count == 1; clicked => { root.view-selected-details(); } }
                 Rectangle { horizontal-stretch: 1; } Tf2Body { text: root.selected-count + " SELECTED"; color: Tf2Colors.muted; }
             }
@@ -883,12 +900,7 @@ export component AppWindow inherits Window {
                         Tf2Button { width: root.compact ? 72px : 100px; height: root.compact ? 34px : 42px; label-font-size: root.compact ? 13px : 16px; text: "CLEAR"; clicked => { root.custom-resources = ""; } }
                     }
                 }
-                Rectangle { height: root.compact ? 20px : 56px; vertical-stretch: 1; }
-                HorizontalLayout {
-                    height: root.compact ? 40px : 48px; spacing: root.compact ? 10px : 14px;
-                    Tf2Button { width: root.compact ? 145px : 175px; height: root.compact ? 38px : 46px; label-font-size: root.compact ? 14px : 16px; text: "SAVE SETTINGS"; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.save-settings(); } }
-                    Rectangle { horizontal-stretch: 1; }
-                }
+                Rectangle { height: root.compact ? 8px : 16px; vertical-stretch: 1; }
             }
             }
         }
@@ -1017,11 +1029,6 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                HorizontalLayout {
-                    height: 34px; spacing: 6px;
-                    Tf2Button { width: 130px; height: 32px; label-font-size: 13px; text: "SAVE SETTINGS"; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.save-settings(); } }
-                    Rectangle { horizontal-stretch: 1; }
-                }
             }
         }
 
@@ -1083,5 +1090,6 @@ export component AppWindow inherits Window {
                 }
             }
         }
+
     }
 }

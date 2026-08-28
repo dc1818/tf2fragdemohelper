@@ -1,0 +1,45 @@
+TF2 Frag Demo Helper - Grounded-Transition Airshot Build
+Source build ID: 3f5f15563c05
+Prepared: 2026-08-28 UTC
+
+This archive removes the experimental per-kill camera system from the UI,
+candidate model, analyzer export, recovery manifest, preview, and recording VDM.
+
+Recording readiness behavior:
+- The top header reports the active candidate and batch count, such as 20 / 50,
+  plus recovery, finalization, consolidation, log archival, and restoration.
+- Record with HLAE is disabled while any recording or recovery work is active.
+- The button is re-enabled only after the terminal Finished event, or immediately
+  if HLAE launch fails before a background recording begins.
+- Candidate selections and the recording index are refreshed after every clip
+  and after the batch finishes, so another batch can be recorded without
+  reloading the exported candidates.
+- When TF2 closes early, HLAE is allowed to flush before every usable completed
+  capture is finalized, indexed, and reflected on the Candidates page.
+
+Airshot behavior:
+- Absolute height is ignored; higher ledges do not qualify as airshots.
+- The victim must have an observed grounded-to-airborne transition within two
+  seconds, at least three airborne samples, and meaningful vertical motion.
+- Standard projectile evidence stops two ticks before impact.
+- Loose Cannon evidence stops six ticks before the first collision/hurt event,
+  preventing the Cannon's own knockback from certifying a double donk or later
+  explosion as an airshot.
+- Five regression tests cover stationary and moving elevated ledges, genuine
+  pre-impact airborne motion, collision-induced Cannon launch, and genuine
+  pre-existing airborne Cannon victims.
+
+Preserved behavior:
+- Recording Settings autosave, including initial default settings persistence.
+- Saved FFmpeg, HLAE, TF2, and output-directory paths.
+- Startup recording-session recovery hardening.
+- Vote, server, plugin, and chat-message suppression during capture.
+- Previously recorded candidates can be skipped or explicitly re-recorded.
+
+Validation performed in this environment:
+- Source references to camera UI/model/VDM features were removed.
+- Rust delimiter and cross-reference checks were run.
+- Archive source assertions and ZIP integrity are checked during packaging.
+
+The Rust toolchain is not installed in this transient environment. Run
+BUILD_RUST_APP.bat on Windows for the complete Rust/Slint compilation.

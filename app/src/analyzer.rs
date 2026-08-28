@@ -28,6 +28,13 @@ const MEDIC_FORCE_FOLLOWUP_TICKS: i64 = 267;
 const MEDIC_FORCE_PRESSURE_TICKS: i64 = 133;
 const KRITZKRIEG_DURATION_TICKS: i64 = 533;
 const DOUBLE_DONK_WINDOW_TICKS: i64 = 33;
+const AIRSHOT_PRE_IMPACT_WINDOW_TICKS: i64 = 24;
+const AIRSHOT_GROUNDED_LOOKBACK_TICKS: i64 = 133;
+const AIRSHOT_MIN_AIRBORNE_TICKS: i64 = 4;
+const AIRSHOT_MIN_VERTICAL_DISPLACEMENT: f64 = 12.0;
+const AIRSHOT_MIN_VERTICAL_SPEED: f64 = 80.0;
+const AIRSHOT_STANDARD_IMPACT_GUARD_TICKS: i64 = 2;
+const AIRSHOT_LOOSE_CANNON_IMPACT_GUARD_TICKS: i64 = 6;
 const PLAYER_SWING_MIN_WINDOW_TICKS: i64 = 267;
 const CHARGE_MELEE_FOLLOWUP_TICKS: i64 = 57;
 const DUPLICATE_DEATH_TICKS: i64 = 133;
@@ -126,6 +133,8 @@ struct StateEvidence {
     projectile: Option<Value>,
     attacker_recent_shield_charge_tick: Option<i64>,
     confirmed_double_donk: bool,
+    victim_airborne_before_projectile_impact: bool,
+    projectile_impact_check_tick: Option<i64>,
     confirmed_kritzkrieg_boost: bool,
     confirmed_uber_drop: bool,
     enemy_medic_force_followups: Vec<Value>,
@@ -709,6 +718,7 @@ fn capture_death_snapshot(
 fn compact_player_state(state: &Map<String, Value>) -> Map<String, Value> {
     const KEYS: &[&str] = &[
         "team", "class", "health", "life_state", "medic_charge", "shield_charging", "medigun",
+        "position", "velocity", "on_ground", "blast_jumping",
     ];
     KEYS.iter().filter_map(|key| state.get(*key).cloned().map(|value| ((*key).into(), value))).collect()
 }
@@ -727,6 +737,66 @@ fn last_player_flag_tick(scan: &StateScan, user: i64, tick: i64, key: &str, wind
         (*sample_tick <= tick && *sample_tick >= tick - window_ticks
             && state.get(key).and_then(Value::as_bool).unwrap_or(false)).then_some(*sample_tick)
     })
+}
+
+/// Airshots require a recent, observed grounded-to-airborne transition followed
+/// by sustained vertical motion. Absolute Z height is deliberately irrelevant:
+/// standing or walking on a high ledge is not an airshot. `impact_guard_ticks`
+/// moves the evidence cutoff earlier than the reported hurt tick so projectile
+/// knockback (especially the Loose Cannon collision) cannot certify itself.
+fn player_airborne_before_impact(
+    scan: &StateScan,
+    user: i64,
+    impact_tick: i64,
+    impact_guard_ticks: i64,
+) -> bool {
+    let Some(history) = scan.player_history.get(&user) else { return false };
+    let evidence_tick = impact_tick.saturating_sub(impact_guard_ticks.max(0));
+    let grounded_tick = history.iter().rev().find_map(|(tick, state)| {
+        (*tick < evidence_tick
+            && *tick >= evidence_tick - AIRSHOT_GROUNDED_LOOKBACK_TICKS
+            && state.get("on_ground").and_then(Value::as_bool) == Some(true))
+            .then_some(*tick)
+    });
+    let Some(grounded_tick) = grounded_tick else { return false };
+    let samples = history
+        .iter()
+        .filter(|(tick, _)| {
+            *tick > grounded_tick
+                && *tick < evidence_tick
+                && *tick >= evidence_tick - AIRSHOT_PRE_IMPACT_WINDOW_TICKS
+        })
+        .collect::<Vec<_>>();
+    let Some((latest_tick, latest)) = samples.last() else { return false };
+    if latest.get("on_ground").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    if *latest_tick - grounded_tick < AIRSHOT_MIN_AIRBORNE_TICKS {
+        return false;
+    }
+    let airborne_samples = samples
+        .iter()
+        .filter(|(_, state)| state.get("on_ground").and_then(Value::as_bool) == Some(false))
+        .count();
+    if airborne_samples < 3 {
+        return false;
+    }
+    let vertical_speed = samples.iter()
+        .filter_map(|(_, state)| vector3(state.get("velocity")).map(|velocity| velocity[2].abs()))
+        .fold(0.0, f64::max);
+    let vertical_displacement = samples
+        .iter()
+        .filter_map(|(_, state)| vector3(state.get("position")).map(|position| position[2]))
+        .fold(None::<(f64, f64)>, |range, z| {
+            Some(match range {
+                Some((minimum, maximum)) => (minimum.min(z), maximum.max(z)),
+                None => (z, z),
+            })
+        })
+        .map(|(minimum, maximum)| maximum - minimum)
+        .unwrap_or_default();
+    vertical_speed >= AIRSHOT_MIN_VERTICAL_SPEED
+        || vertical_displacement >= AIRSHOT_MIN_VERTICAL_DISPLACEMENT
 }
 
 fn attach_state(
@@ -906,6 +976,28 @@ fn attach_event_evidence(
                 explosion.4 && explosion.0 >= impact.0 && explosion.0 - impact.0 <= DOUBLE_DONK_WINDOW_TICKS
                     && death.event_tick - explosion.0 <= 1
             }));
+            let impact_tick = matching
+                .iter()
+                .map(|event| event.0)
+                .min()
+                .unwrap_or(death.event_tick);
+            death.state.projectile_impact_check_tick = Some(impact_tick);
+            death.state.victim_airborne_before_projectile_impact =
+                player_airborne_before_impact(
+                    scan,
+                    death.victim,
+                    impact_tick,
+                    AIRSHOT_LOOSE_CANNON_IMPACT_GUARD_TICKS,
+                );
+        } else {
+            death.state.projectile_impact_check_tick = Some(death.event_tick);
+            death.state.victim_airborne_before_projectile_impact =
+                player_airborne_before_impact(
+                    scan,
+                    death.victim,
+                    death.event_tick,
+                    AIRSHOT_STANDARD_IMPACT_GUARD_TICKS,
+                );
         }
         death.state.attacker_recent_shield_charge_tick = last_player_flag_tick(scan, death.attacker, death.event_tick, "shield_charging", CHARGE_MELEE_FOLLOWUP_TICKS);
         if let Some(players) = scan.all_at_death.get(&death.event_tick) {
@@ -1210,8 +1302,7 @@ fn score_group(group: &[Death], round: &Round, buildings: &[BuildingEvent], obje
             "backburner" => Some("backburner"), "ambassador" => Some("ambassador"), "kunai" => Some("kunai"),
             "eternal_reward" => Some("eternal_reward"), "tribalkukri" => Some("tribalman's_shiv"), _ => None,
         } { tags.insert(tag.into()); }
-        let victim_airborne = kill.state.victim.get("blast_jumping").and_then(Value::as_bool).unwrap_or(false)
-            || kill.state.victim.get("on_ground").and_then(Value::as_bool) == Some(false);
+        let victim_airborne = kill.state.victim_airborne_before_projectile_impact;
         let projectile_weapon = ["rocket", "directhit", "blackbox", "grenade", "loch", "iron_bomber", "loose_cannon", "flare", "huntsman", "crossbow"]
             .iter().any(|name| weapon.contains(name));
         if kill.state.confirmed_kritzkrieg_boost && kill.crit_type > 0 {
@@ -1350,10 +1441,13 @@ fn score_group(group: &[Death], round: &Round, buildings: &[BuildingEvent], obje
         "market_gardens":group.iter().filter(|kill| kill.weapon == "market_gardener" && kill.crit_type > 0 && kill.state.attacker.get("blast_jumping").and_then(Value::as_bool).unwrap_or(false)).count(),
         "double_donks":group.iter().filter(|kill| kill.state.confirmed_double_donk).count(),
         "confirmed_airshots":confirmed_airshots,
-        "direct_airshots":group.iter().filter(|kill| kill.state.projectile.as_ref().and_then(|value| value.get("impact_proximity")).and_then(Value::as_str) == Some("direct")).count(),
+        "direct_airshots":group.iter().filter(|kill| {
+            kill.state.victim_airborne_before_projectile_impact
+                && kill.state.projectile.as_ref().and_then(|value| value.get("airshot_eligible")).and_then(Value::as_bool).unwrap_or(false)
+                && kill.state.projectile.as_ref().and_then(|value| value.get("impact_proximity")).and_then(Value::as_str) == Some("direct")
+        }).count(),
         "airborne_projectile_kills":group.iter().filter(|kill| {
-            (kill.state.victim.get("blast_jumping").and_then(Value::as_bool).unwrap_or(false)
-                || kill.state.victim.get("on_ground").and_then(Value::as_bool) == Some(false))
+            kill.state.victim_airborne_before_projectile_impact
                 && matches!(kill.weapon.as_str(), "rocketlauncher" | "directhit" | "blackbox" | "liberty_launcher" | "airstrike" | "grenadelauncher" | "loch_n_load" | "iron_bomber" | "loose_cannon" | "loose_cannon_impact" | "loose_cannon_explosion" | "flaregun" | "detonator" | "scorch_shot" | "compound_bow" | "huntsman")
         }).count(),
         "confirmed_uber_drops":group.iter().filter(|kill| kill.state.confirmed_uber_drop).count(),
@@ -1455,6 +1549,8 @@ fn death_json(death: &Death) -> Value {
             "friendly_pending_respawn_ticks":death.state.friendly_pending_respawn_ticks,
             "attacker_recent_shield_charge_tick":death.state.attacker_recent_shield_charge_tick,
             "confirmed_double_donk":death.state.confirmed_double_donk,
+            "victim_airborne_before_projectile_impact":death.state.victim_airborne_before_projectile_impact,
+            "projectile_impact_check_tick":death.state.projectile_impact_check_tick,
             "confirmed_kritzkrieg_boost":death.state.confirmed_kritzkrieg_boost,
             "confirmed_uber_drop":death.state.confirmed_uber_drop,
             "enemy_medic_force_followups":death.state.enemy_medic_force_followups,
@@ -1563,6 +1659,15 @@ fn text_value(value: Option<&Value>) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn movement_state(on_ground: bool, z: f64, velocity_z: f64) -> Map<String, Value> {
+        Map::from_iter([
+            ("on_ground".into(), json!(on_ground)),
+            ("position".into(), json!([0.0, 0.0, z])),
+            ("velocity".into(), json!([0.0, 0.0, velocity_z])),
+            ("blast_jumping".into(), json!(false)),
+        ])
+    }
+
     #[test]
     fn tolerant_sixes_allows_one_offclass() {
         let roster = HashMap::from([
@@ -1570,5 +1675,80 @@ mod tests {
             ("demoman".into(), 1), ("medic".into(), 1),
         ]);
         assert!(sixes_fit(&roster));
+    }
+
+    #[test]
+    fn elevated_stationary_player_is_not_an_airshot() {
+        let mut scan = StateScan::default();
+        scan.player_history.insert(42, vec![
+            (980, movement_state(false, 256.0, 0.0)),
+            (990, movement_state(false, 256.0, 0.0)),
+            (999, movement_state(false, 256.0, 0.0)),
+        ]);
+        assert!(!player_airborne_before_impact(&scan, 42, 1_000, 0));
+    }
+
+    #[test]
+    fn player_moving_up_a_high_ledge_without_takeoff_is_not_an_airshot() {
+        let mut scan = StateScan::default();
+        scan.player_history.insert(42, vec![
+            (960, movement_state(false, 240.0, 0.0)),
+            (980, movement_state(false, 246.0, 90.0)),
+            (990, movement_state(false, 256.0, 90.0)),
+            (999, movement_state(false, 268.0, 90.0)),
+        ]);
+        assert!(!player_airborne_before_impact(&scan, 42, 1_000, 0));
+    }
+
+    #[test]
+    fn moving_victim_already_airborne_before_impact_is_an_airshot() {
+        let mut scan = StateScan::default();
+        scan.player_history.insert(42, vec![
+            (965, movement_state(true, 192.0, 0.0)),
+            (975, movement_state(false, 198.0, 220.0)),
+            (980, movement_state(false, 208.0, 180.0)),
+            (990, movement_state(false, 228.0, 120.0)),
+            (999, movement_state(false, 240.0, 70.0)),
+        ]);
+        assert!(player_airborne_before_impact(&scan, 42, 1_000, 0));
+    }
+
+    #[test]
+    fn loose_cannon_launch_after_collision_cannot_create_its_own_airshot() {
+        let mut scan = StateScan::default();
+        scan.player_history.insert(42, vec![
+            (980, movement_state(true, 128.0, 0.0)),
+            (993, movement_state(true, 128.0, 0.0)),
+            (995, movement_state(false, 130.0, 260.0)),
+            (999, movement_state(false, 145.0, 220.0)),
+            (1_000, movement_state(false, 150.0, 200.0)),
+            (1_010, movement_state(false, 170.0, 180.0)),
+        ]);
+        assert!(!player_airborne_before_impact(
+            &scan,
+            42,
+            1_000,
+            AIRSHOT_LOOSE_CANNON_IMPACT_GUARD_TICKS,
+        ));
+    }
+
+    #[test]
+    fn loose_cannon_can_still_confirm_victim_airborne_well_before_collision() {
+        let mut scan = StateScan::default();
+        scan.player_history.insert(42, vec![
+            (940, movement_state(true, 128.0, 0.0)),
+            (950, movement_state(false, 136.0, 240.0)),
+            (965, movement_state(false, 175.0, 170.0)),
+            (972, movement_state(false, 193.0, 135.0)),
+            (980, movement_state(false, 205.0, 110.0)),
+            (990, movement_state(false, 216.0, 70.0)),
+            (999, movement_state(false, 220.0, 260.0)),
+        ]);
+        assert!(player_airborne_before_impact(
+            &scan,
+            42,
+            1_000,
+            AIRSHOT_LOOSE_CANNON_IMPACT_GUARD_TICKS,
+        ));
     }
 }

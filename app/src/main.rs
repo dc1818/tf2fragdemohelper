@@ -11,7 +11,11 @@ mod scheduler;
 use crate::{
     batch::{BatchController, ProgressEvent},
     models::{AppSettings, Candidate},
-    recording::{estimate_recording_space, has_recoverable_recording_sessions, latest_recording_session, launch_hlae_batch, preview_candidate, recover_interrupted_profile, recover_recording_sessions, shutdown_active_recording, RecordingIndex, RecordingProgress, RecordingProgressSink},
+    recording::{
+        estimate_recording_space, latest_recording_session, launch_hlae_batch, preview_candidate,
+        recover_interrupted_profile, recover_recording_sessions, shutdown_active_recording,
+        RecordingIndex, RecordingProgress, RecordingProgressSink,
+    },
     scheduler::PerformanceProfile,
 };
 use anyhow::{Context, Result};
@@ -50,25 +54,40 @@ impl CandidateUiFilters {
         if self.recorded.is_some_and(|wanted| wanted != recorded) {
             return false;
         }
-        if !self.maps.is_empty() && !self.maps.iter().any(|map| candidate.map_name.eq_ignore_ascii_case(map)) {
+        if !self.maps.is_empty()
+            && !self
+                .maps
+                .iter()
+                .any(|map| candidate.map_name.eq_ignore_ascii_case(map))
+        {
             return false;
         }
         if !self.classes.is_empty() {
             let actual = canonical_candidate_class(&candidate.attacker_class);
-            if !self.classes.iter().any(|class| actual == canonical_candidate_class(class)) {
+            if !self
+                .classes
+                .iter()
+                .any(|class| actual == canonical_candidate_class(class))
+            {
                 return false;
             }
         }
         let server_type = candidate_server_type(candidate);
         if !self.server_types.is_empty()
-            && !self.server_types.iter().any(|wanted| server_type.eq_ignore_ascii_case(wanted))
+            && !self
+                .server_types
+                .iter()
+                .any(|wanted| server_type.eq_ignore_ascii_case(wanted))
         {
             return false;
         }
         let tag_query = normalize_tag_search(&self.tag_query);
         if !tag_query.is_empty() {
             let tags = normalize_tag_search(&candidate.tags.join(" "));
-            if !tag_query.split_whitespace().all(|keyword| tags.contains(keyword)) {
+            if !tag_query
+                .split_whitespace()
+                .all(|keyword| tags.contains(keyword))
+            {
                 return false;
             }
         }
@@ -117,14 +136,21 @@ struct CandidateDetailText {
 }
 
 fn nonempty_json_string(value: &serde_json::Value) -> Option<&str> {
-    value.as_str().map(str::trim).filter(|value| !value.is_empty())
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn humanize_identifier(value: &str) -> String {
     let spaced = value.trim().replace(['_', '-'], " ");
     let mut characters = spaced.chars();
     match characters.next() {
-        Some(first) => format!("{}{}", first.to_uppercase().collect::<String>(), characters.as_str()),
+        Some(first) => format!(
+            "{}{}",
+            first.to_uppercase().collect::<String>(),
+            characters.as_str()
+        ),
         None => String::new(),
     }
 }
@@ -217,9 +243,13 @@ fn friendly_score_reason(value: &str) -> String {
         "four_kill_plus" => "Four-or-more-kill sequence bonus".into(),
         "multiple_confirmed_airshots" => "Multiple confirmed airshots".into(),
         "sequence_finished_enemy_team" => "Sequence eliminated every remaining enemy".into(),
-        "enemy_medic_forced_uber_after_sequence" => "Sequence forced the enemy Medic to Über".into(),
+        "enemy_medic_forced_uber_after_sequence" => {
+            "Sequence forced the enemy Medic to Über".into()
+        }
         "sequence_created_player_count_window" => "Sequence created a player advantage".into(),
-        "sack_uber_recovery_after_losses" => "Recovered an Über disadvantage after team losses".into(),
+        "sack_uber_recovery_after_losses" => {
+            "Recovered an Über disadvantage after team losses".into()
+        }
         "sack_uber_medic_equalizer" => "Medic pick equalized the Über situation".into(),
         "rapid_sequence" => "Rapid multi-kill sequence".into(),
         "projectile_sequence" => "Projectile frag sequence".into(),
@@ -239,16 +269,40 @@ fn human_join(values: &[String]) -> String {
         [] => String::new(),
         [only] => only.clone(),
         [first, second] => format!("{first} and {second}"),
-        _ => format!("{}, and {}", values[..values.len() - 1].join(", "), values.last().unwrap()),
+        _ => format!(
+            "{}, and {}",
+            values[..values.len() - 1].join(", "),
+            values.last().unwrap()
+        ),
     }
 }
 
 fn candidate_player_name(candidate: &Candidate) -> String {
-    candidate.extra.get("attacker_name")
+    candidate
+        .extra
+        .get("attacker_name")
         .and_then(nonempty_json_string)
-        .or_else(|| candidate.kills.first().and_then(|kill| kill.get("attacker_name")).and_then(nonempty_json_string))
-        .or_else(|| candidate.kills.first().and_then(|kill| kill.get("state_evidence")).and_then(|state| state.get("attacker")).and_then(|attacker| attacker.get("name")).and_then(nonempty_json_string))
-        .or_else(|| (candidate.demo_context.pov_player_user_id == Some(candidate.attacker_user_id)).then_some(candidate.demo_context.header_nick.as_deref()).flatten())
+        .or_else(|| {
+            candidate
+                .kills
+                .first()
+                .and_then(|kill| kill.get("attacker_name"))
+                .and_then(nonempty_json_string)
+        })
+        .or_else(|| {
+            candidate
+                .kills
+                .first()
+                .and_then(|kill| kill.get("state_evidence"))
+                .and_then(|state| state.get("attacker"))
+                .and_then(|attacker| attacker.get("name"))
+                .and_then(nonempty_json_string)
+        })
+        .or_else(|| {
+            (candidate.demo_context.pov_player_user_id == Some(candidate.attacker_user_id))
+                .then_some(candidate.demo_context.header_nick.as_deref())
+                .flatten()
+        })
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Player #{}", candidate.attacker_user_id))
 }
@@ -256,25 +310,53 @@ fn candidate_player_name(candidate: &Candidate) -> String {
 fn kill_notes(kill: &serde_json::Value) -> Vec<String> {
     let mut notes = Vec::new();
     let state = kill.get("state_evidence");
-    let victim = state.and_then(|value| value.get("victim"));
     let projectile = state.and_then(|value| value.get("projectile"));
-    let airborne = victim.and_then(|value| value.get("blast_jumping")).and_then(serde_json::Value::as_bool).unwrap_or(false)
-        || victim.and_then(|value| value.get("on_ground")).and_then(serde_json::Value::as_bool) == Some(false);
-    let airshot_eligible = projectile.and_then(|value| value.get("airshot_eligible")).and_then(serde_json::Value::as_bool).unwrap_or(false);
-    if airborne && airshot_eligible { notes.push("confirmed airshot".into()); }
-    if airborne && projectile.and_then(|value| value.get("impact_proximity")).and_then(serde_json::Value::as_str) == Some("direct") {
+    let airborne = state
+        .and_then(|value| value.get("victim_airborne_before_projectile_impact"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let airshot_eligible = projectile
+        .and_then(|value| value.get("airshot_eligible"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if airborne && airshot_eligible {
+        notes.push("confirmed airshot".into());
+    }
+    if airborne
+        && projectile
+            .and_then(|value| value.get("impact_proximity"))
+            .and_then(serde_json::Value::as_str)
+            == Some("direct")
+    {
         notes.push("direct hit".into());
     }
-    if state.and_then(|value| value.get("confirmed_double_donk")).and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if state
+        .and_then(|value| value.get("confirmed_double_donk"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         notes.push("double donk".into());
     }
-    if state.and_then(|value| value.get("confirmed_kritzkrieg_boost")).and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if state
+        .and_then(|value| value.get("confirmed_kritzkrieg_boost"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         notes.push("Kritzkrieg boosted".into());
     }
-    if state.and_then(|value| value.get("confirmed_uber_drop")).and_then(serde_json::Value::as_bool).unwrap_or(false) {
+    if state
+        .and_then(|value| value.get("confirmed_uber_drop"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
         notes.push("Über drop".into());
     }
-    if kill.get("rocket_jump_victim").and_then(serde_json::Value::as_bool).unwrap_or(false) && !notes.iter().any(|note| note == "confirmed airshot") {
+    if kill
+        .get("rocket_jump_victim")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && !notes.iter().any(|note| note == "confirmed airshot")
+    {
         notes.push("rocket-jumping opponent".into());
     }
     notes
@@ -282,15 +364,39 @@ fn kill_notes(kill: &serde_json::Value) -> Vec<String> {
 
 fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     let player = candidate_player_name(candidate);
-    let class = if candidate.attacker_class.is_empty() { "Unknown class".into() } else { humanize_identifier(&candidate.attacker_class) };
-    let team = if candidate.attacker_team.is_empty() { "Unknown team".into() } else { candidate.attacker_team.to_ascii_uppercase() };
-    let map = if candidate.map_name.is_empty() { "Unknown map".into() } else { candidate.map_name.clone() };
-    let demo_name = Path::new(&candidate.source_demo).file_name().and_then(|name| name.to_str()).unwrap_or(candidate.source_demo.as_str());
-    let round = if candidate.round_index > 0 { format!(" • Round {}", candidate.round_index) } else { String::new() };
+    let class = if candidate.attacker_class.is_empty() {
+        "Unknown class".into()
+    } else {
+        humanize_identifier(&candidate.attacker_class)
+    };
+    let team = if candidate.attacker_team.is_empty() {
+        "Unknown team".into()
+    } else {
+        candidate.attacker_team.to_ascii_uppercase()
+    };
+    let map = if candidate.map_name.is_empty() {
+        "Unknown map".into()
+    } else {
+        candidate.map_name.clone()
+    };
+    let demo_name = Path::new(&candidate.source_demo)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(candidate.source_demo.as_str());
+    let round = if candidate.round_index > 0 {
+        format!(" • Round {}", candidate.round_index)
+    } else {
+        String::new()
+    };
     let map_meta = if demo_name.is_empty() {
         format!("{}{}", candidate_server_type(candidate), round)
     } else {
-        format!("{}{} • {}", candidate_server_type(candidate), round, demo_name)
+        format!(
+            "{}{} • {}",
+            candidate_server_type(candidate),
+            round,
+            demo_name
+        )
     };
     let kill_count = candidate.kill_count();
     let kill_word = if kill_count == 1 { "kill" } else { "kills" };
@@ -299,65 +405,177 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     let mut weapons = BTreeSet::new();
     let mut kill_lines = Vec::new();
     for (index, kill) in candidate.kills.iter().enumerate() {
-        let victim_id = kill.get("victim_user_id").and_then(serde_json::Value::as_i64).unwrap_or_default();
-        let victim_name = kill.get("victim_name").and_then(nonempty_json_string)
-            .or_else(|| kill.get("state_evidence").and_then(|state| state.get("victim")).and_then(|victim| victim.get("name")).and_then(nonempty_json_string))
-            .map(str::to_owned).unwrap_or_else(|| format!("Player #{victim_id}"));
-        let victim_class = kill.get("victim_class").and_then(nonempty_json_string).map(humanize_identifier).unwrap_or_default();
-        let victim_display = if victim_class.is_empty() { victim_name } else { format!("{victim_name} ({victim_class})") };
-        if !victims.contains(&victim_display) { victims.push(victim_display.clone()); }
-        let weapon = humanize_weapon(kill.get("weapon").and_then(serde_json::Value::as_str).unwrap_or_default());
-        if weapon != "Unknown weapon" { weapons.insert(weapon.clone()); }
-        let tick = kill.get("demo_tick").or_else(|| kill.get("tick")).and_then(serde_json::Value::as_i64).unwrap_or_default();
+        let victim_id = kill
+            .get("victim_user_id")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        let victim_name = kill
+            .get("victim_name")
+            .and_then(nonempty_json_string)
+            .or_else(|| {
+                kill.get("state_evidence")
+                    .and_then(|state| state.get("victim"))
+                    .and_then(|victim| victim.get("name"))
+                    .and_then(nonempty_json_string)
+            })
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Player #{victim_id}"));
+        let victim_class = kill
+            .get("victim_class")
+            .and_then(nonempty_json_string)
+            .map(humanize_identifier)
+            .unwrap_or_default();
+        let victim_display = if victim_class.is_empty() {
+            victim_name
+        } else {
+            format!("{victim_name} ({victim_class})")
+        };
+        if !victims.contains(&victim_display) {
+            victims.push(victim_display.clone());
+        }
+        let weapon = humanize_weapon(
+            kill.get("weapon")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        );
+        if weapon != "Unknown weapon" {
+            weapons.insert(weapon.clone());
+        }
+        let tick = kill
+            .get("demo_tick")
+            .or_else(|| kill.get("tick"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
         let notes = kill_notes(kill);
-        let note = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join(", ")) };
-        kill_lines.push(format!("{}. Tick {} — {} with {}{}", index + 1, tick, victim_display, weapon, note));
+        let note = if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", notes.join(", "))
+        };
+        kill_lines.push(format!(
+            "{}. Tick {} — {} with {}{}",
+            index + 1,
+            tick,
+            victim_display,
+            weapon,
+            note
+        ));
     }
 
-    let sequence_seconds = candidate.metrics.get("duration_seconds").and_then(serde_json::Value::as_f64).unwrap_or_else(|| {
-        let first = candidate.kills.first().and_then(|kill| kill.get("server_tick")).and_then(serde_json::Value::as_i64).unwrap_or_default();
-        let last = candidate.kills.last().and_then(|kill| kill.get("server_tick")).and_then(serde_json::Value::as_i64).unwrap_or(first);
-        (last - first).max(0) as f64 / 66.666_666_7
-    });
+    let sequence_seconds = candidate
+        .metrics
+        .get("duration_seconds")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_else(|| {
+            let first = candidate
+                .kills
+                .first()
+                .and_then(|kill| kill.get("server_tick"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_default();
+            let last = candidate
+                .kills
+                .last()
+                .and_then(|kill| kill.get("server_tick"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(first);
+            (last - first).max(0) as f64 / 66.666_666_7
+        });
     let mut summary = if kill_count == 0 {
         if candidate.bookmark_comment.trim().is_empty() {
             format!("{player} has a bookmarked moment on {map}.")
         } else {
-            format!("{player} has a bookmarked moment on {map}: {}", candidate.bookmark_comment.trim())
+            format!(
+                "{player} has a bookmarked moment on {map}: {}",
+                candidate.bookmark_comment.trim()
+            )
         }
     } else if kill_count == 1 {
         format!("{player}, playing {class} for {team}, gets a kill on {map}")
     } else {
         format!("{player}, playing {class} for {team}, gets a {kill_count}-kill sequence on {map}")
     };
-    if kill_count > 1 && sequence_seconds > 0.0 { summary.push_str(&format!(" over {sequence_seconds:.1} seconds")); }
-    if !victims.is_empty() { summary.push_str(&format!(", eliminating {}", human_join(&victims))); }
+    if kill_count > 1 && sequence_seconds > 0.0 {
+        summary.push_str(&format!(" over {sequence_seconds:.1} seconds"));
+    }
+    if !victims.is_empty() {
+        summary.push_str(&format!(", eliminating {}", human_join(&victims)));
+    }
     let weapons = weapons.into_iter().collect::<Vec<_>>();
-    if !weapons.is_empty() { summary.push_str(&format!(" with {}", human_join(&weapons))); }
-    if !summary.ends_with('.') { summary.push('.'); }
+    if !weapons.is_empty() {
+        summary.push_str(&format!(" with {}", human_join(&weapons)));
+    }
+    if !summary.ends_with('.') {
+        summary.push('.');
+    }
 
     let highlight_priority = [
-        "team_wipe", "kills_to_secure_cap", "capture_denial_followup", "round_clinch", "uber_drop", "medic_force",
-        "double_airshot_sequence", "confirmed_airshot", "direct_airshot", "double_donk", "market_garden", "backstab",
-        "taunt_kill", "shield_bash_kill", "charge_melee_kill", "three_kill", "four_kill_plus", "rapid_sequence",
-        "player_count_swing", "medic_pick", "demoman_pick", "late_round",
+        "team_wipe",
+        "kills_to_secure_cap",
+        "capture_denial_followup",
+        "round_clinch",
+        "uber_drop",
+        "medic_force",
+        "double_airshot_sequence",
+        "confirmed_airshot",
+        "direct_airshot",
+        "double_donk",
+        "market_garden",
+        "backstab",
+        "taunt_kill",
+        "shield_bash_kill",
+        "charge_melee_kill",
+        "three_kill",
+        "four_kill_plus",
+        "rapid_sequence",
+        "player_count_swing",
+        "medic_pick",
+        "demoman_pick",
+        "late_round",
     ];
-    let highlights = highlight_priority.iter().filter(|wanted| candidate.tags.iter().any(|tag| tag.as_str() == **wanted))
-        .take(5).map(|tag| friendly_tag(tag)).collect::<Vec<_>>();
-    if !highlights.is_empty() { summary.push_str(&format!(" Highlights include {}.", human_join(&highlights))); }
+    let highlights = highlight_priority
+        .iter()
+        .filter(|wanted| candidate.tags.iter().any(|tag| tag.as_str() == **wanted))
+        .take(5)
+        .map(|tag| friendly_tag(tag))
+        .collect::<Vec<_>>();
+    if !highlights.is_empty() {
+        summary.push_str(&format!(" Highlights include {}.", human_join(&highlights)));
+    }
 
     let score_breakdown = if candidate.score_breakdown.is_empty() {
         "No itemized score evidence is available for this imported candidate.".into()
     } else {
-        candidate.score_breakdown.iter().enumerate().map(|(index, item)| {
-            let reason = friendly_score_reason(item.get("reason").and_then(serde_json::Value::as_str).unwrap_or("score adjustment"));
-            let points = item.get("points").and_then(serde_json::Value::as_f64).unwrap_or_default();
-            let tick = item.get("event_tick").and_then(serde_json::Value::as_i64).filter(|tick| *tick > 0)
-                .map(|tick| format!(" at server tick {tick}")).unwrap_or_default();
-            let count = item.get("count").and_then(serde_json::Value::as_u64).filter(|count| *count > 0)
-                .map(|count| format!(" ({count} counted)")).unwrap_or_default();
-            format!("{}. {reason}: {points:+.1} points{tick}{count}", index + 1)
-        }).collect::<Vec<_>>().join("\n")
+        candidate
+            .score_breakdown
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let reason = friendly_score_reason(
+                    item.get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("score adjustment"),
+                );
+                let points = item
+                    .get("points")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or_default();
+                let tick = item
+                    .get("event_tick")
+                    .and_then(serde_json::Value::as_i64)
+                    .filter(|tick| *tick > 0)
+                    .map(|tick| format!(" at server tick {tick}"))
+                    .unwrap_or_default();
+                let count = item
+                    .get("count")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|count| *count > 0)
+                    .map(|count| format!(" ({count} counted)"))
+                    .unwrap_or_default();
+                format!("{}. {reason}: {points:+.1} points{tick}{count}", index + 1)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     };
 
     CandidateDetailText {
@@ -366,11 +584,27 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
         map,
         map_meta,
         score: format!("{:.1} POINTS", candidate.overall_score),
-        score_meta: format!("{kill_count} {kill_word} • Clip ticks {}–{}", candidate.clip_start_tick, candidate.clip_end_tick),
+        score_meta: format!(
+            "{kill_count} {kill_word} • Clip ticks {}–{}",
+            candidate.clip_start_tick, candidate.clip_end_tick
+        ),
         summary,
-        kills: if kill_lines.is_empty() { "No parsed kill events are attached to this bookmarked candidate.".into() } else { kill_lines.join("\n") },
+        kills: if kill_lines.is_empty() {
+            "No parsed kill events are attached to this bookmarked candidate.".into()
+        } else {
+            kill_lines.join("\n")
+        },
         score_breakdown,
-        tags: if candidate.tags.is_empty() { "No frag tags were assigned.".into() } else { candidate.tags.iter().map(|tag| friendly_tag(tag)).collect::<Vec<_>>().join("  •  ") },
+        tags: if candidate.tags.is_empty() {
+            "No frag tags were assigned.".into()
+        } else {
+            candidate
+                .tags
+                .iter()
+                .map(|tag| friendly_tag(tag))
+                .collect::<Vec<_>>()
+                .join("  •  ")
+        },
     }
 }
 
@@ -423,7 +657,9 @@ fn sync_candidate_filter_controls(ui: &AppWindow, state: &State) {
     let maps = state
         .candidates
         .iter()
-        .filter_map(|candidate| (!candidate.map_name.is_empty()).then(|| candidate.map_name.clone()))
+        .filter_map(|candidate| {
+            (!candidate.map_name.is_empty()).then(|| candidate.map_name.clone())
+        })
         .collect::<BTreeSet<_>>();
     let server_types = state
         .candidates
@@ -440,7 +676,11 @@ fn sync_candidate_filter_controls(ui: &AppWindow, state: &State) {
     ui.set_server_type_filter_width(filter_dropdown_width(
         &server_types,
         220,
-        &["All server types", "Search server types...", "server types selected"],
+        &[
+            "All server types",
+            "Search server types...",
+            "server types selected",
+        ],
     ));
 
     ui.set_map_filter_options(ModelRc::new(VecModel::from(selectable_options(
@@ -459,9 +699,21 @@ fn sync_candidate_filter_controls(ui: &AppWindow, state: &State) {
     ui.set_tag_filter(filters.tag_query.clone().into());
     ui.set_map_filter_search(filters.map_search.clone().into());
     ui.set_server_type_filter_search(filters.server_type_search.clone().into());
-    ui.set_recorded_filter(match filters.recorded { Some(true) => "Yes", Some(false) => "No", None => "Any" }.into());
+    ui.set_recorded_filter(
+        match filters.recorded {
+            Some(true) => "Yes",
+            Some(false) => "No",
+            None => "Any",
+        }
+        .into(),
+    );
 
-    let has_class = |class: &str| filters.classes.iter().any(|selected| selected.eq_ignore_ascii_case(class));
+    let has_class = |class: &str| {
+        filters
+            .classes
+            .iter()
+            .any(|selected| selected.eq_ignore_ascii_case(class))
+    };
     ui.set_selected_scout(has_class("Scout"));
     ui.set_selected_soldier(has_class("Soldier"));
     ui.set_selected_pyro(has_class("Pyro"));
@@ -486,6 +738,7 @@ struct State {
     recording_index: RecordingIndex,
     last_recording_session: Option<PathBuf>,
     recording_active: bool,
+    recovery_active: bool,
 }
 
 fn crash_log_path() -> PathBuf {
@@ -496,7 +749,9 @@ fn crash_log_path() -> PathBuf {
 }
 
 fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
-    payload.downcast_ref::<&str>().map(|value| (*value).to_owned())
+    payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
         .or_else(|| payload.downcast_ref::<String>().cloned())
         .unwrap_or_else(|| "non-text Rust panic".into())
 }
@@ -509,11 +764,22 @@ fn install_panic_logger() {
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(mut output) = OpenOptions::new().create(true).append(true).open(&path) {
-            let message = info.payload().downcast_ref::<&str>().map(|value| (*value).to_owned())
+            let message = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_owned())
                 .or_else(|| info.payload().downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "non-text Rust panic".into());
-            let location = info.location()
-                .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+            let location = info
+                .location()
+                .map(|location| {
+                    format!(
+                        "{}:{}:{}",
+                        location.file(),
+                        location.line(),
+                        location.column()
+                    )
+                })
                 .unwrap_or_else(|| "unknown location".into());
             let _ = writeln!(
                 output,
@@ -541,12 +807,21 @@ fn main() -> Result<()> {
     let recovered_recording_profile = recover_interrupted_profile()?;
     let ui = AppWindow::new()?;
     let settings = AppSettings::load();
+    // Ensure first-run defaults and any normalized legacy values exist on
+    // disk immediately. All later Recording Settings changes remain autosaved.
+    let _ = settings.save();
     ui.set_export_directory(settings.output_directory.display().to_string().into());
     ui.set_item_schema(settings.item_schema.display().to_string().into());
     ui.set_tf2_path(settings.tf2_executable.display().to_string().into());
     ui.set_hlae_path(settings.hlae_executable.display().to_string().into());
     ui.set_ffmpeg_path(settings.ffmpeg_executable.display().to_string().into());
-    ui.set_recording_directory(settings.recording_output_directory.display().to_string().into());
+    ui.set_recording_directory(
+        settings
+            .recording_output_directory
+            .display()
+            .to_string()
+            .into(),
+    );
     ui.set_lead_seconds(settings.lead_seconds.min(60) as i32);
     ui.set_outro_seconds(settings.outro_seconds.min(60) as i32);
     ui.set_capture_fps(settings.capture_fps.to_string().into());
@@ -583,15 +858,34 @@ fn main() -> Result<()> {
     ui.set_disable_announcer(settings.disable_announcer_voices);
     ui.set_disable_applause(settings.disable_applause_sounds);
     ui.set_disable_domination(settings.disable_domination_sounds);
-    ui.set_custom_resources(settings.custom_resources.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("; ").into());
+    ui.set_custom_resources(
+        settings
+            .custom_resources
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+            .into(),
+    );
     update_output_description(&ui);
     if recovered_recording_profile {
         ui.set_status_text("Recovered TF2 files from an interrupted recording session".into());
     }
 
     let state = Arc::new(Mutex::new(State {
-        demos: Vec::new(), export_root: None, candidates: Vec::new(), recorded: Vec::new(), visible: Vec::new(), selected: Vec::new(),
-        candidate_filters: CandidateUiFilters::default(), settings, controller: None, recording_index: RecordingIndex::load(), last_recording_session: None, recording_active: false,
+        demos: Vec::new(),
+        export_root: None,
+        candidates: Vec::new(),
+        recorded: Vec::new(),
+        visible: Vec::new(),
+        selected: Vec::new(),
+        candidate_filters: CandidateUiFilters::default(),
+        settings,
+        controller: None,
+        recording_index: RecordingIndex::empty(),
+        last_recording_session: None,
+        recording_active: false,
+        recovery_active: true,
     }));
     bind_file_callbacks(&ui, &state);
     bind_batch_callbacks(&ui, &state);
@@ -624,12 +918,7 @@ fn center_window_on_startup(ui: &AppWindow) {
         let Some(ui) = weak.upgrade() else { return };
         let _ = ui.window().with_winit_window(|window| {
             let size = window.inner_size();
-            update_recording_layout_for_size(
-                &ui,
-                size.width,
-                size.height,
-                window.scale_factor(),
-            );
+            update_recording_layout_for_size(&ui, size.width, size.height, window.scale_factor());
             let Some(monitor) = window
                 .current_monitor()
                 .or_else(|| window.available_monitors().next())
@@ -669,50 +958,87 @@ fn update_recording_layout_for_size(
     // the five-button accordion before Save Settings can be covered.
     let accordion = logical_width <= 940 && logical_height < 680;
     ui.set_minimal_recording_settings(accordion);
-    ui.set_frame_debug(
-        format!("WINDOW {} x {}", logical_width, logical_height).into(),
-    );
+    ui.set_frame_debug(format!("WINDOW {} x {}", logical_width, logical_height).into());
 }
 
 fn start_recording_recovery(ui: &AppWindow, state: &Arc<Mutex<State>>) {
-    if !has_recoverable_recording_sessions() {
-        return;
-    }
-    let settings = {
-        let mut current = state.lock();
-        current.recording_active = true;
-        current.last_recording_session = latest_recording_session();
-        current.settings.clone()
-    };
-    ui.set_status_text("Recovering unfinished HLAE recordings and finalizing retained outputs...".into());
+    // Do not enumerate the Recording Sessions directory or load the recording
+    // index on the UI thread. Slint's event loop must start immediately so the
+    // window can paint, move, and close even when retained data is damaged.
+    let settings = state.lock().settings.clone();
+    let idle_status = ui.get_status_text().to_string();
+    ui.set_status_text("Checking retained HLAE recording sessions in the background...".into());
+    set_background_process(ui, "CHECKING RECORDING RECOVERY", true);
     let weak = ui.as_weak();
     let recovery_state = state.clone();
     thread::spawn(move || {
-        let report = recover_recording_sessions(&settings);
-        let summary = report.summary();
-        let has_errors = !report.errors.is_empty();
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            let report = recover_recording_sessions(&settings);
+            let recording_index = RecordingIndex::load();
+            let latest_session = latest_recording_session();
+            (report, recording_index, latest_session)
+        }));
+        let (status, recording_index, latest_session) = match result {
+            Ok((report, recording_index, latest_session)) => {
+                let had_recovery_work = report.scanned_sessions > 0
+                    || report.deferred_sessions > 0
+                    || report.disabled_sessions > 0
+                    || !report.errors.is_empty();
+                let status = if had_recovery_work {
+                    report.summary()
+                } else {
+                    idle_status
+                };
+                (status, recording_index, latest_session)
+            }
+            Err(payload) => (
+                format!(
+                    "Recording-session recovery stopped safely: {}",
+                    panic_payload_message(payload.as_ref())
+                ),
+                RecordingIndex::empty(),
+                None,
+            ),
+        };
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
             {
                 let mut current = recovery_state.lock();
-                current.recording_active = false;
-                current.recording_index = RecordingIndex::load();
-                current.last_recording_session = latest_recording_session();
+                current.recovery_active = false;
+                current.recording_index = recording_index;
+                current.last_recording_session = latest_session;
             }
             recompute_recorded_status(&recovery_state);
             let filter = ui.get_filter_text().to_string();
             let score = ui.get_minimum_score();
             refresh_candidates(&ui, &recovery_state, &filter, score);
-            ui.set_status_text(summary.clone().into());
-            if has_errors {
-                rfd::MessageDialog::new()
-                    .set_title("Recording Recovery Needs Attention")
-                    .set_description(format!("{summary}\n\nUse the Logs page to open the retained recording session."))
-                    .set_level(rfd::MessageLevel::Warning)
-                    .show();
-            }
+            ui.set_status_text(status.into());
+            set_background_process(&ui, "READY", false);
         });
     });
+}
+
+fn set_background_process(ui: &AppWindow, status: &str, active: bool) {
+    ui.set_background_process_status(status.into());
+    ui.set_background_process_active(active);
+    ui.set_recording_ready(!active);
+}
+
+fn recording_background_label(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("consolidating recorded candidate") {
+        message.to_ascii_uppercase()
+    } else if lower.contains("consolidating completed") {
+        "CONSOLIDATING COMPLETED RECORDINGS".into()
+    } else if lower.contains("restoring") {
+        "RESTORING TF2 FILES".into()
+    } else if lower.contains("archiving") || lower.contains("finaliz") {
+        "FINALIZING OUTPUTS".into()
+    } else if lower.contains("hlae started") || lower.contains("recording") {
+        "HLAE RECORDING ACTIVE".into()
+    } else {
+        "RECORDING WORK IN PROGRESS".into()
+    }
 }
 
 fn bind_demo_file_drop(ui: &AppWindow, state: &Arc<Mutex<State>>) {
@@ -807,24 +1133,45 @@ fn bind_file_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let weak = ui.as_weak();
     let demos_state = state.clone();
     ui.on_choose_demos(move || {
-        let files = rfd::FileDialog::new().add_filter("TF2 demos", &["dem"]).pick_files().unwrap_or_default();
-        if files.is_empty() { return }
+        let files = rfd::FileDialog::new()
+            .add_filter("TF2 demos", &["dem"])
+            .pick_files()
+            .unwrap_or_default();
+        if files.is_empty() {
+            return;
+        }
         let (tf2, schema) = {
             let mut current = demos_state.lock();
             current.demos = files.clone();
-            let tf2 = current.settings.tf2_executable.is_file().then(|| current.settings.tf2_executable.clone())
+            let tf2 = current
+                .settings
+                .tf2_executable
+                .is_file()
+                .then(|| current.settings.tf2_executable.clone())
                 .or_else(|| discover_tf2_executable(&files));
-            if let Some(path) = &tf2 { current.settings.tf2_executable = path.clone(); }
-            let schema = current.settings.item_schema.is_file().then(|| current.settings.item_schema.clone())
+            if let Some(path) = &tf2 {
+                current.settings.tf2_executable = path.clone();
+            }
+            let schema = current
+                .settings
+                .item_schema
+                .is_file()
+                .then(|| current.settings.item_schema.clone())
                 .or_else(|| discover_item_schema(&files, tf2.as_deref()));
-            if let Some(path) = &schema { current.settings.item_schema = path.clone(); }
+            if let Some(path) = &schema {
+                current.settings.item_schema = path.clone();
+            }
             let _ = current.settings.save();
             (tf2, schema)
         };
         if let Some(ui) = weak.upgrade() {
             set_imported_demos(&ui, &files);
-            if let Some(path) = tf2 { ui.set_tf2_path(path.display().to_string().into()); }
-            if let Some(path) = schema { ui.set_item_schema(path.display().to_string().into()); }
+            if let Some(path) = tf2 {
+                ui.set_tf2_path(path.display().to_string().into());
+            }
+            if let Some(path) = schema {
+                ui.set_item_schema(path.display().to_string().into());
+            }
             update_batch_preflight(&ui, &demos_state);
         }
     });
@@ -840,19 +1187,27 @@ fn bind_file_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     });
     let weak = ui.as_weak();
     ui.on_choose_item_schema(move || {
-        if let Some(path) = rfd::FileDialog::new().add_filter("TF2 item schema", &["txt"]).pick_file() {
-            if let Some(ui) = weak.upgrade() { ui.set_item_schema(path.display().to_string().into()); }
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("TF2 item schema", &["txt"])
+            .pick_file()
+        {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_item_schema(path.display().to_string().into());
+            }
         }
     });
 }
 
 fn set_imported_demos(ui: &AppWindow, demos: &[PathBuf]) {
-    let names = demos.iter().map(|path| {
-        path.file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string())
-            .into()
-    }).collect::<Vec<SharedString>>();
+    let names = demos
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+                .into()
+        })
+        .collect::<Vec<SharedString>>();
     ui.set_imported_demo_count(demos.len().min(i32::MAX as usize) as i32);
     ui.set_imported_demos(ModelRc::new(VecModel::from(names)));
 }
@@ -992,7 +1347,9 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
 
     let state_for_cancel = state.clone();
     ui.on_cancel_batch(move || {
-        if let Some(controller) = &state_for_cancel.lock().controller { controller.cancel(); }
+        if let Some(controller) = &state_for_cancel.lock().controller {
+            controller.cancel();
+        }
     });
 
     let weak = ui.as_weak();
@@ -1072,7 +1429,9 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     ui.on_open_export(move || {
         if let Some(path) = state_for_open.lock().export_root.clone() {
             if let Err(error) = open_path(&path) {
-                if let Some(ui) = weak.upgrade() { ui.set_status_text(error.to_string().into()); }
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_status_text(error.to_string().into());
+                }
             }
         }
     });
@@ -1082,7 +1441,9 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let weak = ui.as_weak();
     let state_for_filter = state.clone();
     ui.on_refresh_filter(move |filter, score| {
-        if let Some(ui) = weak.upgrade() { refresh_candidates(&ui, &state_for_filter, &filter, score); }
+        if let Some(ui) = weak.upgrade() {
+            refresh_candidates(&ui, &state_for_filter, &filter, score);
+        }
     });
     let weak = ui.as_weak();
     let state_for_tags = state.clone();
@@ -1167,7 +1528,9 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     ui.on_drag_select_candidates(move |start_index, delta_pixels, selecting, additive| {
         let Some(ui) = weak.upgrade() else { return };
         let mut state = state_for_drag.lock();
-        if state.visible.is_empty() { return }
+        if state.visible.is_empty() {
+            return;
+        }
         let last = state.visible.len().saturating_sub(1) as i32;
         let start = start_index.clamp(0, last);
         let target = (start + (delta_pixels / 30.0).round() as i32).clamp(0, last);
@@ -1184,7 +1547,11 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                     state.selected[candidate_index] = selecting;
                 }
                 if let Some(mut row) = model.row_data(visible_row) {
-                    let selected = state.selected.get(candidate_index).copied().unwrap_or(false);
+                    let selected = state
+                        .selected
+                        .get(candidate_index)
+                        .copied()
+                        .unwrap_or(false);
                     if row.selected != selected {
                         row.selected = selected;
                         model.set_row_data(visible_row, row);
@@ -1192,13 +1559,28 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 }
             }
         }
-        ui.set_selected_count(state.selected.iter().filter(|selected| **selected).count().min(i32::MAX as usize) as i32);
-        ui.set_all_visible_selected(!state.visible.is_empty() && state.visible.iter().all(|index| state.selected.get(*index).copied().unwrap_or(false)));
+        ui.set_selected_count(
+            state
+                .selected
+                .iter()
+                .filter(|selected| **selected)
+                .count()
+                .min(i32::MAX as usize) as i32,
+        );
+        ui.set_all_visible_selected(
+            !state.visible.is_empty()
+                && state
+                    .visible
+                    .iter()
+                    .all(|index| state.selected.get(*index).copied().unwrap_or(false)),
+        );
     });
     let weak = ui.as_weak();
     let selection_state = state.clone();
     ui.on_selection_changed(move || {
-        if let Some(ui) = weak.upgrade() { update_recording_estimate(&ui, &selection_state); }
+        if let Some(ui) = weak.upgrade() {
+            update_recording_estimate(&ui, &selection_state);
+        }
     });
     let weak = ui.as_weak();
     let state_for_all = state.clone();
@@ -1206,11 +1588,19 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let Some(ui) = weak.upgrade() else { return };
         let mut state = state_for_all.lock();
         let visible = state.visible.clone();
-        let deselect = !visible.is_empty() && visible.iter().all(|index| state.selected.get(*index).copied().unwrap_or(false));
+        let deselect = !visible.is_empty()
+            && visible
+                .iter()
+                .all(|index| state.selected.get(*index).copied().unwrap_or(false));
         for candidate_index in &visible {
             state.selected[*candidate_index] = !deselect;
         }
-        let selected_count = state.selected.iter().filter(|selected| **selected).count().min(i32::MAX as usize) as i32;
+        let selected_count = state
+            .selected
+            .iter()
+            .filter(|selected| **selected)
+            .count()
+            .min(i32::MAX as usize) as i32;
         drop(state);
         let model = ui.get_candidate_rows();
         let mut rows = Vec::with_capacity(model.row_count());
@@ -1231,12 +1621,16 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let Some(ui) = weak.upgrade() else { return };
         let (candidate, mut settings) = {
             let state = state_for_preview.lock();
-            let selected = selected_candidates(&state);
+            let selected = selected_candidates(&state)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
             if selected.len() != 1 {
                 ui.set_status_text("Select exactly one candidate to preview".into());
                 return;
             }
-            (selected[0].clone(), state.settings.clone())
+            let candidate = selected[0].clone();
+            (candidate, state.settings.clone())
         };
 
         let entered_path = PathBuf::from(ui.get_tf2_path().to_string());
@@ -1244,13 +1638,16 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             settings.tf2_executable = entered_path;
         }
         if !settings.tf2_executable.is_file() {
-            settings.tf2_executable = discover_tf2_executable(&[PathBuf::from(&candidate.source_demo)]).unwrap_or_default();
+            settings.tf2_executable =
+                discover_tf2_executable(&[PathBuf::from(&candidate.source_demo)])
+                    .unwrap_or_default();
             if settings.tf2_executable.is_file() {
                 ui.set_tf2_path(settings.tf2_executable.display().to_string().into());
             }
         }
         if !settings.tf2_executable.is_file() {
-            let mut dialog = rfd::FileDialog::new().set_title("Select the Team Fortress 2 Executable");
+            let mut dialog =
+                rfd::FileDialog::new().set_title("Select the Team Fortress 2 Executable");
             if cfg!(target_os = "windows") {
                 dialog = dialog.add_filter("Team Fortress 2 executable", &["exe"]);
             }
@@ -1268,16 +1665,22 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         settings.lead_seconds = ui.get_lead_seconds().clamp(0, 60) as u32;
 
         let result = preview_candidate(&candidate, &settings);
-        ui.set_status_text(result
-            .map(|tick| format!("TF2 preview launched at demo tick {tick}"))
-            .unwrap_or_else(|error| error.to_string())
-            .into());
+        ui.set_status_text(
+            result
+                .map(|tick| format!("TF2 preview launched at demo tick {tick}"))
+                .unwrap_or_else(|error| error.to_string())
+                .into(),
+        );
     });
     let weak = ui.as_weak();
     let state_for_record = state.clone();
     ui.on_record_selected(move || {
         let Some(ui) = weak.upgrade() else { return };
-        if state_for_record.lock().recording_active {
+        let recording_or_recovery_active = {
+            let state = state_for_record.lock();
+            state.recording_active || state.recovery_active
+        };
+        if recording_or_recovery_active {
             ui.set_status_text("Wait for the active recording or output-recovery process to finish before starting another batch".into());
             return;
         }
@@ -1314,17 +1717,19 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         if recorded_count > 0 {
             let choice = rfd::MessageDialog::new()
                 .set_title("Previously Recorded Candidates")
-                .set_description(format!("{recorded_count} selected candidate(s) already have a matching recording.\n\nYes: skip them\nNo: re-record them and replace the old output after each replacement finishes successfully\nCancel: do not start"))
+                .set_description(format!("{recorded_count} selected candidate(s) already have a matching recording.\n\nYes: record them again and replace the old output after each replacement finishes successfully\nNo: skip the previously recorded candidates and record only new selections\nCancel: do not start\n\nThe loaded candidates and their selections remain available after every batch."))
                 .set_buttons(rfd::MessageButtons::YesNoCancel)
                 .show();
             match choice {
                 rfd::MessageDialogResult::Yes => {
+                    replace_existing = true;
+                }
+                rfd::MessageDialogResult::No => {
                     let state = state_for_record.lock();
                     selected = state.candidates.iter().zip(&state.selected).zip(&state.recorded)
                         .filter_map(|((candidate, selected), recorded)| (*selected && !*recorded).then(|| candidate.clone()))
                         .collect();
                 }
-                rfd::MessageDialogResult::No => { replace_existing = true; }
                 _ => {
                     ui.set_status_text("Recording cancelled".into());
                     return;
@@ -1368,6 +1773,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             state.recording_active = true;
             let _ = state.settings.save();
         }
+        set_background_process(&ui, "PREPARING HLAE RECORDING", true);
         let progress_weak = weak.clone();
         let progress_state = state_for_record.clone();
         let progress: RecordingProgressSink = Arc::new(move |event| {
@@ -1376,8 +1782,18 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak.upgrade() else { return };
                 match event {
-                    RecordingProgress::Status(message) => ui.set_status_text(message.into()),
+                    RecordingProgress::Status(message) => {
+                        let background = recording_background_label(&message);
+                        set_background_process(&ui, &background, true);
+                        ui.set_status_text(message.into());
+                    }
+                    RecordingProgress::ClipStarted { candidate_id, current, total } => {
+                        let progress = format!("CANDIDATE {current} / {total}: {candidate_id}");
+                        set_background_process(&ui, &progress, true);
+                        ui.set_status_text(format!("Recording candidate {current} of {total}: {candidate_id}").into());
+                    }
                     RecordingProgress::ClipCompleted { candidate_id, output_path } => {
+                        set_background_process(&ui, "FINALIZING OUTPUTS", true);
                         state.lock().recording_index = RecordingIndex::load();
                         recompute_recorded_status(&state);
                         let filter = ui.get_filter_text().to_string();
@@ -1401,6 +1817,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                             None => format!("Recording finished: {completed} completed, {failed} failed. Temporary session data was cleaned up."),
                         };
                         ui.set_status_text(status.into());
+                        set_background_process(&ui, "READY", false);
                     }
                 }
             });
@@ -1412,7 +1829,14 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             }
             Err(error) => {
                 state_for_record.lock().recording_active = false;
-                ui.set_status_text(error.to_string().into());
+                set_background_process(&ui, "READY", false);
+                let message = format!("HLAE recording could not start:\n\n{error}");
+                rfd::MessageDialog::new()
+                    .set_title("HLAE Launch Failed")
+                    .set_description(&message)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                ui.set_status_text(message.into());
             }
         }
     });
@@ -1423,7 +1847,10 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let Some(ui) = weak.upgrade() else { return };
         let state = details_state.lock();
         let selected = selected_candidates(&state);
-        if selected.len() != 1 { ui.set_status_text("Select exactly one candidate to view details".into()); return; }
+        if selected.len() != 1 {
+            ui.set_status_text("Select exactly one candidate to view details".into());
+            return;
+        }
         let details = candidate_detail_text(selected[0]);
         ui.set_candidate_detail_player(details.player.into());
         ui.set_candidate_detail_player_meta(details.player_meta.into());
@@ -1444,11 +1871,17 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let Some(ui) = weak.upgrade() else { return };
         let path = {
             let state = logs_state.lock();
-            state.last_recording_session.clone().filter(|path| path.is_dir()).or_else(latest_recording_session)
+            state
+                .last_recording_session
+                .clone()
+                .filter(|path| path.is_dir())
+                .or_else(latest_recording_session)
         };
         match path {
             Some(path) => match open_path(&path) {
-                Ok(()) => ui.set_status_text(format!("Opened HLAE recording logs: {}", path.display()).into()),
+                Ok(()) => ui.set_status_text(
+                    format!("Opened HLAE recording logs: {}", path.display()).into(),
+                ),
                 Err(error) => ui.set_status_text(error.to_string().into()),
             },
             None => ui.set_status_text("No HLAE recording log session has been created yet".into()),
@@ -1470,7 +1903,11 @@ fn bind_settings_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let path_state = state.clone();
     ui.on_choose_setting_path(move |kind| {
         let kind = kind.to_string();
-        let path = if kind == "recording-output" { rfd::FileDialog::new().pick_folder() } else { rfd::FileDialog::new().pick_file() };
+        let path = if kind == "recording-output" {
+            rfd::FileDialog::new().pick_folder()
+        } else {
+            rfd::FileDialog::new().pick_file()
+        };
         let Some(path) = path else { return };
         if let Some(ui) = weak.upgrade() {
             let value: SharedString = path.display().to_string().into();
@@ -1488,22 +1925,34 @@ fn bind_settings_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     ui.on_choose_custom_resources(move |kind| {
         let Some(ui) = weak.upgrade() else { return };
         let additions = if kind.to_string() == "folder" {
-            rfd::FileDialog::new().pick_folder().into_iter().collect::<Vec<_>>()
+            rfd::FileDialog::new()
+                .pick_folder()
+                .into_iter()
+                .collect::<Vec<_>>()
         } else {
-            rfd::FileDialog::new().add_filter("TF2 custom resources", &["vpk", "zip"]).pick_files().unwrap_or_default()
+            rfd::FileDialog::new()
+                .add_filter("TF2 custom resources", &["vpk", "zip"])
+                .pick_files()
+                .unwrap_or_default()
         };
-        if additions.is_empty() { return; }
+        if additions.is_empty() {
+            return;
+        }
         let mut values = split_paths(&ui.get_custom_resources().to_string());
-        for path in additions { if !values.contains(&path) { values.push(path); } }
-        ui.set_custom_resources(values.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("; ").into());
+        for path in additions {
+            if !values.contains(&path) {
+                values.push(path);
+            }
+        }
+        ui.set_custom_resources(
+            values
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+                .into(),
+        );
     });
-    let weak = ui.as_weak();
-    let state_for_save = state.clone();
-    ui.on_save_settings(move || {
-        let Some(ui) = weak.upgrade() else { return };
-        persist_recording_settings(&ui, &state_for_save, true);
-    });
-
     let weak = ui.as_weak();
     let autosave_state = state.clone();
     ui.on_recording_settings_changed(move || {
@@ -1529,24 +1978,59 @@ fn update_progress(weak: &Weak<AppWindow>, event: ProgressEvent) {
         }
         ProgressEvent::Log(line) => {
             let mut text = ui.get_log_text().to_string();
-            if text.len() > 200_000 { text.drain(..100_000); }
-            text.push_str(&line); text.push('\n');
+            if text.len() > 200_000 {
+                text.drain(..100_000);
+            }
+            text.push_str(&line);
+            text.push('\n');
             ui.set_log_text(text.into());
         }
-        ProgressEvent::Phase { phase, completed, total, fraction, eta_seconds, active_workers, worker_limit } => {
+        ProgressEvent::Phase {
+            phase,
+            completed,
+            total,
+            fraction,
+            eta_seconds,
+            active_workers,
+            worker_limit,
+        } => {
             ui.set_progress_value(fraction);
-            let eta = eta_seconds.map(format_duration).unwrap_or_else(|| "estimating…".into());
+            let eta = eta_seconds
+                .map(format_duration)
+                .unwrap_or_else(|| "estimating…".into());
             ui.set_status_text(format!("Phase {phase} of 2: {completed}/{total} | active workers {active_workers}/{worker_limit} | ETA {eta}").into());
         }
-        ProgressEvent::Complete { export_root, candidates } => {
-            ui.set_busy(false); ui.set_progress_value(1.0); ui.set_status_text(format!("Complete: {candidates} candidates — {}", export_root.display()).into());
+        ProgressEvent::Complete {
+            export_root,
+            candidates,
+        } => {
+            ui.set_busy(false);
+            ui.set_progress_value(1.0);
+            ui.set_status_text(
+                format!(
+                    "Complete: {candidates} candidates — {}",
+                    export_root.display()
+                )
+                .into(),
+            );
         }
-        ProgressEvent::Failed(error) => { ui.set_busy(false); ui.set_status_text(format!("Failed: {error}").into()); }
-        ProgressEvent::Cancelled => { ui.set_busy(false); ui.set_status_text("Cancelled; completed exports were retained".into()); }
+        ProgressEvent::Failed(error) => {
+            ui.set_busy(false);
+            ui.set_status_text(format!("Failed: {error}").into());
+        }
+        ProgressEvent::Cancelled => {
+            ui.set_busy(false);
+            ui.set_status_text("Cancelled; completed exports were retained".into());
+        }
     }
 }
 
-fn refresh_candidates(ui: &AppWindow, state: &Arc<Mutex<State>>, _filter: &str, minimum_score: i32) {
+fn refresh_candidates(
+    ui: &AppWindow,
+    state: &Arc<Mutex<State>>,
+    _filter: &str,
+    minimum_score: i32,
+) {
     let state_ref = state;
     let mut state = state.lock();
     let (visible, rows) = build_candidate_rows(
@@ -1557,11 +2041,31 @@ fn refresh_candidates(ui: &AppWindow, state: &Arc<Mutex<State>>, _filter: &str, 
         minimum_score,
     );
     state.visible = visible;
-    ui.set_candidate_summary(format!("{} of {} ranked candidates", rows.len(), state.candidates.len()).into());
+    ui.set_candidate_summary(
+        format!(
+            "{} of {} ranked candidates",
+            rows.len(),
+            state.candidates.len()
+        )
+        .into(),
+    );
     ui.set_candidate_tags_width(candidate_tags_width(&rows));
     ui.set_candidate_rows(ModelRc::new(VecModel::from(rows)));
-    ui.set_selected_count(state.selected.iter().filter(|selected| **selected).count().min(i32::MAX as usize) as i32);
-    ui.set_all_visible_selected(!state.visible.is_empty() && state.visible.iter().all(|index| state.selected.get(*index).copied().unwrap_or(false)));
+    ui.set_selected_count(
+        state
+            .selected
+            .iter()
+            .filter(|selected| **selected)
+            .count()
+            .min(i32::MAX as usize) as i32,
+    );
+    ui.set_all_visible_selected(
+        !state.visible.is_empty()
+            && state
+                .visible
+                .iter()
+                .all(|index| state.selected.get(*index).copied().unwrap_or(false)),
+    );
     drop(state);
     update_recording_estimate(ui, state_ref);
 }
@@ -1577,7 +2081,9 @@ fn build_candidate_rows(
     let mut rows = Vec::new();
     for (index, candidate) in candidates.iter().enumerate() {
         let is_recorded = recorded.get(index).copied().unwrap_or(false);
-        if candidate.overall_score < minimum_score as f64 || !filters.matches(candidate, is_recorded) {
+        if candidate.overall_score < minimum_score as f64
+            || !filters.matches(candidate, is_recorded)
+        {
             continue;
         }
         visible.push(index);
@@ -1588,12 +2094,22 @@ fn build_candidate_rows(
             attacker: format!("#{}", candidate.attacker_user_id).into(),
             class_name: candidate.attacker_class.clone().into(),
             team: candidate.attacker_team.to_ascii_uppercase().into(),
-            demo: Path::new(&candidate.source_demo).file_name().and_then(|name| name.to_str()).unwrap_or(&candidate.source_demo).into(),
+            demo: Path::new(&candidate.source_demo)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&candidate.source_demo)
+                .into(),
             map_name: candidate.map_name.clone().into(),
             mode: candidate_server_type(candidate).into(),
             demo_type: candidate.demo_context.capture_type.to_uppercase().into(),
             recorded: if is_recorded { "Recorded" } else { "" }.into(),
-            ticks: candidate.point_of_kill_ticks.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ").into(),
+            ticks: candidate
+                .point_of_kill_ticks
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+                .into(),
             tags: candidate.tags.join(", ").into(),
             selected: selected.get(index).copied().unwrap_or(false),
         });
@@ -1602,24 +2118,38 @@ fn build_candidate_rows(
 }
 
 fn selected_candidates(state: &State) -> Vec<&Candidate> {
-    state.candidates.iter().zip(&state.selected).filter_map(|(candidate, selected)| selected.then_some(candidate)).collect()
+    state
+        .candidates
+        .iter()
+        .zip(&state.selected)
+        .filter_map(|(candidate, selected)| selected.then_some(candidate))
+        .collect()
 }
 
 fn load_candidates(path: &Path) -> Result<Vec<Candidate>> {
     BufReader::new(File::open(path).with_context(|| format!("missing {}", path.display()))?)
         .lines()
         .filter_map(|line| match line {
-            Ok(line) if !line.trim().is_empty() => Some(serde_json::from_str(&line).map_err(anyhow::Error::from)),
+            Ok(line) if !line.trim().is_empty() => {
+                Some(serde_json::from_str(&line).map_err(anyhow::Error::from))
+            }
             Ok(_) => None,
             Err(error) => Some(Err(error.into())),
         })
         .collect()
 }
 
-fn reconcile_recorded_outputs(weak: Weak<AppWindow>, state: Arc<Mutex<State>>, export_root: PathBuf) -> bool {
+fn reconcile_recorded_outputs(
+    weak: Weak<AppWindow>,
+    state: Arc<Mutex<State>>,
+    export_root: PathBuf,
+) -> bool {
     let (candidates, output_root) = {
         let state = state.lock();
-        (state.candidates.clone(), state.settings.recording_output_directory.clone())
+        (
+            state.candidates.clone(),
+            state.settings.recording_output_directory.clone(),
+        )
     };
     if candidates.is_empty() || !output_root.is_dir() {
         return false;
@@ -1634,15 +2164,23 @@ fn reconcile_recorded_outputs(weak: Weak<AppWindow>, state: Arc<Mutex<State>>, e
                 if current.export_root.as_ref() != Some(&export_root) {
                     return;
                 }
-                current.recording_index.merge_missing_entries(&reconciled_index);
+                current
+                    .recording_index
+                    .merge_missing_entries(&reconciled_index);
                 let index = current.recording_index.clone();
-                current.recorded = current.candidates.iter().map(|candidate| index.is_recorded_indexed(candidate)).collect();
+                current.recorded = current
+                    .candidates
+                    .iter()
+                    .map(|candidate| index.is_recorded_indexed(candidate))
+                    .collect();
             }
             let filter = ui.get_filter_text().to_string();
             let minimum_score = ui.get_minimum_score();
             refresh_candidates(&ui, &state, &filter, minimum_score);
             if added > 0 {
-                ui.set_status_text(format!("Loaded export — found {added} additional saved recording(s)").into());
+                ui.set_status_text(
+                    format!("Loaded export — found {added} additional saved recording(s)").into(),
+                );
             }
         });
     });
@@ -1653,11 +2191,22 @@ fn format_duration(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;
     let seconds = seconds % 60;
-    if hours > 0 { format!("{hours}h {minutes:02}m") } else if minutes > 0 { format!("{minutes}m {seconds:02}s") } else { format!("{seconds}s") }
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn split_paths(value: &str) -> Vec<PathBuf> {
-    value.split(';').map(str::trim).filter(|value| !value.is_empty()).map(PathBuf::from).collect()
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
@@ -1757,7 +2306,9 @@ fn update_batch_preflight(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let profile = PerformanceProfile::from_setting(&ui.get_performance_profile().to_string());
     match batch::estimate_batch_preflight(&demos, &output, profile) {
         Ok(estimate) => ui.set_batch_estimate(estimate.summary().into()),
-        Err(error) => ui.set_batch_estimate(format!("Pre-flight estimate unavailable: {error}").into()),
+        Err(error) => {
+            ui.set_batch_estimate(format!("Pre-flight estimate unavailable: {error}").into())
+        }
     }
 }
 
@@ -1771,7 +2322,9 @@ fn update_output_description(ui: &AppWindow) {
         "AVI → Videos/<candidate>.avi using the selected advanced Raw, FFV1, or HuffYUV codec with PCM audio."
     } else if format == "MOV - DNxHR" {
         "DNxHR → Videos/<candidate>.mov using the selected LB/SQ/HQ/HQX/444 editing profile with PCM audio."
-    } else if format == "MP4 - Standard" && ui.get_mp4_compatibility().to_string() == "DaVinci Resolve / Universal" {
+    } else if format == "MP4 - Standard"
+        && ui.get_mp4_compatibility().to_string() == "DaVinci Resolve / Universal"
+    {
         "MP4 Standard (default) → H.264 High / yuv420p with AAC for DaVinci Resolve and common editors."
     } else {
         "MP4 → Videos/<candidate>.mp4 with verified audio muxing (requires HLAE and FFmpeg)."
@@ -1783,7 +2336,10 @@ fn update_recording_estimate(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     let (candidates, mut settings) = {
         let state = state.lock();
         (
-            selected_candidates(&state).into_iter().cloned().collect::<Vec<_>>(),
+            selected_candidates(&state)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
             state.settings.clone(),
         )
     };
@@ -1794,14 +2350,20 @@ fn update_recording_estimate(ui: &AppWindow, state: &Arc<Mutex<State>>) {
     sync_settings_from_ui(ui, &mut settings);
     match estimate_recording_space(&candidates, &settings) {
         Ok(estimate) => ui.set_recording_estimate(estimate.summary().into()),
-        Err(error) => ui.set_recording_estimate(format!("Recording pre-flight unavailable: {error}").into()),
+        Err(error) => {
+            ui.set_recording_estimate(format!("Recording pre-flight unavailable: {error}").into())
+        }
     }
 }
 
 fn recompute_recorded_status(state: &Arc<Mutex<State>>) {
     let mut state = state.lock();
     let index = state.recording_index.clone();
-    state.recorded = state.candidates.iter().map(|candidate| index.is_recorded_indexed(candidate)).collect();
+    state.recorded = state
+        .candidates
+        .iter()
+        .map(|candidate| index.is_recorded_indexed(candidate))
+        .collect();
 }
 
 fn discover_named_executable(name: &str) -> Option<PathBuf> {
@@ -1811,7 +2373,11 @@ fn discover_named_executable(name: &str) -> Option<PathBuf> {
     }
     if let Ok(executable) = std::env::current_exe() {
         if let Some(directory) = executable.parent() {
-            candidates.extend([directory.join(name), directory.join("HLAE").join(name), directory.join("ffmpeg/bin").join(name)]);
+            candidates.extend([
+                directory.join(name),
+                directory.join("HLAE").join(name),
+                directory.join("ffmpeg/bin").join(name),
+            ]);
         }
     }
     candidates.into_iter().find(|path| path.is_file())
@@ -1822,35 +2388,66 @@ fn discover_tf2_executable(demos: &[PathBuf]) -> Option<PathBuf> {
     for demo in demos {
         for root in demo.ancestors() {
             candidates.extend([
-                root.join("tf_win64.exe"), root.join("tf.exe"), root.join("win64/tf_win64.exe"),
-                root.join("tf/win64/tf_win64.exe"), root.join("tf/tf.exe"),
+                root.join("tf_win64.exe"),
+                root.join("tf.exe"),
+                root.join("win64/tf_win64.exe"),
+                root.join("tf/win64/tf_win64.exe"),
+                root.join("tf/tf.exe"),
             ]);
         }
     }
-    for variable in ["ProgramFiles(x86)", "ProgramFiles", "STEAM_COMPAT_CLIENT_INSTALL_PATH"] {
+    for variable in [
+        "ProgramFiles(x86)",
+        "ProgramFiles",
+        "STEAM_COMPAT_CLIENT_INSTALL_PATH",
+    ] {
         if let Some(root) = std::env::var_os(variable).map(PathBuf::from) {
             for steam in [root.join("Steam"), root] {
                 let game = steam.join("steamapps/common/Team Fortress 2");
-                candidates.extend([game.join("tf_win64.exe"), game.join("tf/win64/tf_win64.exe"), game.join("tf.exe"), game.join("tf/tf.exe")]);
+                candidates.extend([
+                    game.join("tf_win64.exe"),
+                    game.join("tf/win64/tf_win64.exe"),
+                    game.join("tf.exe"),
+                    game.join("tf/tf.exe"),
+                ]);
             }
         }
     }
     if let Some(home) = dirs::home_dir() {
-        for steam in [home.join(".steam/steam"), home.join(".local/share/Steam"), home.join("Library/Application Support/Steam")] {
+        for steam in [
+            home.join(".steam/steam"),
+            home.join(".local/share/Steam"),
+            home.join("Library/Application Support/Steam"),
+        ] {
             let game = steam.join("steamapps/common/Team Fortress 2");
-            candidates.extend([game.join("tf_win64.exe"), game.join("tf/win64/tf_win64.exe"), game.join("tf_linux64"), game.join("tf_osx")]);
+            candidates.extend([
+                game.join("tf_win64.exe"),
+                game.join("tf/win64/tf_win64.exe"),
+                game.join("tf_linux64"),
+                game.join("tf_osx"),
+            ]);
         }
     }
     candidates.into_iter().find(|path| path.is_file())
 }
 
 fn discover_item_schema(demos: &[PathBuf], tf2: Option<&Path>) -> Option<PathBuf> {
-    let mut roots = demos.iter().flat_map(|demo| demo.ancestors().map(Path::to_path_buf)).collect::<Vec<_>>();
-    if let Some(tf2) = tf2 { roots.extend(tf2.ancestors().map(Path::to_path_buf)); }
-    roots.into_iter().flat_map(|root| [
-        root.join("scripts/items/items_game.txt"),
-        root.join("tf/scripts/items/items_game.txt"),
-    ]).find(|path| path.is_file())
+    let mut roots = demos
+        .iter()
+        .flat_map(|demo| demo.ancestors().map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    if let Some(tf2) = tf2 {
+        roots.extend(tf2.ancestors().map(Path::to_path_buf));
+    }
+    roots
+        .into_iter()
+        .flat_map(|root| {
+            [
+                root.join("scripts/items/items_game.txt"),
+                root.join("tf/scripts/items/items_game.txt"),
+            ]
+        })
+        .find(|path| path.is_file())
 }
 
 fn open_path(path: &Path) -> Result<()> {

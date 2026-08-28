@@ -13,6 +13,7 @@ const FALLBACK_TICK_INTERVAL: f64 = 1.0 / 66.666_666_7;
 const POST_KILL_SECONDS: f64 = 0.70;
 const VICTIM_HOLD_SECONDS: f64 = 0.32;
 const TRACK_KEY_INTERVAL_SECONDS: f64 = 0.20;
+const CLOSE_KILL_FRAMING_SECONDS: f64 = 0.45;
 const MAX_TRACK_GAP_SECONDS: f64 = 0.22;
 const MIN_CINEMATIC_PRE_KILL_TICKS: i64 = 3;
 
@@ -314,6 +315,7 @@ fn plan_candidate_from_tracks(
     })?;
     let hold_ticks = (VICTIM_HOLD_SECONDS / interval).round().max(1.0) as i64;
     let post_ticks = (POST_KILL_SECONDS / interval).round().max(1.0) as i64;
+    let close_kill_ticks = (CLOSE_KILL_FRAMING_SECONDS / interval).round().max(1.0) as i64;
     let clip_start = candidate.clip_start_tick.saturating_add(2).max(0);
 
     // Each distinct kill tick owns a segment. The first segment starts with the
@@ -335,6 +337,7 @@ fn plan_candidate_from_tracks(
             group.demo_tick,
             interval,
             "attacker",
+            false,
         )?
         .max(requested_start);
         for &victim_user_id in &group.victim_user_ids {
@@ -347,6 +350,7 @@ fn plan_candidate_from_tracks(
                 group.demo_tick,
                 interval,
                 "victim",
+                true,
             )?);
         }
         let available_ticks = group.demo_tick - start_tick;
@@ -388,56 +392,93 @@ fn plan_candidate_from_tracks(
         sample_ticks.sort_unstable();
         sample_ticks.dedup();
 
-        let mut victim_tracks = Vec::with_capacity(group.victim_user_ids.len());
-        let mut impact_victims = Vec::with_capacity(group.victim_user_ids.len());
-        for &victim_user_id in &group.victim_user_ids {
-            let victim = tracks.get(&victim_user_id).with_context(|| {
-                format!("cinematic angle unavailable: victim {victim_user_id} at demo tick {impact_tick} has no camera track")
-            })?;
-            impact_victims.push(interpolate_track(victim, impact_tick, interval, "victim")?);
-            victim_tracks.push(victim);
+        // Always frame this kill's victims. When another kill is extremely
+        // close, retain both sets of victims through the transition so the
+        // camera settles between them instead of snapping between targets.
+        // Neighbor tracks are best-effort; only this exact kill's victims are
+        // mandatory for the shot.
+        let required_victims = &group.victim_user_ids;
+        let framing_victims = framing_victims_for_shot(&kill_groups, index, close_kill_ticks);
+        let mut victim_tracks = Vec::with_capacity(framing_victims.len());
+        for (victim_user_id, victim_impact_tick) in framing_victims {
+            let Some(victim) = tracks.get(&victim_user_id) else {
+                if required_victims.contains(&victim_user_id) {
+                    bail!(
+                        "cinematic angle unavailable: victim {victim_user_id} at demo tick {impact_tick} has no camera track"
+                    );
+                }
+                continue;
+            };
+            match interpolate_track(victim, victim_impact_tick, interval, "victim") {
+                Ok(impact_point) => {
+                    victim_tracks.push((victim_user_id, victim_impact_tick, victim, impact_point));
+                }
+                Err(_) if !required_victims.contains(&victim_user_id) => {}
+                Err(error) => return Err(error),
+            }
         }
         let mut subjects = Vec::with_capacity(sample_ticks.len());
+        let mut required_subjects = Vec::with_capacity(sample_ticks.len());
         for &tick in &sample_ticks {
             let attacker_point = interpolate_track(attacker, tick.min(impact_tick), interval, "attacker")?;
             let mut victims = Vec::with_capacity(victim_tracks.len());
-            for (victim_index, victim) in victim_tracks.iter().enumerate() {
-                let point = if tick <= impact_tick {
-                    interpolate_track(victim, tick, interval, "victim")?
+            let mut required_positions = Vec::with_capacity(required_victims.len());
+            for (victim_user_id, victim_impact_tick, victim, impact_point) in &victim_tracks {
+                let point = if tick <= *victim_impact_tick {
+                    match interpolate_track(victim, tick, interval, "victim") {
+                        Ok(point) => point,
+                        Err(_) if !required_victims.contains(victim_user_id) => impact_point.clone(),
+                        Err(error) => return Err(error),
+                    }
                 } else {
-                    impact_victims[victim_index].clone()
+                    impact_point.clone()
                 };
-                victims.push(point.eye_position());
+                let eye_position = point.eye_position();
+                victims.push(eye_position);
+                if required_victims.contains(victim_user_id) {
+                    required_positions.push(eye_position);
+                }
             }
             subjects.push(ShotSubjects {
                 attacker: attacker_point.eye_position(),
                 victims,
             });
+            required_subjects.push(ShotSubjects {
+                attacker: attacker_point.eye_position(),
+                victims: required_positions,
+            });
         }
 
-        let mut best: Option<(f32, Vec<CameraKeyframe>)> = None;
-        for side in [-1.0_f32, 1.0] {
-            for distance in [260.0_f32, 330.0, 410.0] {
-                for height in [90.0_f32, 140.0, 190.0] {
-                    for along in [-90.0_f32, 0.0, 90.0] {
-                        if let Some((score, keys)) = build_path_candidate(
-                            &sample_ticks,
-                            activation_demo_tick,
-                            interval,
-                            &subjects,
-                            side,
-                            distance,
-                            height,
-                            along,
-                        ) {
-                            if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) {
-                                best = Some((score, keys));
+        let choose_path = |shot_subjects: &[ShotSubjects]| {
+            let mut best: Option<(f32, Vec<CameraKeyframe>)> = None;
+            for side in [-1.0_f32, 1.0] {
+                for distance in [260.0_f32, 330.0, 410.0] {
+                    for height in [90.0_f32, 140.0, 190.0] {
+                        for along in [-90.0_f32, 0.0, 90.0] {
+                            if let Some((score, keys)) = build_path_candidate(
+                                &sample_ticks,
+                                activation_demo_tick,
+                                interval,
+                                shot_subjects,
+                                side,
+                                distance,
+                                height,
+                                along,
+                            ) {
+                                if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) {
+                                    best = Some((score, keys));
+                                }
                             }
                         }
                     }
                 }
             }
-        }
+            best
+        };
+        // Prefer a centered close-multi-kill composition. If those nearby
+        // players are too far apart to fit safely, retain the exact kill's own
+        // victim framing instead of rejecting the whole cinematic.
+        let best = choose_path(&subjects).or_else(|| choose_path(&required_subjects));
         let (_, mut shot_keys) = best.with_context(|| {
             format!("cinematic angle unavailable: no generated path could frame every victim at demo tick {impact_tick}")
         })?;
@@ -510,6 +551,28 @@ fn kill_groups(candidate: &Candidate) -> Vec<KillGroup> {
         }
     }
     groups.into_values().collect()
+}
+
+fn framing_victims_for_shot(
+    kill_groups: &[KillGroup],
+    shot_index: usize,
+    close_kill_ticks: i64,
+) -> Vec<(i64, i64)> {
+    let Some(shot) = kill_groups.get(shot_index) else {
+        return Vec::new();
+    };
+    let mut victims = Vec::new();
+    for group in kill_groups {
+        if (group.demo_tick - shot.demo_tick).abs() > close_kill_ticks {
+            continue;
+        }
+        for &victim_user_id in &group.victim_user_ids {
+            if !victims.iter().any(|(existing, _)| *existing == victim_user_id) {
+                victims.push((victim_user_id, group.demo_tick));
+            }
+        }
+    }
+    victims
 }
 
 fn camera_interval(candidate: &Candidate) -> f64 {
@@ -625,12 +688,33 @@ fn continuous_track_start(
     end: i64,
     interval: f64,
     label: &str,
+    allow_terminal_invalidation: bool,
 ) -> Result<i64> {
     let max_gap = (MAX_TRACK_GAP_SECONDS / interval).ceil().max(2.0) as i64;
-    let end_index = points
+    let terminal_index = points
         .partition_point(|point| point.tick <= end)
         .checked_sub(1)
         .context("cinematic angle unavailable: no player samples exist before the kill")?;
+    let terminal = &points[terminal_index];
+    let end_index = if terminal.valid {
+        terminal_index
+    } else if allow_terminal_invalidation && terminal.tick == end {
+        // A POV export can mark the victim dead, out of PVS, or removed on the
+        // same demo tick as player_death. That terminal lifecycle marker does
+        // not mean the victim was missing before impact. Use the immediately
+        // preceding real sample when it is still within the normal network gap
+        // limit. Do not require the invalid marker's entity/generation to
+        // match: removal and death bookkeeping may change those fields.
+        terminal_index
+            .checked_sub(1)
+            .filter(|&index| {
+                let previous = &points[index];
+                previous.valid && end - previous.tick <= max_gap
+            })
+            .context("cinematic angle unavailable: the victim has no valid networked sample immediately before the kill")?
+    } else {
+        terminal_index
+    };
     let anchor = &points[end_index];
     if !anchor.valid || end - anchor.tick > max_gap {
         let missing_seconds = (end - anchor.tick).max(0) as f64 * interval;
@@ -874,6 +958,19 @@ mod tests {
     }
 
     #[test]
+    fn close_kills_share_framing_without_merging_distinct_shots() {
+        let groups = vec![
+            KillGroup { demo_tick: 900, event_ticks: vec![1000], victim_user_ids: vec![21] },
+            KillGroup { demo_tick: 920, event_ticks: vec![1020], victim_user_ids: vec![22] },
+            KillGroup { demo_tick: 980, event_ticks: vec![1080], victim_user_ids: vec![23] },
+        ];
+        assert_eq!(framing_victims_for_shot(&groups, 0, 30), vec![(21, 900), (22, 920)]);
+        assert_eq!(framing_victims_for_shot(&groups, 1, 30), vec![(21, 900), (22, 920)]);
+        assert_eq!(framing_victims_for_shot(&groups, 2, 30), vec![(23, 980)]);
+        assert_eq!(groups.len(), 3);
+    }
+
+    #[test]
     fn cinematic_uses_shorter_continuous_track_after_a_gap() {
         let point = |tick, valid| TrackPoint {
             tick,
@@ -892,7 +989,7 @@ mod tests {
             point(90, true),
             point(100, true),
         ];
-        let start = continuous_track_start(&points, 0, 100, 0.01, "victim").unwrap();
+        let start = continuous_track_start(&points, 0, 100, 0.01, "victim", true).unwrap();
         assert_eq!(start, 60);
         assert!(100 - start >= MIN_CINEMATIC_PRE_KILL_TICKS);
     }
@@ -914,7 +1011,7 @@ mod tests {
             point(100, true),
         ];
         let interval = 0.014_999_999_664_723_871;
-        let start = continuous_track_start(&points, 34, 100, interval, "victim").unwrap();
+        let start = continuous_track_start(&points, 34, 100, interval, "victim", true).unwrap();
         let pre_ticks = 100 - start;
         let pre_seconds = pre_ticks as f64 * interval;
         assert_eq!(pre_ticks, 19);
@@ -929,5 +1026,56 @@ mod tests {
         ticks.sort_unstable();
         ticks.dedup();
         assert_eq!(ticks.len(), 4);
+    }
+
+    #[test]
+    fn victim_death_marker_on_kill_tick_uses_previous_real_sample() {
+        let point = |tick, entity_id, generation, valid| TrackPoint {
+            tick,
+            entity_id,
+            generation,
+            position: Vec3 { x: tick as f32, y: 10.0, z: 20.0 },
+            eye_height: 72.0,
+            valid,
+        };
+        let points = vec![
+            point(80, 23, 534, true),
+            point(90, 23, 534, true),
+            point(99, 23, 534, true),
+            // Lifecycle bookkeeping at death may no longer carry the same
+            // entity/generation, but it belongs to the same user-id track.
+            point(100, 0, 535, false),
+        ];
+        let start = continuous_track_start(&points, 80, 100, 0.015, "victim", true).unwrap();
+        assert_eq!(start, 80);
+    }
+
+    #[test]
+    fn terminal_death_marker_does_not_hide_an_earlier_tracking_gap() {
+        let point = |tick, valid| TrackPoint {
+            tick,
+            entity_id: 23,
+            generation: 534,
+            position: Vec3 { x: tick as f32, y: 10.0, z: 20.0 },
+            eye_height: 72.0,
+            valid,
+        };
+        let points = vec![point(80, true), point(90, false), point(99, true), point(100, false)];
+        let start = continuous_track_start(&points, 80, 100, 0.015, "victim", true).unwrap();
+        assert_eq!(start, 99);
+    }
+
+    #[test]
+    fn attacker_invalidation_on_kill_tick_remains_unavailable() {
+        let point = |tick, valid| TrackPoint {
+            tick,
+            entity_id: 17,
+            generation: 4,
+            position: Vec3 { x: tick as f32, y: 0.0, z: 0.0 },
+            eye_height: 72.0,
+            valid,
+        };
+        let points = vec![point(90, true), point(99, true), point(100, false)];
+        assert!(continuous_track_start(&points, 90, 100, 0.015, "attacker", false).is_err());
     }
 }

@@ -9,11 +9,11 @@ Manual HLAE camera behavior:
 - Select exactly one candidate and click Launch TF2 with HLAE.
 - Uses the existing Before first tick selector as the automatic seek point and
   the After last tick selector as the end-of-clip reference.
-- F4 cycles through every distinct kill tick for multi-tick candidates.
-- F6 enables mirv_input camera, F7 adds a campath keyframe, and F8 exits manual
+- 4 cycles through every distinct kill tick for multi-tick candidates.
+- 6 enables mirv_input camera, 7 adds a campath keyframe, and 8 exits manual
   input and enables campath playback.
-- F9/F10 start and stop capture using the selected output format, FPS, and encoder.
-- F12 saves camera_path.xml beside the manual capture.
+- 9/0 start and stop capture using the selected output format, FPS, and encoder.
+- = saves camera_path.xml beside the manual capture.
 - The automatic cinematic selector, planner, victim tracking, and camera-change
   controls are removed. Automatic HLAE recording continues with original camera.
 - Manual sessions use the same complete backup/recovery mechanism as automatic

@@ -3,7 +3,6 @@
 
 mod analyzer;
 mod batch;
-mod camera;
 mod models;
 mod preflight;
 mod recording;
@@ -13,9 +12,10 @@ use crate::{
     batch::{BatchController, ProgressEvent},
     models::{AppSettings, Candidate},
     recording::{
-        estimate_recording_space, latest_recording_session, launch_hlae_batch, preview_candidate,
+        estimate_recording_space, latest_recording_session, launch_hlae_batch,
+        launch_manual_hlae_candidate, preview_candidate,
         recover_interrupted_profile, recover_recording_sessions, shutdown_active_recording,
-        validate_cinematic_batch, RecordingIndex, RecordingProgress, RecordingProgressSink,
+        RecordingIndex, RecordingProgress, RecordingProgressSink,
     },
     scheduler::PerformanceProfile,
 };
@@ -832,7 +832,6 @@ fn main() -> Result<()> {
     ui.set_capture_fps(settings.capture_fps.to_string().into());
     ui.set_jpg_quality(settings.jpg_quality as i32);
     ui.set_recording_format(settings.recording_format.clone().into());
-    ui.set_camera_mode(settings.camera_mode.clone().into());
     ui.set_mp4_compatibility(settings.mp4_compatibility.clone().into());
     ui.set_mp4_video_codec(settings.mp4_video_codec.clone().into());
     ui.set_mp4_pixel_format(settings.mp4_pixel_format.clone().into());
@@ -1678,6 +1677,144 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 .into(),
         );
     });
+
+    let weak = ui.as_weak();
+    let state_for_manual_hlae = state.clone();
+    ui.on_launch_manual_hlae(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let (candidate, mut settings) = {
+            let state = state_for_manual_hlae.lock();
+            if state.recording_active || state.recovery_active {
+                ui.set_status_text("Wait for the active recording or recovery process to finish".into());
+                return;
+            }
+            let selected = selected_candidates(&state)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            if selected.len() != 1 {
+                ui.set_status_text("Select exactly one candidate for manual HLAE playback".into());
+                return;
+            }
+            (selected[0].clone(), state.settings.clone())
+        };
+        sync_settings_from_ui(&ui, &mut settings);
+        if !settings.tf2_executable.is_file() {
+            settings.tf2_executable =
+                discover_tf2_executable(&[PathBuf::from(&candidate.source_demo)])
+                    .unwrap_or_default();
+        }
+        if !settings.hlae_executable.is_file() {
+            settings.hlae_executable = discover_named_executable("HLAE.exe").unwrap_or_default();
+        }
+        if !settings.ffmpeg_executable.is_file() {
+            settings.ffmpeg_executable = discover_named_executable(if cfg!(target_os = "windows") {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            })
+            .unwrap_or_default();
+        }
+        for (kind, title, required) in [
+            ("tf2", "Select the Team Fortress 2 Executable", true),
+            ("hlae", "Select the HLAE Executable", true),
+            (
+                "ffmpeg",
+                "Select the FFmpeg Executable",
+                !settings.recording_format.contains("Image"),
+            ),
+        ] {
+            let current = match kind {
+                "tf2" => &settings.tf2_executable,
+                "hlae" => &settings.hlae_executable,
+                _ => &settings.ffmpeg_executable,
+            };
+            if !required || current.is_file() {
+                continue;
+            }
+            let Some(path) = rfd::FileDialog::new().set_title(title).pick_file() else {
+                ui.set_status_text(format!("Manual HLAE launch cancelled; {title} was not selected").into());
+                return;
+            };
+            match kind {
+                "tf2" => {
+                    settings.tf2_executable = path.clone();
+                    ui.set_tf2_path(path.display().to_string().into());
+                }
+                "hlae" => {
+                    settings.hlae_executable = path.clone();
+                    ui.set_hlae_path(path.display().to_string().into());
+                }
+                _ => {
+                    settings.ffmpeg_executable = path.clone();
+                    ui.set_ffmpeg_path(path.display().to_string().into());
+                }
+            }
+        }
+        {
+            let mut state = state_for_manual_hlae.lock();
+            state.settings = settings.clone();
+            state.recording_active = true;
+            let _ = state.settings.save();
+        }
+        set_background_process(&ui, "PREPARING MANUAL HLAE", true);
+        let progress_weak = weak.clone();
+        let progress_state = state_for_manual_hlae.clone();
+        let progress: RecordingProgressSink = Arc::new(move |event| {
+            let weak = progress_weak.clone();
+            let state = progress_state.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                match event {
+                    RecordingProgress::Status(message) => {
+                        set_background_process(&ui, "MANUAL HLAE ACTIVE", true);
+                        ui.set_status_text(message.into());
+                    }
+                    RecordingProgress::ManualFinished { output_path, session } => {
+                        {
+                            let mut current = state.lock();
+                            current.recording_active = false;
+                            current.last_recording_session = session.clone();
+                        }
+                        let status = match session {
+                            Some(session) => format!("Manual HLAE closed, but restoration needs attention. Logs: {}", session.display()),
+                            None => format!("Manual HLAE closed; TF2 settings restored. Capture folder: {}", output_path.display()),
+                        };
+                        ui.set_status_text(status.into());
+                        set_background_process(&ui, "READY", false);
+                    }
+                    RecordingProgress::ClipStarted { .. }
+                    | RecordingProgress::ClipCompleted { .. }
+                    | RecordingProgress::Finished { .. } => {}
+                }
+            });
+        });
+        match launch_manual_hlae_candidate(&candidate, &settings, Some(progress)) {
+            Ok(launch) => {
+                state_for_manual_hlae.lock().last_recording_session = Some(launch.session.clone());
+                ui.set_status_text(
+                    format!(
+                        "Manual HLAE launched at tick {}. F3 start, F4 kills, F6 camera, F7 keyframe, F9/F10 record. Output: {}",
+                        launch.target_tick,
+                        launch.output_path.display()
+                    )
+                    .into(),
+                );
+            }
+            Err(error) => {
+                state_for_manual_hlae.lock().recording_active = false;
+                set_background_process(&ui, "READY", false);
+                let message = format!("Manual HLAE could not start:\n\n{error:#}");
+                rfd::MessageDialog::new()
+                    .set_title("Manual HLAE Launch Failed")
+                    .set_description(&message)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                ui.set_status_text(message.into());
+            }
+        }
+    });
+
     let weak = ui.as_weak();
     let state_for_record = state.clone();
     ui.on_record_selected(move || {
@@ -1745,25 +1882,6 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         if selected.is_empty() {
             ui.set_status_text("All selected candidates already have matching recordings".into());
             return;
-        }
-        if let Err(error) = validate_cinematic_batch(&selected, &settings) {
-            let choice = rfd::MessageDialog::new()
-                .set_title("Cinematic Angle Unavailable")
-                .set_description(format!(
-                    "{error:#}\n\nYes: record the selected candidates with their original camera\nNo: cancel without recording"
-                ))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .set_level(rfd::MessageLevel::Warning)
-                .show();
-            if choice != rfd::MessageDialogResult::Yes {
-                ui.set_status_text("Recording cancelled because the cinematic camera was unavailable".into());
-                return;
-            }
-            settings.camera_mode = "Original Camera".into();
-            ui.set_recording_settings_syncing(true);
-            ui.set_camera_mode("Original Camera".into());
-            ui.set_recording_settings_syncing(false);
-            ui.set_status_text("Cinematic camera unavailable; recording will use the original camera".into());
         }
         let recording_preflight = match estimate_recording_space(&selected, &settings) {
             Ok(estimate) => estimate,
@@ -1840,6 +1958,19 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                         let status = match session {
                             Some(session) => format!("Recording finished: {completed} completed, {failed} failed. Logs: {}", session.display()),
                             None => format!("Recording finished: {completed} completed, {failed} failed. Temporary session data was cleaned up."),
+                        };
+                        ui.set_status_text(status.into());
+                        set_background_process(&ui, "READY", false);
+                    }
+                    RecordingProgress::ManualFinished { output_path, session } => {
+                        {
+                            let mut current = state.lock();
+                            current.recording_active = false;
+                            current.last_recording_session = session.clone();
+                        }
+                        let status = match session {
+                            Some(session) => format!("Manual HLAE session closed, but TF2 settings restoration needs attention. Logs: {}", session.display()),
+                            None => format!("Manual HLAE session closed and TF2 settings were restored. Capture folder: {}", output_path.display()),
                         };
                         ui.set_status_text(status.into());
                         set_background_process(&ui, "READY", false);
@@ -2244,7 +2375,6 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.capture_fps = ui.get_capture_fps().parse().unwrap_or(120);
     settings.jpg_quality = ui.get_jpg_quality().clamp(1, 100) as u8;
     settings.recording_format = ui.get_recording_format().to_string();
-    settings.camera_mode = ui.get_camera_mode().to_string();
     settings.mp4_compatibility = ui.get_mp4_compatibility().to_string();
     settings.mp4_video_codec = ui.get_mp4_video_codec().to_string();
     settings.mp4_pixel_format = ui.get_mp4_pixel_format().to_string();
@@ -2288,7 +2418,6 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_avi_video_codec(settings.avi_video_codec.clone().into());
     ui.set_avi_pixel_format(settings.avi_pixel_format.clone().into());
     ui.set_dnxhr_profile(settings.dnxhr_profile.clone().into());
-    ui.set_camera_mode(settings.camera_mode.clone().into());
     ui.set_dx_level(settings.dx_level.clone().into());
     ui.set_skybox(settings.skybox.clone().into());
     ui.set_hud(settings.hud.clone().into());

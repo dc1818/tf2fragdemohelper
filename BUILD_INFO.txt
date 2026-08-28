@@ -10,8 +10,8 @@ Cinematic camera behavior:
 - Generates six smooth HLAE keyframes with a brief post-impact victim hold.
 - Frames attacker and victim together instead of switching to attacker third person.
 - Rejects POV PVS, entity, respawn, or identity gaps instead of extrapolating.
-- Reads the exact map BSP and rejects camera endpoints, sightlines, and swept
-  movement that cross solid brushes.
+- Reads the exact map BSP from tf/maps or the installed TF2 VPK archives and
+  rejects camera endpoints, sightlines, and swept movement through solid brushes.
 - Loads the campath only after the documented POV camera setup, then executes
   mirv_input end before enabling mirv_campath.
 - Offers Original Camera or Cancel when an angle is unavailable.

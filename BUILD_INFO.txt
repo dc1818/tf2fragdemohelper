@@ -7,8 +7,8 @@ selector with a single-candidate manual HLAE launch workflow.
 
 Manual HLAE camera behavior:
 - Select exactly one candidate and click Launch TF2 with HLAE.
-- Uses the existing Before first tick selector as the automatic seek point and
-  the After last tick selector as the end-of-clip reference.
+- Uses the existing Before first tick selector as the automatic seek point,
+  pauses there, and uses the After last tick selector as the end-of-clip reference.
 - 4 cycles through every distinct kill tick for multi-tick candidates.
 - 6 enables mirv_input camera, 7 adds a campath keyframe, and 8 exits manual
   input and enables campath playback.

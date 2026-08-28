@@ -14,6 +14,7 @@ const PRE_KILL_SECONDS: f64 = 1.0;
 const POST_KILL_SECONDS: f64 = 0.70;
 const VICTIM_HOLD_SECONDS: f64 = 0.32;
 const MAX_TRACK_GAP_SECONDS: f64 = 0.22;
+const MIN_CINEMATIC_PRE_KILL_SECONDS: f64 = 0.35;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub struct Vec3 {
@@ -133,6 +134,7 @@ pub struct CinematicPlan {
     pub attacker_user_id: i64,
     pub activation_demo_tick: i64,
     pub interval_per_tick: f64,
+    pub pre_kill_seconds: f64,
     pub collision_map: String,
     pub collision_coverage: &'static str,
     pub track_source: String,
@@ -201,7 +203,12 @@ pub fn plan_candidate(candidate: &Candidate, game_directory: &Path) -> Result<Ci
 pub fn plan_candidates(candidates: &[Candidate], _game_directory: &Path) -> Result<Vec<CinematicPlan>> {
     let mut groups = BTreeMap::<PathBuf, Vec<usize>>::new();
     for (index, candidate) in candidates.iter().enumerate() {
-        groups.entry(camera_state_path(candidate)?).or_default().push(index);
+        groups
+            .entry(camera_state_path(candidate).with_context(|| {
+                format!("candidate {} has no usable camera export", candidate.candidate_id)
+            })?)
+            .or_default()
+            .push(index);
     }
     let mut output = vec![None; candidates.len()];
     for (state_path, indices) in groups {
@@ -227,11 +234,11 @@ pub fn plan_candidates(candidates: &[Candidate], _game_directory: &Path) -> Resu
         let tracks = read_tracks(&state_path, &windows)?;
         for index in indices {
             let candidate = &candidates[index];
-            output[index] = Some(plan_candidate_from_tracks(
-                candidate,
-                &state_path,
-                &tracks,
-            )?);
+            output[index] = Some(
+                plan_candidate_from_tracks(candidate, &state_path, &tracks).with_context(|| {
+                    format!("candidate {} cannot use Cinematic Kill Shot", candidate.candidate_id)
+                })?,
+            );
         }
     }
     output
@@ -272,18 +279,50 @@ fn plan_candidate_from_tracks(
         .context("cinematic angle unavailable: the candidate has no kill with a victim ID and demo tick")?;
     let interval = camera_interval(candidate);
     let pre_ticks = (PRE_KILL_SECONDS / interval).round() as i64;
-    let start_tick = (primary.demo_tick - pre_ticks).max(0);
     let impact_tick = primary.demo_tick;
+    let requested_start_tick = (impact_tick - pre_ticks)
+        .max(candidate.clip_start_tick.saturating_add(2))
+        .max(0);
     let attacker = tracks.get(&candidate.attacker_user_id).with_context(|| {
         format!("cinematic angle unavailable: attacker {} has no camera track", candidate.attacker_user_id)
     })?;
     let victim = tracks.get(&primary.victim_user_id).with_context(|| {
         format!("cinematic angle unavailable: victim {} has no camera track", primary.victim_user_id)
     })?;
-    require_continuous_track(attacker, start_tick, impact_tick, interval, "attacker")?;
-    require_continuous_track(victim, start_tick, impact_tick, interval, "victim")?;
+    let attacker_start = continuous_track_start(
+        attacker,
+        requested_start_tick,
+        impact_tick,
+        interval,
+        "attacker",
+    )?;
+    let victim_start = continuous_track_start(
+        victim,
+        requested_start_tick,
+        impact_tick,
+        interval,
+        "victim",
+    )?;
+    let start_tick = requested_start_tick.max(attacker_start).max(victim_start);
+    interpolate_track(attacker, start_tick, interval, "attacker")?;
+    interpolate_track(victim, start_tick, interval, "victim")?;
+    let pre_kill_seconds = ((impact_tick - start_tick) as f64 * interval).max(0.0);
+    if pre_kill_seconds + f64::EPSILON < MIN_CINEMATIC_PRE_KILL_SECONDS {
+        bail!(
+            "cinematic angle unavailable: the shared attacker/victim track begins only {:.3} seconds before the kill; at least {:.2} seconds is required",
+            pre_kill_seconds,
+            MIN_CINEMATIC_PRE_KILL_SECONDS,
+        );
+    }
 
-    let offsets = [-PRE_KILL_SECONDS, -0.62, -0.30, 0.0, VICTIM_HOLD_SECONDS, POST_KILL_SECONDS];
+    let offsets = [
+        -pre_kill_seconds,
+        -pre_kill_seconds * 0.68,
+        -pre_kill_seconds * 0.34,
+        0.0,
+        VICTIM_HOLD_SECONDS,
+        POST_KILL_SECONDS,
+    ];
     let sample_ticks = offsets
         .iter()
         .map(|seconds| impact_tick + (*seconds / interval).round() as i64)
@@ -325,7 +364,7 @@ fn plan_candidate_from_tracks(
     let (_, keyframes) = best.context(
         "cinematic angle unavailable: no generated path could keep the attacker and victim safely framed",
     )?;
-    let activation_demo_tick = (primary.demo_tick - pre_ticks).max(candidate.clip_start_tick + 2);
+    let activation_demo_tick = start_tick;
     Ok(CinematicPlan {
         format: "tf2-frag-cinematic-camera-plan",
         format_version: 1,
@@ -337,6 +376,7 @@ fn plan_candidate_from_tracks(
         attacker_user_id: candidate.attacker_user_id,
         activation_demo_tick,
         interval_per_tick: interval,
+        pre_kill_seconds,
         collision_map: "disabled".into(),
         collision_coverage: "disabled for victim-tracking test build",
         track_source: state_path.display().to_string(),
@@ -473,46 +513,48 @@ fn read_tracks(
     Ok(tracks)
 }
 
-fn require_continuous_track(
+fn continuous_track_start(
     points: &[TrackPoint],
-    start: i64,
+    requested_start: i64,
     end: i64,
     interval: f64,
     label: &str,
-) -> Result<()> {
+) -> Result<i64> {
     let max_gap = (MAX_TRACK_GAP_SECONDS / interval).ceil().max(2.0) as i64;
-    let relevant = points
-        .iter()
-        .filter(|point| point.tick >= start - max_gap && point.tick <= end)
-        .collect::<Vec<_>>();
-    let first = relevant.first().with_context(|| format!(
-        "cinematic angle unavailable: the {label} was not networked in the required pre-kill window"
-    ))?;
-    let last = relevant.last().unwrap();
-    if !first.valid || first.tick > start + max_gap || !last.valid || last.tick < end - max_gap {
-        bail!("cinematic angle unavailable: the {label} track does not cover the complete pre-kill window");
+    let end_index = points
+        .partition_point(|point| point.tick <= end)
+        .checked_sub(1)
+        .context("cinematic angle unavailable: no player samples exist before the kill")?;
+    let anchor = &points[end_index];
+    if !anchor.valid || end - anchor.tick > max_gap {
+        let missing_seconds = (end - anchor.tick).max(0) as f64 * interval;
+        bail!(
+            "cinematic angle unavailable: the {label} was not continuously networked at the kill (last valid coverage is more than {missing_seconds:.3} seconds away)"
+        );
     }
-    let generation = first.generation;
-    let entity_id = first.entity_id;
-    for pair in relevant.windows(2) {
-        let left = pair[0];
-        let right = pair[1];
-        if !left.valid
-            || !right.valid
-            || left.generation != generation
-            || right.generation != generation
-            || left.entity_id != entity_id
-            || right.entity_id != entity_id
-            || right.tick - left.tick > max_gap
-        {
-            let gap_start = left.tick.max(start);
-            let gap_end = right.tick.min(end);
-            bail!(
-                "cinematic angle unavailable: the {label} camera track has a PVS, identity, or networking gap from demo tick {gap_start} to {gap_end}"
-            );
+
+    let generation = anchor.generation;
+    let entity_id = anchor.entity_id;
+    let mut earliest_tick = anchor.tick;
+    let mut right = anchor;
+    for left in points[..end_index].iter().rev() {
+        let continuous = left.valid
+            && right.valid
+            && left.generation == generation
+            && right.generation == generation
+            && left.entity_id == entity_id
+            && right.entity_id == entity_id
+            && right.tick - left.tick <= max_gap;
+        if !continuous {
+            break;
+        }
+        earliest_tick = left.tick;
+        right = left;
+        if earliest_tick <= requested_start {
+            break;
         }
     }
-    Ok(())
+    Ok(earliest_tick.max(requested_start))
 }
 
 fn interpolate_track(points: &[TrackPoint], tick: i64, interval: f64, label: &str) -> Result<TrackPoint> {
@@ -554,6 +596,7 @@ fn build_path_candidate(
 ) -> Option<(f32, Vec<CameraKeyframe>)> {
     let mut keys = Vec::with_capacity(ticks.len());
     let mut score = 0.0_f32;
+    let path_start_seconds = offsets.first().copied()?.abs();
     for (index, ((&tick, &seconds), &(attacker, victim))) in ticks
         .iter()
         .zip(offsets)
@@ -593,7 +636,7 @@ fn build_path_candidate(
         };
         score += framing_angle * 0.25 + (camera.sub(target).length() - 330.0).abs() * 0.01;
         keys.push(CameraKeyframe {
-            time_seconds: seconds + PRE_KILL_SECONDS,
+            time_seconds: seconds + path_start_seconds,
             demo_tick: tick,
             position: camera,
             pitch,
@@ -653,6 +696,7 @@ mod tests {
             attacker_user_id: 1,
             activation_demo_tick: 33,
             interval_per_tick: FALLBACK_TICK_INTERVAL,
+            pre_kill_seconds: PRE_KILL_SECONDS,
             collision_map: "disabled".into(),
             collision_coverage: "disabled for victim-tracking test build",
             track_source: "states.ndjson".into(),
@@ -697,5 +741,29 @@ mod tests {
         assert_eq!(merged[0].end_tick, 260);
         assert_eq!(merged[1].start_tick, 400);
         assert_eq!(merged[1].end_tick, 420);
+    }
+
+    #[test]
+    fn cinematic_uses_shorter_continuous_track_after_a_gap() {
+        let point = |tick, valid| TrackPoint {
+            tick,
+            entity_id: 17,
+            generation: 4,
+            position: Vec3 { x: tick as f32, y: 0.0, z: 0.0 },
+            eye_height: 72.0,
+            valid,
+        };
+        let points = vec![
+            point(30, true),
+            point(40, false),
+            point(60, true),
+            point(70, true),
+            point(80, true),
+            point(90, true),
+            point(100, true),
+        ];
+        let start = continuous_track_start(&points, 0, 100, 0.01, "victim").unwrap();
+        assert_eq!(start, 60);
+        assert!((100 - start) as f64 * 0.01 >= MIN_CINEMATIC_PRE_KILL_SECONDS);
     }
 }

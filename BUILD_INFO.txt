@@ -7,6 +7,8 @@ gap-aware HLAE campath planner based on continuous parsed player tracks.
 
 Cinematic camera behavior:
 - Begins one second before the primary kill and follows the actual victim track.
+- Automatically shortens the lead to a continuous 0.35-second-or-longer shared
+  attacker/victim segment instead of rejecting every incomplete one-second track.
 - Generates six smooth HLAE keyframes with a brief post-impact victim hold.
 - Frames attacker and victim together instead of switching to attacker third person.
 - Rejects POV PVS, entity, respawn, or identity gaps instead of extrapolating.
@@ -15,6 +17,7 @@ Cinematic camera behavior:
 - Loads the campath only after the documented POV camera setup, then executes
   mirv_input end before enabling mirv_campath.
 - Offers Original Camera or Cancel when an angle is unavailable.
+- Displays the candidate ID and full nested tracking/export cause when unavailable.
 - Retains camera_plan.json and camera_path.xml with recording diagnostics.
 
 Recording readiness behavior:

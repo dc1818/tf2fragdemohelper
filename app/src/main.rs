@@ -1750,7 +1750,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             let choice = rfd::MessageDialog::new()
                 .set_title("Cinematic Angle Unavailable")
                 .set_description(format!(
-                    "{error}\n\nYes: record the selected candidates with their original camera\nNo: cancel without recording"
+                    "{error:#}\n\nYes: record the selected candidates with their original camera\nNo: cancel without recording"
                 ))
                 .set_buttons(rfd::MessageButtons::YesNo)
                 .set_level(rfd::MessageLevel::Warning)
@@ -1855,7 +1855,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             Err(error) => {
                 state_for_record.lock().recording_active = false;
                 set_background_process(&ui, "READY", false);
-                let message = format!("HLAE recording could not start:\n\n{error}");
+                let message = format!("HLAE recording could not start:\n\n{error:#}");
                 rfd::MessageDialog::new()
                     .set_title("HLAE Launch Failed")
                     .set_description(&message)

@@ -92,18 +92,9 @@ pub fn handle_player_entity(
                 player.flags = i64::try_from(&prop.value).unwrap_or_default() as u32;
                 player.flags_known = true;
             }
-            VELOCITY_X => {
-                player.velocity.x = f32::try_from(&prop.value).unwrap_or_default();
-                player.velocity_known = true;
-            }
-            VELOCITY_Y => {
-                player.velocity.y = f32::try_from(&prop.value).unwrap_or_default();
-                player.velocity_known = true;
-            }
-            VELOCITY_Z => {
-                player.velocity.z = f32::try_from(&prop.value).unwrap_or_default();
-                player.velocity_known = true;
-            }
+            VELOCITY_X => player.velocity.x = f32::try_from(&prop.value).unwrap_or_default(),
+            VELOCITY_Y => player.velocity.y = f32::try_from(&prop.value).unwrap_or_default(),
+            VELOCITY_Z => player.velocity.z = f32::try_from(&prop.value).unwrap_or_default(),
             LOCAL_ORIGIN | NON_LOCAL_ORIGIN => {
                 let pos_xy = VectorXY::try_from(&prop.value).unwrap_or_default();
                 player.position.x = pos_xy.x;

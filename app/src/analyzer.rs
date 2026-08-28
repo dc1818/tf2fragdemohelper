@@ -270,6 +270,24 @@ fn analyze_export_internal(
     profile.candidate_group_jobs = group_jobs;
     profile.candidate_workers_used = workers_used;
     append_bookmarks(export, &source_demo, &context, &mut candidates)?;
+    let interval_per_tick = manifest
+        .get("interval_per_tick")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.001 && *value <= 0.1)
+        .unwrap_or(1.0 / TICKS_PER_SECOND);
+    for candidate in &mut candidates {
+        candidate.extra.insert(
+            "camera_context".into(),
+            json!({
+                "format": "tf2-frag-camera-context",
+                "format_version": 1,
+                "export_directory": export.display().to_string(),
+                "state_samples": export.join("state_samples.ndjson").display().to_string(),
+                "manifest": export.join("manifest.json").display().to_string(),
+                "interval_per_tick": interval_per_tick,
+            }),
+        );
+    }
     // Keep low-scoring single kills available long enough for a nearby
     // bookmark to inherit their player/class/weapon/state identifiers. Normal
     // low-scoring singles are removed only after bookmark candidates exist.

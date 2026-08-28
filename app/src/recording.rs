@@ -1,7 +1,13 @@
 use crate::{
+    camera::{self, CinematicPlan},
     models::{AppSettings, Candidate},
     preflight::{disk_space_for, format_bytes, require_disk_space},
 };
+
+#[derive(Clone, Debug)]
+struct CameraSchedule {
+    activation_tick: i64,
+}
 use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -300,6 +306,7 @@ pub struct RecordingSpaceEstimate {
     pub height: u32,
     pub fps: u32,
     pub jpg_quality: u8,
+    pub camera_mode: String,
     pub encoding_summary: Option<String>,
 }
 
@@ -325,10 +332,11 @@ impl RecordingSpaceEstimate {
             String::new()
         };
         let mut summary = format!(
-            "Recording pre-flight ({status})\n{} clip(s), {:.1} seconds, {} frames\n{}x{} at {} FPS, {}{}\nEstimated finalized output: {}\nEstimated peak working use (including the largest in-progress encoded capture): {}\nSafety headroom (20%, minimum 1 GB): {}\nRequired free space: {}\nAvailable on {}: {}\nCompressed-video estimates vary with scene complexity.",
+            "Recording pre-flight ({status})\n{} clip(s), {:.1} seconds, {} frames\nCamera: {}\n{}x{} at {} FPS, {}{}\nEstimated finalized output: {}\nEstimated peak working use (including the largest in-progress encoded capture): {}\nSafety headroom (20%, minimum 1 GB): {}\nRequired free space: {}\nAvailable on {}: {}\nCompressed-video estimates vary with scene complexity.",
             self.clip_count,
             self.duration_seconds,
             format_number(self.frame_count),
+            self.camera_mode,
             self.width,
             self.height,
             self.fps,
@@ -655,6 +663,7 @@ pub fn estimate_recording_space(
         height,
         fps,
         jpg_quality: settings.jpg_quality,
+        camera_mode: settings.camera_mode.clone(),
         encoding_summary,
     })
 }
@@ -1115,6 +1124,21 @@ pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> R
     Ok(session)
 }
 
+pub fn validate_cinematic_batch(candidates: &[Candidate], settings: &AppSettings) -> Result<()> {
+    if settings.camera_mode != "Cinematic Kill Shot" {
+        return Ok(());
+    }
+    if candidates.is_empty() {
+        bail!("select one or more candidates");
+    }
+    if !settings.tf2_executable.is_file() {
+        bail!("select tf_win64.exe before validating a cinematic camera");
+    }
+    let game = tf2_game_directory(&settings.tf2_executable)?;
+    camera::plan_candidates(candidates, &game).context("one or more selected candidates cannot use the cinematic camera")?;
+    Ok(())
+}
+
 pub fn launch_hlae_batch(
     candidates: &[Candidate],
     settings: &AppSettings,
@@ -1219,6 +1243,30 @@ pub fn launch_hlae_batch(
         .iter()
         .map(|clip| (clip.order, clip))
         .collect::<HashMap<_, _>>();
+    let mut camera_schedules = HashMap::<usize, CameraSchedule>::new();
+    if settings.camera_mode == "Cinematic Kill Shot" {
+        let retained_camera_root = session.join("camera");
+        let plans: Vec<CinematicPlan> = camera::plan_candidates(candidates, &game)
+            .context("could not build the selected cinematic camera batch")?;
+        for (index, (candidate, plan)) in candidates.iter().zip(plans).enumerate() {
+            let order = index + 1;
+            let base = format!(
+                "{:03}_{}_t{}-{}",
+                order,
+                sanitize(&candidate.candidate_id),
+                candidate.clip_start_tick,
+                candidate.clip_end_tick
+            );
+            camera::write_artifacts(&plan, &cfg_root, &base)
+                .context("could not stage the cinematic HLAE campath")?;
+            camera::write_artifacts(&plan, &retained_camera_root, &base)
+                .context("could not retain the cinematic camera diagnostics")?;
+            camera_schedules.insert(
+                order,
+                CameraSchedule { activation_tick: plan.activation_demo_tick },
+            );
+        }
+    }
     write_recording_manifest(&session, &prepared_clips, settings, &game, "Pending", None)?;
     let mut staged_relatives = Vec::new();
     for (demo_index, (source, clips)) in groups.iter().enumerate() {
@@ -1282,7 +1330,7 @@ pub fn launch_hlae_batch(
                 .unwrap(),
         );
         let next = staged_relatives.get(demo_index + 1).cloned();
-        let vdm = vdm_text(clips, session_name, next.as_deref(), settings)
+        let vdm = vdm_text(clips, session_name, next.as_deref(), settings, &camera_schedules)
             .context("could not build the recording VDM")?;
         fs::write(staged.with_extension("vdm"), vdm)
             .context("could not write the recording VDM")?;
@@ -2542,7 +2590,13 @@ fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
     lines.join("\n")
 }
 
-fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<&str>, settings: &AppSettings) -> Result<String> {
+fn vdm_text(
+    clips: &[(usize, Candidate)],
+    session_name: &str,
+    next_demo: Option<&str>,
+    settings: &AppSettings,
+    camera_schedules: &HashMap<usize, CameraSchedule>,
+) -> Result<String> {
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
     add_vdm_action(
@@ -2552,7 +2606,7 @@ fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<
         "Apply movie profile",
         1,
         None,
-        &format!("exec tf2fragdemohelper_recording_profile; {}", clean_capture_screen_commands()),
+        &format!("mirv_campath enabled 0; mirv_campath clear; mirv_input end; exec tf2fragdemohelper_recording_profile; {}", clean_capture_screen_commands()),
     );
     let mut previous_finalize_tick = -1;
     for (order, candidate) in clips {
@@ -2574,7 +2628,32 @@ fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<
             format!("spec_autodirector 0; spec_player #{}; spec_mode 4; ", candidate.attacker_user_id)
         } else { String::new() };
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Start clip", start + 1, None, &format!("{focus}exec tf2fragdemohelper_batch/{session_name}/{base}_start"));
-        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Stop clip", end, None, &format!("exec tf2fragdemohelper_batch/{session_name}/{base}_stop"));
+        if let Some(camera) = camera_schedules.get(order) {
+            if camera.activation_tick <= start + 1 || camera.activation_tick >= end {
+                bail!(
+                    "cinematic camera activation tick {} is outside candidate {} recording window {}-{}",
+                    camera.activation_tick,
+                    candidate.candidate_id,
+                    start,
+                    end
+                );
+            }
+            add_vdm_action(
+                &mut lines,
+                &mut action,
+                "PlayCommands",
+                "Start cinematic campath",
+                camera.activation_tick,
+                None,
+                &format!("exec tf2fragdemohelper_batch/{session_name}/{base}_camera_setup"),
+            );
+        }
+        let cleanup = if camera_schedules.contains_key(order) {
+            "; mirv_campath enabled 0; mirv_campath clear; mirv_input end"
+        } else {
+            ""
+        };
+        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Stop clip", end, None, &format!("exec tf2fragdemohelper_batch/{session_name}/{base}_stop{cleanup}"));
         previous_finalize_tick = end + RECORDING_FLUSH_TICKS;
         add_vdm_action(&mut lines, &mut action, "PlayCommands", "Finalize clip", previous_finalize_tick, None, &format!("echo TF2FRAG_RECORD_FINALIZED {base}"));
     }
@@ -2775,11 +2854,12 @@ fn write_recording_manifest(
         .collect::<Vec<_>>();
     let manifest = json!({
         "format": "tf2-hlae-recording-queue",
-                "version": 8,
+        "version": 9,
         "batch_status": batch_status,
         "batch_error": error,
         "offline_only": true,
         "output_format": settings.recording_format,
+        "camera_mode": settings.camera_mode,
         "ffmpeg_executable": settings.ffmpeg_executable,
         "game_directory": game,
         "encoding": mp4_encoding_manifest(settings),

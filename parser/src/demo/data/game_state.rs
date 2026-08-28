@@ -72,6 +72,11 @@ pub struct Player {
     pub entity: EntityId,
     pub position: Vector,
     pub velocity: Vector,
+    /// True only after a networked velocity component was decoded for this
+    /// entity. Non-local POV players commonly have positions without velocity;
+    /// keeping that distinction prevents camera planning from treating a
+    /// parser default of zero as authoritative motion.
+    pub velocity_known: bool,
     pub flags: u32,
     pub flags_known: bool,
     pub health: u16,

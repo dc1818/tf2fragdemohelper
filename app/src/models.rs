@@ -106,6 +106,7 @@ pub struct AppSettings {
     pub capture_fps: u32,
     pub jpg_quality: u8,
     pub recording_format: String,
+    pub camera_mode: String,
     pub mp4_compatibility: String,
     pub mp4_video_codec: String,
     pub mp4_pixel_format: String,
@@ -145,7 +146,7 @@ impl Default for AppSettings {
             output_directory: PathBuf::new(), item_schema: PathBuf::new(), tf2_executable: PathBuf::new(),
             hlae_executable: PathBuf::new(), ffmpeg_executable: PathBuf::new(), recording_output_directory: PathBuf::new(), performance_profile: "High".into(),
             lead_seconds: 8, outro_seconds: 3,
-            capture_fps: 120, jpg_quality: 90, recording_format: "MP4 - Standard".into(), resolution: "2560x1440".into(),
+            capture_fps: 120, jpg_quality: 90, recording_format: "MP4 - Standard".into(), camera_mode: "Original Camera".into(), resolution: "2560x1440".into(),
             mp4_compatibility: "DaVinci Resolve / Universal".into(), mp4_video_codec: "H.264 / libx264".into(),
             mp4_pixel_format: "yuv420p".into(), mp4_h264_profile: "High".into(), mp4_crf: 18,
             mp4_encoder_preset: "medium".into(), mp4_audio_codec: "AAC".into(), mp4_audio_bitrate_kbps: 192,
@@ -215,6 +216,12 @@ impl AppSettings {
     }
 
     pub fn normalize_recording_options(&mut self) {
+        self.camera_mode = if self.camera_mode.eq_ignore_ascii_case("Cinematic Kill Shot") {
+            "Cinematic Kill Shot"
+        } else {
+            "Original Camera"
+        }
+        .into();
         self.dx_level = match self.dx_level.split_whitespace().next().unwrap_or_default().to_ascii_lowercase().as_str() {
             "98" => "98",
             "95" => "95",

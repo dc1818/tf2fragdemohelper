@@ -3,6 +3,7 @@
 
 mod analyzer;
 mod batch;
+mod camera;
 mod models;
 mod preflight;
 mod recording;
@@ -14,7 +15,7 @@ use crate::{
     recording::{
         estimate_recording_space, latest_recording_session, launch_hlae_batch, preview_candidate,
         recover_interrupted_profile, recover_recording_sessions, shutdown_active_recording,
-        RecordingIndex, RecordingProgress, RecordingProgressSink,
+        validate_cinematic_batch, RecordingIndex, RecordingProgress, RecordingProgressSink,
     },
     scheduler::PerformanceProfile,
 };
@@ -831,6 +832,7 @@ fn main() -> Result<()> {
     ui.set_capture_fps(settings.capture_fps.to_string().into());
     ui.set_jpg_quality(settings.jpg_quality as i32);
     ui.set_recording_format(settings.recording_format.clone().into());
+    ui.set_camera_mode(settings.camera_mode.clone().into());
     ui.set_mp4_compatibility(settings.mp4_compatibility.clone().into());
     ui.set_mp4_video_codec(settings.mp4_video_codec.clone().into());
     ui.set_mp4_pixel_format(settings.mp4_pixel_format.clone().into());
@@ -1744,6 +1746,25 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             ui.set_status_text("All selected candidates already have matching recordings".into());
             return;
         }
+        if let Err(error) = validate_cinematic_batch(&selected, &settings) {
+            let choice = rfd::MessageDialog::new()
+                .set_title("Cinematic Angle Unavailable")
+                .set_description(format!(
+                    "{error}\n\nYes: record the selected candidates with their original camera\nNo: cancel without recording"
+                ))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .set_level(rfd::MessageLevel::Warning)
+                .show();
+            if choice != rfd::MessageDialogResult::Yes {
+                ui.set_status_text("Recording cancelled because the cinematic camera was unavailable".into());
+                return;
+            }
+            settings.camera_mode = "Original Camera".into();
+            ui.set_recording_settings_syncing(true);
+            ui.set_camera_mode("Original Camera".into());
+            ui.set_recording_settings_syncing(false);
+            ui.set_status_text("Cinematic camera unavailable; recording will use the original camera".into());
+        }
         let recording_preflight = match estimate_recording_space(&selected, &settings) {
             Ok(estimate) => estimate,
             Err(error) => {
@@ -2223,6 +2244,7 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.capture_fps = ui.get_capture_fps().parse().unwrap_or(120);
     settings.jpg_quality = ui.get_jpg_quality().clamp(1, 100) as u8;
     settings.recording_format = ui.get_recording_format().to_string();
+    settings.camera_mode = ui.get_camera_mode().to_string();
     settings.mp4_compatibility = ui.get_mp4_compatibility().to_string();
     settings.mp4_video_codec = ui.get_mp4_video_codec().to_string();
     settings.mp4_pixel_format = ui.get_mp4_pixel_format().to_string();
@@ -2266,6 +2288,7 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_avi_video_codec(settings.avi_video_codec.clone().into());
     ui.set_avi_pixel_format(settings.avi_pixel_format.clone().into());
     ui.set_dnxhr_profile(settings.dnxhr_profile.clone().into());
+    ui.set_camera_mode(settings.camera_mode.clone().into());
     ui.set_dx_level(settings.dx_level.clone().into());
     ui.set_skybox(settings.skybox.clone().into());
     ui.set_hud(settings.hud.clone().into());

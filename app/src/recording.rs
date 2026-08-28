@@ -2142,16 +2142,27 @@ fn hidden_command(program: &str, arguments: &[&str]) -> Result<std::process::Out
 
 fn cleanup_temporary_paths(session: &RecordingProfileSession) {
     for path in &session.temporary_paths {
-        let Ok(relative) = path.strip_prefix(&session.game_directory) else {
-            continue;
-        };
-        let normalized = relative
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
-        if !(normalized.starts_with("demos/tf2fragdemohelper_batch/")
-            || normalized.starts_with("cfg/tf2fragdemohelper_batch/"))
-        {
+        let allowed_game_path = path
+            .strip_prefix(&session.game_directory)
+            .ok()
+            .map(|relative| {
+                relative
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase()
+            })
+            .is_some_and(|normalized| {
+                normalized.starts_with("demos/tf2fragdemohelper_batch/")
+                    || normalized.starts_with("cfg/tf2fragdemohelper_batch/")
+                    || normalized.starts_with("demos/tf2fragdemohelper_manual/")
+            });
+        let sessions_root = recording_sessions_root();
+        let allowed_manual_session = path.parent().is_some_and(|parent| parent == sessions_root)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("tf2fragdemohelper_manual_"));
+        if !allowed_game_path && !allowed_manual_session {
             continue;
         }
         if path.is_dir() {
@@ -5144,6 +5155,36 @@ mod recording_tests {
         let loaded = RecordingIndex::load_from_path(&path, 1024 * 1024, 2);
         assert_eq!(loaded.entries.len(), 2);
         fs::remove_dir_all(root).expect("remove recovery test root");
+    }
+
+    #[test]
+    fn manual_hotkeys_cycle_every_distinct_kill_tick() {
+        let candidate = Candidate {
+            point_of_kill_ticks: vec![900, 900, 925, 970],
+            ..Candidate::default()
+        };
+        let cfg = manual_hotkey_cfg(&candidate, 500);
+        assert!(cfg.contains("demo_gototick 500"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 TICK 900"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 TICK 925"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 TICK 970"));
+        assert!(cfg.contains("bind \"F6\""));
+        assert!(cfg.contains("mirv_input camera"));
+        assert!(cfg.contains("bind \"F9\""));
+    }
+
+    #[test]
+    fn manual_encoded_recording_sets_both_frame_rates_and_selected_preset() {
+        let settings = AppSettings {
+            capture_fps: 240,
+            recording_format: "MP4 - Standard".into(),
+            ..AppSettings::default()
+        };
+        let cfg = manual_recording_start_cfg(&settings, Path::new("C:/manual/capture"));
+        assert!(cfg.contains("host_framerate 240"));
+        assert!(cfg.contains("mirv_streams record fps 240"));
+        assert!(cfg.contains("mirv_streams record screen settings tf2FragMp4"));
+        assert!(cfg.contains("mirv_streams record name \"C:/manual/capture\""));
     }
 
     fn recording_profile_suppresses_recorded_vote_and_server_message_panels() {

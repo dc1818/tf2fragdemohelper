@@ -462,7 +462,6 @@ export component AppWindow inherits Window {
     in-out property <int> outro-seconds: 3;
     in-out property <string> capture-fps: "120";
     in-out property <string> recording-format: "MP4 - Standard";
-    in-out property <string> camera-mode: "Original Camera";
     in-out property <int> jpg-quality: 90;
     in-out property <string> mp4-compatibility: "DaVinci Resolve / Universal";
     in-out property <string> mp4-video-codec: "H.264 / libx264";
@@ -517,7 +516,7 @@ export component AppWindow inherits Window {
     callback refresh-filter(string, int); callback drag-select-candidates(int, float, bool, bool); callback selection-changed(); callback select-all-visible();
     callback set-tag-filter(string); callback toggle-class-filter(string); callback toggle-map-filter(string); callback search-map-filters(string);
     callback toggle-server-type-filter(string); callback search-server-type-filters(string); callback set-recorded-filter(string);
-    callback preview-selected(); callback record-selected(); callback choose-setting-path(string); callback recording-settings-changed();
+    callback preview-selected(); callback launch-manual-hlae(); callback record-selected(); callback choose-setting-path(string); callback recording-settings-changed();
     callback view-selected-details(); callback view-recording-logs(); callback update-recording-estimate(); callback choose-custom-resources(string);
 
     changed tf2-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
@@ -526,7 +525,6 @@ export component AppWindow inherits Window {
     changed recording-directory => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed capture-fps => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed recording-format => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
-    changed camera-mode => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed jpg-quality => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mp4-compatibility => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mp4-video-codec => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
@@ -739,7 +737,7 @@ export component AppWindow inherits Window {
                 height: 34px; spacing: 5px;
                 Tf2LineEdit { text <=> root.tag-filter; placeholder: "FILTER TAGS"; centered: true; edited(value) => { root.set-tag-filter(value); } focus-lost => { root.tag-filter = ""; root.set-tag-filter(""); } }
                 Tf2Button { width: 98px; height: 32px; text: root.candidate-filters-open ? "CLOSE" : "FILTERS"; clicked => { root.candidate-filters-open = !root.candidate-filters-open; } }
-                ComboBox { width: 165px; height: 32px; model: ["Original Camera", "Cinematic Kill Shot"]; current-value <=> root.camera-mode; }
+                Tf2Button { width: 165px; height: 32px; text: "OPEN HLAE"; enabled: root.selected-count == 1 && root.recording-ready; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.launch-manual-hlae(); } }
                 Tf2Button { width: 120px; height: 32px; text: "PREVIEW"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
                 Tf2Button { width: 120px; height: 32px; text: "RECORD"; enabled: root.selected-count > 0 && root.recording-ready; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
             }
@@ -759,8 +757,7 @@ export component AppWindow inherits Window {
                 height: 40px; spacing: 7px;
                 Tf2Button { width: 170px; text: root.all-visible-selected ? "DESELECT ALL" : "SELECT ALL"; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.select-all-visible(); } }
                 Tf2Button { width: 190px; text: "PREVIEW IN TF2"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
-                Tf2Label { width: 58px; text: "CAMERA"; horizontal-alignment: right; }
-                ComboBox { width: 185px; model: ["Original Camera", "Cinematic Kill Shot"]; current-value <=> root.camera-mode; }
+                Tf2Button { width: 225px; text: "LAUNCH TF2 WITH HLAE"; enabled: root.selected-count == 1 && root.recording-ready; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.launch-manual-hlae(); } }
                 Tf2Button { width: 205px; text: "RECORD WITH HLAE"; enabled: root.selected-count > 0 && root.recording-ready; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
                 Tf2Button { width: 145px; text: "VIEW DETAILS"; enabled: root.selected-count == 1; clicked => { root.view-selected-details(); } }
                 Rectangle { horizontal-stretch: 1; } Tf2Body { text: root.selected-count + " SELECTED"; color: Tf2Colors.muted; }

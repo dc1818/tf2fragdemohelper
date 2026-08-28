@@ -19,32 +19,33 @@ These binds exist only in the isolated session. Your complete original `tf/cfg` 
 
 | Key | Action |
 |---|---|
-| F2 | Move demo time back one second with `mirv_skip time -1` |
-| F3 | Return to the selected lead-in before the first kill |
-| F4 | Cycle to each distinct kill tick in the candidate |
-| F5 | Pause or resume the demo |
-| F6 | Enter the manual MIRV camera |
-| F7 | Add a campath keyframe at the current demo time and view |
-| F8 | Exit manual input and enable campath playback |
-| F9 | Start recording with the selected format and FPS |
-| F10 | Stop recording and reset `host_framerate` |
-| F11 | Print all campath keyframes in the console |
-| F12 | Save the path as `camera_path.xml` in the capture folder |
+| 1 | Print the complete temporary hotkey reminder in the console |
+| 2 | Move demo time back one second with `mirv_skip time -1` |
+| 3 | Return to the selected lead-in before the first kill |
+| 4 | Cycle to each distinct kill tick in the candidate |
+| 5 | Pause or resume the demo |
+| 6 | Enter the manual MIRV camera |
+| 7 | Add a campath keyframe at the current demo time and view |
+| 8 | Exit manual input and enable campath playback |
+| 9 | Start recording with the selected format and FPS |
+| 0 | Stop recording and reset `host_framerate` |
+| - | Print all campath keyframes in the console |
+| = | Save the path as `camera_path.xml` in the capture folder |
 
 While `mirv_input camera` is active, use W/A/S/D to move, R/F to move up/down, Page Up/Page Down to change FOV, Z/X to roll, `+`/`-` to change speed, and Home to reset. Press Escape to leave manual camera input. Manual input is suspended while the console is open.
 
 ## Make a keyframed shot
 
-1. Press F5 to pause near the lead-in.
-2. Press F6 to enter the camera and compose the opening view.
-3. Press F7 to add the first keyframe.
-4. Advance demo time before each new keyframe. You can resume slowly, use F4 to visit the next kill tick, or use console commands such as `mirv_skip time 0.25`.
-5. Reposition the camera and press F7 again. A normal HLAE campath needs at least four keyframes.
+1. Press 5 to pause near the lead-in.
+2. Press 6 to enter the camera and compose the opening view.
+3. Press 7 to add the first keyframe.
+4. Advance demo time before each new keyframe. You can resume slowly, use 4 to visit the next kill tick, or use console commands such as `mirv_skip time 0.25`.
+5. Reposition the camera and press 7 again. A normal HLAE campath needs at least four keyframes.
 6. For a simultaneous kill, place one view that contains both victims. For kills a few ticks apart, add a key near each victim and leave enough demo time between keys for a readable transition.
-7. Press F11 and inspect the keyframe list. To remove a bad key, use `mirv_campath remove <id>` in the console.
-8. Press Escape, then F8. Manual camera input must be ended because it overrides campath playback.
-9. Press F3 to rewind to the lead-in, close the console, and resume playback to preview the path.
-10. Press F12 when you want to preserve the path.
+7. Press - and inspect the keyframe list. To remove a bad key, use `mirv_campath remove <id>` in the console.
+8. Press Escape, then 8. Manual camera input must be ended because it overrides campath playback.
+9. Press 3 to rewind to the lead-in, close the console, and resume playback to preview the path.
+10. Press = when you want to preserve the path.
 
 Useful console commands:
 
@@ -59,11 +60,11 @@ mirv_campath load "C:/path/to/camera_path.xml"
 
 ## Record
 
-1. Rewind with F3.
-2. Make sure campath playback is enabled with F8 and the console is closed.
-3. Press F9 just before the portion you want to keep. The helper sets both `host_framerate` and `mirv_streams record fps` for encoded formats.
+1. Rewind with 3.
+2. Make sure campath playback is enabled with 8 and the console is closed.
+3. Press 9 just before the portion you want to keep. The helper sets both `host_framerate` and `mirv_streams record fps` for encoded formats.
 4. Let the complete multi-kill sequence play.
-5. Press F10 after the last kill/outro. Wait a moment for the encoder to flush before closing TF2.
+5. Press 0 after the last kill/outro. Wait a moment for the encoder to flush before closing TF2.
 
 The capture is stored in the configured recording directory under `Manual HLAE/<demo>__<candidate>__t<start>-<end>__<timestamp>/`. Encoded HLAE formats normally create their video inside that folder; image formats create numbered frames and audio there.
 

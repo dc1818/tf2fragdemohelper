@@ -1,9 +1,27 @@
-TF2 Frag Demo Helper - TF2 Bookmark Sidecar Fix Build
-Source build ID: eb365875a86e
+TF2 Frag Demo Helper - Cinematic Campath Preview Build
+Source build ID: cinematic-campath-v2
 Prepared: 2026-08-28 UTC
 
-This archive removes the experimental per-kill camera system from the UI,
-candidate model, analyzer export, recovery manifest, preview, and recording VDM.
+This archive replaces the removed experimental camera system with an optional,
+gap-aware HLAE campath planner based on continuous parsed player tracks.
+
+Cinematic camera behavior:
+- Generates a victim-led shot for every distinct kill demo tick in a candidate.
+- Groups simultaneous victims into the same shot so both remain framed.
+- Retains attacker and every victim track from the candidate clip start, then
+  follows each victim until their own impact instead of selecting the last kill.
+- Keeps the brief post-impact victim hold before transitioning to the next kill.
+- Frames attacker and victim together instead of switching to attacker third person.
+- Rejects POV PVS, entity, respawn, or identity gaps instead of extrapolating.
+- BSP/VPK collision checking is disabled in this victim-tracking test build, so
+  missing map files and walls cannot reject an otherwise valid camera track.
+- Loads the campath only after the documented POV camera setup, then executes
+  mirv_input end before enabling mirv_campath.
+- Offers Original Camera or Cancel when an angle is unavailable.
+- Displays the candidate ID and full nested tracking/export cause when unavailable.
+- Retains camera_plan.json and camera_path.xml with recording diagnostics.
+- Starts each application session on Original Camera; cinematic selection is
+  explicit for the current session and is not restored from the prior launch.
 
 Recording readiness behavior:
 - The top header reports the active candidate and batch count, such as 20 / 50,
@@ -54,8 +72,8 @@ Preserved behavior:
 - Previously recorded candidates can be skipped or explicitly re-recorded.
 
 Validation performed in this environment:
-- Source references to camera UI/model/VDM features were removed.
-- Rust delimiter and cross-reference checks were run.
+- Cinematic source, parser-field, HLAE-order, VDM-schedule, and collision-disabled
+  cross-reference checks were run.
 - Archive source assertions and ZIP integrity are checked during packaging.
 
 The Rust toolchain is not installed in this transient environment. Run

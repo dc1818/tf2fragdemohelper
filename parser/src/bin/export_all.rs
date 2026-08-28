@@ -25,6 +25,17 @@ struct PlayerStateSample {
     class: String,
     position: [f32; 3],
     velocity: [f32; 3],
+    velocity_available: bool,
+    velocity_source: &'static str,
+    view_pitch: f32,
+    view_yaw: f32,
+    simulation_time_raw: u16,
+    simulation_tick: u64,
+    spawn_generation: u32,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+    position_precision: &'static str,
+    fresh: bool,
     flags: Option<u32>,
     on_ground: Option<bool>,
     scoped: bool,
@@ -41,7 +52,7 @@ struct PlayerStateSample {
 }
 
 impl PlayerStateSample {
-    fn from_player(player: &Player) -> Self {
+    fn from_player(player: &Player, simulation_tick: u64, spawn_generation: u32) -> Self {
         let (medic_charge, medigun) = match &player.class_data {
             PlayerClassData::Medic { charge, medigun, .. } => {
                 (Some(*charge), Some(format!("{medigun:?}").to_ascii_lowercase()))
@@ -57,6 +68,17 @@ impl PlayerStateSample {
             class: player.class.to_string(),
             position: player.position.into(),
             velocity: player.velocity.into(),
+            velocity_available: player.velocity_known,
+            velocity_source: if player.velocity_known { "network" } else { "unavailable" },
+            view_pitch: player.pitch_angle,
+            view_yaw: player.view_angle,
+            simulation_time_raw: player.simulation_time,
+            simulation_tick,
+            spawn_generation,
+            bounds_min: player.bounds.min.into(),
+            bounds_max: player.bounds.max.into(),
+            position_precision: if player.velocity_known { "local_high" } else { "nonlocal_low" },
+            fresh: true,
             flags: player.flags_known.then_some(player.flags),
             on_ground: player.flags_known.then_some(player.flags & 1 != 0),
             scoped: player.has_condition(PlayerCondition::Zoomed),
@@ -76,6 +98,17 @@ impl PlayerStateSample {
             medigun,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CameraTrackState {
+    initialized: bool,
+    present: bool,
+    user_id: Option<u16>,
+    spawn_generation: u32,
+    was_alive: bool,
+    simulation_time_raw: u16,
+    simulation_tick: u64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -116,6 +149,7 @@ impl ProjectileStateSample {
 struct StateDeltaWriter {
     players: BTreeMap<u32, PlayerStateSample>,
     projectiles: BTreeMap<u32, ProjectileStateSample>,
+    camera_tracks: BTreeMap<u32, CameraTrackState>,
     sample_count: u64,
 }
 
@@ -128,14 +162,45 @@ impl StateDeltaWriter {
         packet_sequence: u64,
         out: &mut BufWriter<File>,
     ) -> Result<(), MainError> {
-        let players: BTreeMap<u32, PlayerStateSample> = state
-            .players
-            .iter()
-            .map(|player| {
-                let sample = PlayerStateSample::from_player(player);
-                (sample.entity_id, sample)
-            })
-            .collect();
+        let mut players = BTreeMap::new();
+        for player in &state.players {
+            let entity_id = u32::from(player.entity);
+            let user_id = player.info.as_ref().map(|info| u16::from(info.user_id));
+            let alive = format!("{:?}", player.state).eq_ignore_ascii_case("alive");
+            let track = self.camera_tracks.entry(entity_id).or_default();
+            if !track.initialized {
+                track.initialized = true;
+                track.simulation_tick = u64::from(player.simulation_time);
+            } else {
+                let identity_break = !track.present
+                    || track.user_id != user_id
+                    || (!track.was_alive && alive);
+                if identity_break {
+                    track.spawn_generation = track.spawn_generation.saturating_add(1);
+                    track.simulation_tick = u64::from(player.simulation_time);
+                } else {
+                    let delta = player.simulation_time.wrapping_sub(track.simulation_time_raw);
+                    // A forward 16-bit wrap is valid. A large reverse jump is an
+                    // identity discontinuity and starts a new camera generation.
+                    if delta <= i16::MAX as u16 {
+                        track.simulation_tick = track.simulation_tick.saturating_add(u64::from(delta));
+                    } else {
+                        track.spawn_generation = track.spawn_generation.saturating_add(1);
+                        track.simulation_tick = u64::from(player.simulation_time);
+                    }
+                }
+            }
+            track.present = true;
+            track.user_id = user_id;
+            track.was_alive = alive;
+            track.simulation_time_raw = player.simulation_time;
+            let sample = PlayerStateSample::from_player(
+                player,
+                track.simulation_tick,
+                track.spawn_generation,
+            );
+            players.insert(entity_id, sample);
+        }
         let projectiles: BTreeMap<u32, ProjectileStateSample> = state
             .projectiles
             .iter()
@@ -166,6 +231,12 @@ impl StateDeltaWriter {
             .filter(|id| !current_projectile_ids.contains(id))
             .copied()
             .collect();
+
+        for entity_id in &removed_players {
+            if let Some(track) = self.camera_tracks.get_mut(entity_id) {
+                track.present = false;
+            }
+        }
 
         if changed_players.is_empty()
             && changed_projectiles.is_empty()
@@ -546,6 +617,8 @@ fn main() -> Result<(), MainError> {
         "source_demo": input_path.to_string_lossy(),
         "packet_count": packet_count,
         "state_sample_count": state_delta_writer.sample_count,
+        "interval_per_tick": match_state.interval_per_tick,
+        "camera_tracking_format": 1,
         "demo_capture": capture_metadata(&header, usercmd_packet_count, server_info_stv),
         "mode_signals": mode_signals,
         "parser_reported_incomplete": packet_stream.incomplete,
@@ -564,7 +637,7 @@ fn main() -> Result<(), MainError> {
             "packets.ndjson contains one complete parser-decoded top-level demo packet per line",
             "packet_index.ndjson contains packet order, tick, type, and original stream bit ranges",
             "events.ndjson contains normalized decoded game events for highlight analysis",
-            "state_samples.ndjson contains parser-reconstructed player and projectile state deltas",
+            "state_samples.ndjson contains parser-reconstructed player and projectile state deltas plus optional gap-aware camera fields",
             "bookmarks.json contains every supported bookmark command embedded in the demo",
             "frag_candidates.ndjson and frag_summary.json are written by the Rust analyzer after parsing",
             "keep the original .dem file as the bit-exact source archive"

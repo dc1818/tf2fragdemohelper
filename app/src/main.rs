@@ -1794,7 +1794,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 state_for_manual_hlae.lock().last_recording_session = Some(launch.session.clone());
                 ui.set_status_text(
                     format!(
-                        "Manual HLAE launched at tick {}. F3 start, F4 kills, F6 camera, F7 keyframe, F9/F10 record. Output: {}",
+                        "Manual HLAE launched at tick {}. 3 start, 4 kills, 6 camera, 7 keyframe, 9/0 record. Output: {}",
                         launch.target_tick,
                         launch.output_path.display()
                     )

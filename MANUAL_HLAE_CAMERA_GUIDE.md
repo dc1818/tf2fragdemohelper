@@ -9,7 +9,7 @@ This workflow opens one selected candidate at the chosen lead-in and lets you pl
 3. Set `After last tick` for the end-of-clip reference. It is included in the manual capture folder name so the intended window stays visible.
 4. Choose the recording format, FPS, resolution, encoder, HUD, and other recording settings as usual.
 5. Click `Launch TF2 with HLAE`.
-6. Wait for the demo to seek. The console prints `TF2FRAG_MANUAL_READY` when the temporary controls are installed.
+6. Wait for the demo to seek. It automatically pauses at the selected lead-in. The console prints `TF2FRAG_MANUAL_READY` and `TF2FRAG_MANUAL_PAUSED_AT_START` when the temporary controls are installed and the pause has been applied.
 
 The launcher uses offline mode (`-insecure`, `sv_lan 1`) and the same temporary recording profile as automatic recording. Do not start a live-server session from this TF2 instance.
 
@@ -36,7 +36,7 @@ While `mirv_input camera` is active, use W/A/S/D to move, R/F to move up/down, P
 
 ## Make a keyframed shot
 
-1. Press 5 to pause near the lead-in.
+1. The demo is already paused at the selected lead-in.
 2. Press 6 to enter the camera and compose the opening view.
 3. Press 7 to add the first keyframe.
 4. Advance demo time before each new keyframe. You can resume slowly, use 4 to visit the next kill tick, or use console commands such as `mirv_skip time 0.25`.

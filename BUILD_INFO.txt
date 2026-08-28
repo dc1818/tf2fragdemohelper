@@ -1,27 +1,24 @@
-TF2 Frag Demo Helper - Cinematic Campath Preview Build
-Source build ID: cinematic-campath-v2
+TF2 Frag Demo Helper - Manual HLAE Camera Build
+Source build ID: manual-hlae-camera-v1
 Prepared: 2026-08-28 UTC
 
-This archive replaces the removed experimental camera system with an optional,
-gap-aware HLAE campath planner based on continuous parsed player tracks.
+This archive removes the experimental automatic camera planner and replaces its
+selector with a single-candidate manual HLAE launch workflow.
 
-Cinematic camera behavior:
-- Generates a victim-led shot for every distinct kill demo tick in a candidate.
-- Groups simultaneous victims into the same shot so both remain framed.
-- Retains attacker and every victim track from the candidate clip start, then
-  follows each victim until their own impact instead of selecting the last kill.
-- Keeps the brief post-impact victim hold before transitioning to the next kill.
-- Frames attacker and victim together instead of switching to attacker third person.
-- Rejects POV PVS, entity, respawn, or identity gaps instead of extrapolating.
-- BSP/VPK collision checking is disabled in this victim-tracking test build, so
-  missing map files and walls cannot reject an otherwise valid camera track.
-- Loads the campath only after the documented POV camera setup, then executes
-  mirv_input end before enabling mirv_campath.
-- Offers Original Camera or Cancel when an angle is unavailable.
-- Displays the candidate ID and full nested tracking/export cause when unavailable.
-- Retains camera_plan.json and camera_path.xml with recording diagnostics.
-- Starts each application session on Original Camera; cinematic selection is
-  explicit for the current session and is not restored from the prior launch.
+Manual HLAE camera behavior:
+- Select exactly one candidate and click Launch TF2 with HLAE.
+- Uses the existing Before first tick selector as the automatic seek point and
+  the After last tick selector as the end-of-clip reference.
+- F4 cycles through every distinct kill tick for multi-tick candidates.
+- F6 enables mirv_input camera, F7 adds a campath keyframe, and F8 exits manual
+  input and enables campath playback.
+- F9/F10 start and stop capture using the selected output format, FPS, and encoder.
+- F12 saves camera_path.xml beside the manual capture.
+- The automatic cinematic selector, planner, victim tracking, and camera-change
+  controls are removed. Automatic HLAE recording continues with original camera.
+- Manual sessions use the same complete backup/recovery mechanism as automatic
+  sessions. Closing TF2 restores cfg/overrides, binds, custom files, HUD,
+  hitsounds, config/video files, and DX settings.
 
 Recording readiness behavior:
 - The top header reports the active candidate and batch count, such as 20 / 50,
@@ -72,8 +69,8 @@ Preserved behavior:
 - Previously recorded candidates can be skipped or explicitly re-recorded.
 
 Validation performed in this environment:
-- Cinematic source, parser-field, HLAE-order, VDM-schedule, and collision-disabled
-  cross-reference checks were run.
+- Automatic-camera removal, manual hotkey, candidate seek, multi-kill tick-cycle,
+  HLAE launch, and recording-profile restoration cross-reference checks were run.
 - Archive source assertions and ZIP integrity are checked during packaging.
 
 The Rust toolchain is not installed in this transient environment. Run

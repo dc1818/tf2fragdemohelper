@@ -10,7 +10,6 @@ use std::{
 };
 
 const FALLBACK_TICK_INTERVAL: f64 = 1.0 / 66.666_666_7;
-const PRE_KILL_SECONDS: f64 = 1.0;
 const POST_KILL_SECONDS: f64 = 0.70;
 const VICTIM_HOLD_SECONDS: f64 = 0.32;
 const MAX_TRACK_GAP_SECONDS: f64 = 0.22;
@@ -138,7 +137,18 @@ pub struct CinematicPlan {
     pub collision_map: String,
     pub collision_coverage: &'static str,
     pub track_source: String,
+    pub kill_shots: Vec<KillShotPlan>,
     pub keyframes: Vec<CameraKeyframe>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct KillShotPlan {
+    pub demo_tick: i64,
+    pub event_ticks: Vec<i64>,
+    pub victim_user_ids: Vec<i64>,
+    pub start_demo_tick: i64,
+    pub end_demo_tick: i64,
+    pub pre_kill_seconds: f64,
 }
 
 impl CinematicPlan {
@@ -181,6 +191,19 @@ struct KillSpec {
     victim_user_id: i64,
 }
 
+#[derive(Clone, Debug)]
+struct KillGroup {
+    demo_tick: i64,
+    event_ticks: Vec<i64>,
+    victim_user_ids: Vec<i64>,
+}
+
+#[derive(Clone, Debug)]
+struct ShotSubjects {
+    attacker: Vec3,
+    victims: Vec<Vec3>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct TrackWindow {
     start_tick: i64,
@@ -215,20 +238,26 @@ pub fn plan_candidates(candidates: &[Candidate], _game_directory: &Path) -> Resu
         let mut windows = BTreeMap::<i64, Vec<TrackWindow>>::new();
         for &index in &indices {
             let candidate = &candidates[index];
-            let primary = candidate
-                .kills
-                .iter()
-                .filter_map(kill_spec)
+            let kill_groups = kill_groups(candidate);
+            let last_kill = kill_groups
                 .last()
-                .context("cinematic angle unavailable: a selected candidate has no usable primary kill")?;
+                .context("cinematic angle unavailable: a selected candidate has no usable kill")?;
             let interval = camera_interval(candidate);
-            let padding = ((PRE_KILL_SECONDS + MAX_TRACK_GAP_SECONDS) / interval).ceil() as i64;
-            let window = TrackWindow {
-                start_tick: (primary.demo_tick - padding).max(0),
-                end_tick: primary.demo_tick + (MAX_TRACK_GAP_SECONDS / interval).ceil() as i64,
-            };
-            windows.entry(candidate.attacker_user_id).or_default().push(window);
-            windows.entry(primary.victim_user_id).or_default().push(window);
+            let gap_ticks = (MAX_TRACK_GAP_SECONDS / interval).ceil() as i64;
+            let track_start = candidate.clip_start_tick.saturating_add(2).max(0);
+            windows.entry(candidate.attacker_user_id).or_default().push(TrackWindow {
+                start_tick: track_start,
+                end_tick: last_kill.demo_tick.saturating_add(gap_ticks),
+            });
+            for kill_group in &kill_groups {
+                let victim_window = TrackWindow {
+                    start_tick: track_start,
+                    end_tick: kill_group.demo_tick.saturating_add(gap_ticks),
+                };
+                for &victim_user_id in &kill_group.victim_user_ids {
+                    windows.entry(victim_user_id).or_default().push(victim_window);
+                }
+            }
         }
         coalesce_track_windows(&mut windows);
         let tracks = read_tracks(&state_path, &windows)?;
@@ -269,117 +298,172 @@ fn plan_candidate_from_tracks(
     state_path: &Path,
     tracks: &HashMap<i64, Vec<TrackPoint>>,
 ) -> Result<CinematicPlan> {
-    let kills = candidate
-        .kills
-        .iter()
-        .filter_map(kill_spec)
-        .collect::<Vec<_>>();
-    let primary = kills
+    let kill_groups = kill_groups(candidate);
+    let primary_group = kill_groups
         .last()
         .context("cinematic angle unavailable: the candidate has no kill with a victim ID and demo tick")?;
+    let primary_event_tick = *primary_group.event_ticks.last().unwrap_or(&primary_group.demo_tick);
+    let primary_victim_user_id = *primary_group
+        .victim_user_ids
+        .last()
+        .context("cinematic angle unavailable: the final kill has no victim")?;
     let interval = camera_interval(candidate);
-    let pre_ticks = (PRE_KILL_SECONDS / interval).round() as i64;
-    let impact_tick = primary.demo_tick;
-    let requested_start_tick = (impact_tick - pre_ticks)
-        .max(candidate.clip_start_tick.saturating_add(2))
-        .max(0);
     let attacker = tracks.get(&candidate.attacker_user_id).with_context(|| {
         format!("cinematic angle unavailable: attacker {} has no camera track", candidate.attacker_user_id)
     })?;
-    let victim = tracks.get(&primary.victim_user_id).with_context(|| {
-        format!("cinematic angle unavailable: victim {} has no camera track", primary.victim_user_id)
-    })?;
-    let attacker_start = continuous_track_start(
-        attacker,
-        requested_start_tick,
-        impact_tick,
-        interval,
-        "attacker",
-    )?;
-    let victim_start = continuous_track_start(
-        victim,
-        requested_start_tick,
-        impact_tick,
-        interval,
-        "victim",
-    )?;
-    let start_tick = requested_start_tick.max(attacker_start).max(victim_start);
-    interpolate_track(attacker, start_tick, interval, "attacker")?;
-    interpolate_track(victim, start_tick, interval, "victim")?;
-    let pre_kill_ticks = impact_tick - start_tick;
-    let pre_kill_seconds = (pre_kill_ticks as f64 * interval).max(0.0);
-    if pre_kill_ticks < MIN_CINEMATIC_PRE_KILL_TICKS {
-        bail!(
-            "cinematic angle unavailable: the shared attacker/victim track contains only {pre_kill_ticks} real pre-kill ticks ({:.3} seconds); at least {MIN_CINEMATIC_PRE_KILL_TICKS} ticks are required for distinct camera keys",
-            pre_kill_seconds,
-        );
-    }
+    let hold_ticks = (VICTIM_HOLD_SECONDS / interval).round().max(1.0) as i64;
+    let post_ticks = (POST_KILL_SECONDS / interval).round().max(1.0) as i64;
+    let clip_start = candidate.clip_start_tick.saturating_add(2).max(0);
 
-    let offsets = [
-        -pre_kill_seconds,
-        -pre_kill_seconds * 0.68,
-        -pre_kill_seconds * 0.34,
-        0.0,
-        VICTIM_HOLD_SECONDS,
-        POST_KILL_SECONDS,
-    ];
-    let sample_ticks = offsets
-        .iter()
-        .map(|seconds| impact_tick + (*seconds / interval).round() as i64)
-        .collect::<Vec<_>>();
-    let impact_victim = interpolate_track(victim, impact_tick, interval, "victim")?;
-    let mut subjects = Vec::new();
-    for &tick in &sample_ticks {
-        let attacker_point = interpolate_track(attacker, tick.min(impact_tick), interval, "attacker")?;
-        let victim_point = if tick <= impact_tick {
-            interpolate_track(victim, tick, interval, "victim")?
+    // Each distinct kill tick owns a segment. The first segment starts with the
+    // candidate; later segments start immediately after the previous victim's
+    // hold, or earlier when the next kill is too close to preserve three keys.
+    let mut shot_starts = Vec::with_capacity(kill_groups.len());
+    for (index, group) in kill_groups.iter().enumerate() {
+        let requested_start = if index == 0 {
+            clip_start
         } else {
-            impact_victim.clone()
+            let previous_impact = kill_groups[index - 1].demo_tick;
+            let desired_after_hold = previous_impact.saturating_add(hold_ticks);
+            let latest_usable = group.demo_tick.saturating_sub(MIN_CINEMATIC_PRE_KILL_TICKS);
+            desired_after_hold.min(latest_usable).max(previous_impact.saturating_add(1))
         };
-        subjects.push((attacker_point.eye_position(), victim_point.eye_position()));
+        let mut start_tick = continuous_track_start(
+            attacker,
+            requested_start,
+            group.demo_tick,
+            interval,
+            "attacker",
+        )?
+        .max(requested_start);
+        for &victim_user_id in &group.victim_user_ids {
+            let victim = tracks.get(&victim_user_id).with_context(|| {
+                format!("cinematic angle unavailable: victim {victim_user_id} at demo tick {} has no camera track", group.demo_tick)
+            })?;
+            start_tick = start_tick.max(continuous_track_start(
+                victim,
+                requested_start,
+                group.demo_tick,
+                interval,
+                "victim",
+            )?);
+        }
+        let available_ticks = group.demo_tick - start_tick;
+        if index == 0 && available_ticks < MIN_CINEMATIC_PRE_KILL_TICKS {
+            bail!(
+                "cinematic angle unavailable: kill at demo tick {} has only {available_ticks} continuous pre-kill ticks; at least {MIN_CINEMATIC_PRE_KILL_TICKS} are required",
+                group.demo_tick,
+            );
+        }
+        shot_starts.push(start_tick);
     }
 
-    let mut best: Option<(f32, Vec<CameraKeyframe>)> = None;
-    for side in [-1.0_f32, 1.0] {
-        for distance in [260.0_f32, 330.0, 410.0] {
-            for height in [90.0_f32, 140.0, 190.0] {
-                for along in [-90.0_f32, 0.0, 90.0] {
-                    if let Some((score, keys)) = build_path_candidate(
-                        &sample_ticks,
-                        &offsets,
-                        &subjects,
-                        side,
-                        distance,
-                        height,
-                        along,
-                    ) {
-                        if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) {
-                            best = Some((score, keys));
+    let activation_demo_tick = *shot_starts.first().context("cinematic angle unavailable: no shot start")?;
+    let mut keyframes = Vec::new();
+    let mut kill_shots = Vec::new();
+    for (index, group) in kill_groups.iter().enumerate() {
+        let start_tick = shot_starts[index];
+        let impact_tick = group.demo_tick;
+        let span = impact_tick - start_tick;
+        let mut sample_ticks = vec![
+            start_tick,
+            start_tick + span / 3,
+            start_tick + (span * 2) / 3,
+            impact_tick,
+        ];
+        let next_start = shot_starts.get(index + 1).copied();
+        let hold_end = next_start
+            .map(|next| impact_tick.saturating_add(hold_ticks).min(next.saturating_sub(1)))
+            .unwrap_or_else(|| impact_tick.saturating_add(hold_ticks));
+        if hold_end > impact_tick {
+            sample_ticks.push(hold_end);
+        }
+        if index + 1 == kill_groups.len() {
+            sample_ticks.push(impact_tick.saturating_add(post_ticks));
+        }
+        sample_ticks.sort_unstable();
+        sample_ticks.dedup();
+
+        let mut victim_tracks = Vec::with_capacity(group.victim_user_ids.len());
+        let mut impact_victims = Vec::with_capacity(group.victim_user_ids.len());
+        for &victim_user_id in &group.victim_user_ids {
+            let victim = tracks.get(&victim_user_id).with_context(|| {
+                format!("cinematic angle unavailable: victim {victim_user_id} at demo tick {impact_tick} has no camera track")
+            })?;
+            impact_victims.push(interpolate_track(victim, impact_tick, interval, "victim")?);
+            victim_tracks.push(victim);
+        }
+        let mut subjects = Vec::with_capacity(sample_ticks.len());
+        for &tick in &sample_ticks {
+            let attacker_point = interpolate_track(attacker, tick.min(impact_tick), interval, "attacker")?;
+            let mut victims = Vec::with_capacity(victim_tracks.len());
+            for (victim_index, victim) in victim_tracks.iter().enumerate() {
+                let point = if tick <= impact_tick {
+                    interpolate_track(victim, tick, interval, "victim")?
+                } else {
+                    impact_victims[victim_index].clone()
+                };
+                victims.push(point.eye_position());
+            }
+            subjects.push(ShotSubjects {
+                attacker: attacker_point.eye_position(),
+                victims,
+            });
+        }
+
+        let mut best: Option<(f32, Vec<CameraKeyframe>)> = None;
+        for side in [-1.0_f32, 1.0] {
+            for distance in [260.0_f32, 330.0, 410.0] {
+                for height in [90.0_f32, 140.0, 190.0] {
+                    for along in [-90.0_f32, 0.0, 90.0] {
+                        if let Some((score, keys)) = build_path_candidate(
+                            &sample_ticks,
+                            activation_demo_tick,
+                            interval,
+                            &subjects,
+                            side,
+                            distance,
+                            height,
+                            along,
+                        ) {
+                            if best.as_ref().is_none_or(|(best_score, _)| score < *best_score) {
+                                best = Some((score, keys));
+                            }
                         }
                     }
                 }
             }
         }
+        let (_, mut shot_keys) = best.with_context(|| {
+            format!("cinematic angle unavailable: no generated path could frame every victim at demo tick {impact_tick}")
+        })?;
+        keyframes.append(&mut shot_keys);
+        kill_shots.push(KillShotPlan {
+            demo_tick: impact_tick,
+            event_ticks: group.event_ticks.clone(),
+            victim_user_ids: group.victim_user_ids.clone(),
+            start_demo_tick: start_tick,
+            end_demo_tick: *sample_ticks.last().unwrap_or(&impact_tick),
+            pre_kill_seconds: span as f64 * interval,
+        });
     }
-    let (_, keyframes) = best.context(
-        "cinematic angle unavailable: no generated path could keep the attacker and victim safely framed",
-    )?;
-    let activation_demo_tick = start_tick;
+    keyframes.sort_by(|left, right| left.time_seconds.total_cmp(&right.time_seconds));
     Ok(CinematicPlan {
         format: "tf2-frag-cinematic-camera-plan",
-        format_version: 1,
+        format_version: 2,
         candidate_id: candidate.candidate_id.clone(),
         capture_type: candidate.demo_context.capture_type.clone(),
-        primary_kill_event_tick: primary.event_tick,
-        primary_kill_demo_tick: primary.demo_tick,
-        victim_user_id: primary.victim_user_id,
+        primary_kill_event_tick,
+        primary_kill_demo_tick: primary_group.demo_tick,
+        victim_user_id: primary_victim_user_id,
         attacker_user_id: candidate.attacker_user_id,
         activation_demo_tick,
         interval_per_tick: interval,
-        pre_kill_seconds,
+        pre_kill_seconds: kill_shots.last().map(|shot| shot.pre_kill_seconds).unwrap_or_default(),
         collision_map: "disabled".into(),
         collision_coverage: "disabled for victim-tracking test build",
         track_source: state_path.display().to_string(),
+        kill_shots,
         keyframes,
     })
 }
@@ -404,6 +488,24 @@ fn kill_spec(value: &Value) -> Option<KillSpec> {
         demo_tick,
         victim_user_id,
     })
+}
+
+fn kill_groups(candidate: &Candidate) -> Vec<KillGroup> {
+    let mut groups = BTreeMap::<i64, KillGroup>::new();
+    for kill in candidate.kills.iter().filter_map(kill_spec) {
+        let group = groups.entry(kill.demo_tick).or_insert_with(|| KillGroup {
+            demo_tick: kill.demo_tick,
+            event_ticks: Vec::new(),
+            victim_user_ids: Vec::new(),
+        });
+        if !group.event_ticks.contains(&kill.event_tick) {
+            group.event_ticks.push(kill.event_tick);
+        }
+        if !group.victim_user_ids.contains(&kill.victim_user_id) {
+            group.victim_user_ids.push(kill.victim_user_id);
+        }
+    }
+    groups.into_values().collect()
 }
 
 fn camera_interval(candidate: &Candidate) -> f64 {
@@ -587,8 +689,9 @@ fn interpolate_track(points: &[TrackPoint], tick: i64, interval: f64, label: &st
 
 fn build_path_candidate(
     ticks: &[i64],
-    offsets: &[f64],
-    subjects: &[(Vec3, Vec3)],
+    activation_tick: i64,
+    interval: f64,
+    subjects: &[ShotSubjects],
     side: f32,
     distance: f32,
     height: f32,
@@ -596,47 +699,37 @@ fn build_path_candidate(
 ) -> Option<(f32, Vec<CameraKeyframe>)> {
     let mut keys = Vec::with_capacity(ticks.len());
     let mut score = 0.0_f32;
-    let path_start_seconds = offsets.first().copied()?.abs();
-    for (index, ((&tick, &seconds), &(attacker, victim))) in ticks
-        .iter()
-        .zip(offsets)
-        .zip(subjects)
-        .enumerate()
-    {
+    let last_index = ticks.len().saturating_sub(1).max(1) as f32;
+    for (index, (&tick, subjects)) in ticks.iter().zip(subjects).enumerate() {
+        let victim = centroid(&subjects.victims)?;
+        let attacker = subjects.attacker;
         let horizontal = Vec3 { x: victim.x - attacker.x, y: victim.y - attacker.y, z: 0.0 }
             .normalized()?;
         let perpendicular = Vec3 { x: -horizontal.y * side, y: horizontal.x * side, z: 0.0 };
         let midpoint = attacker.lerp(victim, 0.55);
-        let phase = match index {
-            0 => 1.12,
-            1 => 1.02,
-            2 => 0.92,
-            3 | 4 => 0.86,
-            _ => 0.98,
-        };
+        let progress = index as f32 / last_index;
+        let phase = 1.12 - progress.min(0.75) * 0.34;
         let camera = midpoint
             .add(perpendicular.scale(distance * phase))
             .add(horizontal.scale(along * (1.0 - index as f32 * 0.04)))
             .add(Vec3 { x: 0.0, y: 0.0, z: height * (0.92 + index as f32 * 0.025) });
-        let target = attacker.lerp(victim, 0.68);
+        // The victim centroid is the look target. The attacker is only used to
+        // choose an angle that keeps the actual kill readable in the frame.
+        let target = victim;
         let attacker_ray = attacker.sub(camera).normalized()?;
-        let victim_ray = victim.sub(camera).normalized()?;
-        let framing_angle = attacker_ray.dot(victim_ray).clamp(-1.0, 1.0).acos().to_degrees();
+        let mut framing_angle = 0.0_f32;
+        for victim in &subjects.victims {
+            let victim_ray = victim.sub(camera).normalized()?;
+            framing_angle = framing_angle.max(attacker_ray.dot(victim_ray).clamp(-1.0, 1.0).acos().to_degrees());
+        }
         if framing_angle > 62.0 {
             return None;
         }
         let (pitch, yaw) = look_angles(camera, target)?;
-        let fov = match index {
-            0 => 75.0,
-            1 => 69.0,
-            2 => 61.0,
-            3 => 56.0,
-            4 => 58.0,
-            _ => 70.0,
-        };
+        let fov = 75.0 - progress.min(0.75) * 23.0 + (progress - 0.75).max(0.0) * 28.0;
         score += framing_angle * 0.25 + (camera.sub(target).length() - 330.0).abs() * 0.01;
         keys.push(CameraKeyframe {
-            time_seconds: seconds + path_start_seconds,
+            time_seconds: (tick - activation_tick) as f64 * interval,
             demo_tick: tick,
             position: camera,
             pitch,
@@ -655,6 +748,14 @@ fn build_path_candidate(
         score += speed * 0.004;
     }
     Some((score, keys))
+}
+
+fn centroid(points: &[Vec3]) -> Option<Vec3> {
+    if points.is_empty() {
+        return None;
+    }
+    let sum = points.iter().copied().fold(Vec3::default(), Vec3::add);
+    Some(sum.scale(1.0 / points.len() as f32))
 }
 
 fn look_angles(camera: Vec3, target: Vec3) -> Option<(f32, f32)> {
@@ -696,10 +797,18 @@ mod tests {
             attacker_user_id: 1,
             activation_demo_tick: 33,
             interval_per_tick: FALLBACK_TICK_INTERVAL,
-            pre_kill_seconds: PRE_KILL_SECONDS,
+            pre_kill_seconds: 1.0,
             collision_map: "disabled".into(),
             collision_coverage: "disabled for victim-tracking test build",
             track_source: "states.ndjson".into(),
+            kill_shots: vec![KillShotPlan {
+                demo_tick: 90,
+                event_ticks: vec![100],
+                victim_user_ids: vec![2],
+                start_demo_tick: 33,
+                end_demo_tick: 100,
+                pre_kill_seconds: 0.85,
+            }],
             keyframes: (0..4)
                 .map(|index| CameraKeyframe {
                     time_seconds: index as f64 * 0.25,
@@ -741,6 +850,23 @@ mod tests {
         assert_eq!(merged[0].end_tick, 260);
         assert_eq!(merged[1].start_tick, 400);
         assert_eq!(merged[1].end_tick, 420);
+    }
+
+    #[test]
+    fn every_distinct_kill_tick_becomes_a_shot_and_same_tick_victims_are_grouped() {
+        let mut candidate = Candidate::default();
+        candidate.kills = vec![
+            serde_json::json!({"event_tick": 1000, "demo_tick": 900, "victim_user_id": 21}),
+            serde_json::json!({"event_tick": 1001, "demo_tick": 900, "victim_user_id": 22}),
+            serde_json::json!({"event_tick": 1080, "demo_tick": 980, "victim_user_id": 23}),
+            serde_json::json!({"event_tick": 1140, "demo_tick": 1040, "victim_user_id": 24}),
+        ];
+        let groups = kill_groups(&candidate);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups.iter().map(|group| group.demo_tick).collect::<Vec<_>>(), vec![900, 980, 1040]);
+        assert_eq!(groups[0].victim_user_ids, vec![21, 22]);
+        assert_eq!(groups[1].victim_user_ids, vec![23]);
+        assert_eq!(groups[2].victim_user_ids, vec![24]);
     }
 
     #[test]

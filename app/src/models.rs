@@ -106,6 +106,10 @@ pub struct AppSettings {
     pub capture_fps: u32,
     pub jpg_quality: u8,
     pub recording_format: String,
+    // Camera choice is intentionally session-only. Every launch starts with
+    // Original Camera so a prior cinematic test cannot become the next batch's
+    // implicit default.
+    #[serde(skip, default = "default_camera_mode")]
     pub camera_mode: String,
     pub mp4_compatibility: String,
     pub mp4_video_codec: String,
@@ -138,6 +142,10 @@ pub struct AppSettings {
     pub disable_applause_sounds: bool,
     pub disable_domination_sounds: bool,
     pub custom_resources: Vec<PathBuf>,
+}
+
+fn default_camera_mode() -> String {
+    "Original Camera".into()
 }
 
 impl Default for AppSettings {
@@ -328,5 +336,17 @@ mod settings_tests {
         assert_eq!(settings.skybox, "Default");
         assert_eq!(settings.hud, "Kill notices only");
         assert_eq!(settings.viewmodels, "On");
+    }
+
+    #[test]
+    fn camera_choice_is_session_only_and_reloads_as_original() {
+        let settings = AppSettings {
+            camera_mode: "Cinematic Kill Shot".into(),
+            ..AppSettings::default()
+        };
+        let encoded = serde_json::to_value(&settings).expect("settings serialize");
+        assert!(encoded.get("camera_mode").is_none());
+        let decoded: AppSettings = serde_json::from_value(encoded).expect("settings deserialize");
+        assert_eq!(decoded.camera_mode, "Original Camera");
     }
 }

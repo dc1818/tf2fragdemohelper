@@ -6,10 +6,11 @@ This archive replaces the removed experimental camera system with an optional,
 gap-aware HLAE campath planner based on continuous parsed player tracks.
 
 Cinematic camera behavior:
-- Begins one second before the primary kill and follows the actual victim track.
-- Automatically shortens the lead to the continuous shared attacker/victim
-  segment and requires only three real pre-kill ticks for this tracking test.
-- Generates six smooth HLAE keyframes with a brief post-impact victim hold.
+- Generates a victim-led shot for every distinct kill demo tick in a candidate.
+- Groups simultaneous victims into the same shot so both remain framed.
+- Retains attacker and every victim track from the candidate clip start, then
+  follows each victim until their own impact instead of selecting the last kill.
+- Keeps the brief post-impact victim hold before transitioning to the next kill.
 - Frames attacker and victim together instead of switching to attacker third person.
 - Rejects POV PVS, entity, respawn, or identity gaps instead of extrapolating.
 - BSP/VPK collision checking is disabled in this victim-tracking test build, so
@@ -19,6 +20,8 @@ Cinematic camera behavior:
 - Offers Original Camera or Cancel when an angle is unavailable.
 - Displays the candidate ID and full nested tracking/export cause when unavailable.
 - Retains camera_plan.json and camera_path.xml with recording diagnostics.
+- Starts each application session on Original Camera; cinematic selection is
+  explicit for the current session and is not restored from the prior launch.
 
 Recording readiness behavior:
 - The top header reports the active candidate and batch count, such as 20 / 50,

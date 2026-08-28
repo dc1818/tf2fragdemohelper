@@ -12,6 +12,7 @@ use std::{
 const FALLBACK_TICK_INTERVAL: f64 = 1.0 / 66.666_666_7;
 const POST_KILL_SECONDS: f64 = 0.70;
 const VICTIM_HOLD_SECONDS: f64 = 0.32;
+const TRACK_KEY_INTERVAL_SECONDS: f64 = 0.20;
 const MAX_TRACK_GAP_SECONDS: f64 = 0.22;
 const MIN_CINEMATIC_PRE_KILL_TICKS: i64 = 3;
 
@@ -365,12 +366,15 @@ fn plan_candidate_from_tracks(
         let start_tick = shot_starts[index];
         let impact_tick = group.demo_tick;
         let span = impact_tick - start_tick;
-        let mut sample_ticks = vec![
-            start_tick,
-            start_tick + span / 3,
-            start_tick + (span * 2) / 3,
-            impact_tick,
-        ];
+        let regular_step = (TRACK_KEY_INTERVAL_SECONDS / interval).round().max(1.0) as i64;
+        let sample_step = regular_step.min((span / 3).max(1));
+        let mut sample_ticks = Vec::new();
+        let mut sample_tick = start_tick;
+        while sample_tick < impact_tick {
+            sample_ticks.push(sample_tick);
+            sample_tick = sample_tick.saturating_add(sample_step);
+        }
+        sample_ticks.push(impact_tick);
         let next_start = shot_starts.get(index + 1).copied();
         let hold_end = next_start
             .map(|next| impact_tick.saturating_add(hold_ticks).min(next.saturating_sub(1)))
@@ -453,7 +457,7 @@ fn plan_candidate_from_tracks(
         format_version: 2,
         candidate_id: candidate.candidate_id.clone(),
         capture_type: candidate.demo_context.capture_type.clone(),
-        primary_kill_event_tick,
+        primary_kill_event_tick: primary_event_tick,
         primary_kill_demo_tick: primary_group.demo_tick,
         victim_user_id: primary_victim_user_id,
         attacker_user_id: candidate.attacker_user_id,

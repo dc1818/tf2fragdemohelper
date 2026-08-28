@@ -7,8 +7,8 @@ gap-aware HLAE campath planner based on continuous parsed player tracks.
 
 Cinematic camera behavior:
 - Begins one second before the primary kill and follows the actual victim track.
-- Automatically shortens the lead to a continuous 0.35-second-or-longer shared
-  attacker/victim segment instead of rejecting every incomplete one-second track.
+- Automatically shortens the lead to the continuous shared attacker/victim
+  segment and requires only three real pre-kill ticks for this tracking test.
 - Generates six smooth HLAE keyframes with a brief post-impact victim hold.
 - Frames attacker and victim together instead of switching to attacker third person.
 - Rejects POV PVS, entity, respawn, or identity gaps instead of extrapolating.

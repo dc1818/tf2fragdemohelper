@@ -14,7 +14,7 @@ const PRE_KILL_SECONDS: f64 = 1.0;
 const POST_KILL_SECONDS: f64 = 0.70;
 const VICTIM_HOLD_SECONDS: f64 = 0.32;
 const MAX_TRACK_GAP_SECONDS: f64 = 0.22;
-const MIN_CINEMATIC_PRE_KILL_SECONDS: f64 = 0.35;
+const MIN_CINEMATIC_PRE_KILL_TICKS: i64 = 3;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub struct Vec3 {
@@ -306,12 +306,12 @@ fn plan_candidate_from_tracks(
     let start_tick = requested_start_tick.max(attacker_start).max(victim_start);
     interpolate_track(attacker, start_tick, interval, "attacker")?;
     interpolate_track(victim, start_tick, interval, "victim")?;
-    let pre_kill_seconds = ((impact_tick - start_tick) as f64 * interval).max(0.0);
-    if pre_kill_seconds + f64::EPSILON < MIN_CINEMATIC_PRE_KILL_SECONDS {
+    let pre_kill_ticks = impact_tick - start_tick;
+    let pre_kill_seconds = (pre_kill_ticks as f64 * interval).max(0.0);
+    if pre_kill_ticks < MIN_CINEMATIC_PRE_KILL_TICKS {
         bail!(
-            "cinematic angle unavailable: the shared attacker/victim track begins only {:.3} seconds before the kill; at least {:.2} seconds is required",
+            "cinematic angle unavailable: the shared attacker/victim track contains only {pre_kill_ticks} real pre-kill ticks ({:.3} seconds); at least {MIN_CINEMATIC_PRE_KILL_TICKS} ticks are required for distinct camera keys",
             pre_kill_seconds,
-            MIN_CINEMATIC_PRE_KILL_SECONDS,
         );
     }
 
@@ -764,6 +764,40 @@ mod tests {
         ];
         let start = continuous_track_start(&points, 0, 100, 0.01, "victim").unwrap();
         assert_eq!(start, 60);
-        assert!((100 - start) as f64 * 0.01 >= MIN_CINEMATIC_PRE_KILL_SECONDS);
+        assert!(100 - start >= MIN_CINEMATIC_PRE_KILL_TICKS);
+    }
+
+    #[test]
+    fn nineteen_tick_track_from_real_export_is_accepted() {
+        let point = |tick, valid| TrackPoint {
+            tick,
+            entity_id: 23,
+            generation: 534,
+            position: Vec3 { x: tick as f32, y: 10.0, z: 20.0 },
+            eye_height: 72.0,
+            valid,
+        };
+        let points = vec![
+            point(60, false),
+            point(81, true),
+            point(90, true),
+            point(100, true),
+        ];
+        let interval = 0.014_999_999_664_723_871;
+        let start = continuous_track_start(&points, 34, 100, interval, "victim").unwrap();
+        let pre_ticks = 100 - start;
+        let pre_seconds = pre_ticks as f64 * interval;
+        assert_eq!(pre_ticks, 19);
+        assert!((pre_seconds - 0.285).abs() < 0.000_001);
+        assert!(pre_ticks >= MIN_CINEMATIC_PRE_KILL_TICKS);
+
+        let offsets = [-pre_seconds, -pre_seconds * 0.68, -pre_seconds * 0.34, 0.0];
+        let mut ticks = offsets
+            .iter()
+            .map(|seconds| 100 + (*seconds / interval).round() as i64)
+            .collect::<Vec<_>>();
+        ticks.sort_unstable();
+        ticks.dedup();
+        assert_eq!(ticks.len(), 4);
     }
 }

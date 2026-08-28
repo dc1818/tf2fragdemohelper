@@ -1289,7 +1289,7 @@ pub fn launch_manual_hlae_candidate(
     thread::spawn(move || {
         if let Some(sink) = &monitor_progress {
             sink(RecordingProgress::Status(format!(
-                "Manual HLAE active at tick {target_tick} — F6 camera, F7 keyframe, F9/F10 record"
+                "Manual HLAE active at tick {target_tick} — 6 camera, 7 keyframe, 9/0 record"
             )));
         }
         let startup_deadline = Instant::now() + Duration::from_secs(90);
@@ -2887,6 +2887,7 @@ fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64) -> String {
          alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"\n\
          alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"\n\
          alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"\n\
+         alias tf2frag_manual_help \"echo TF2FRAG_KEYS 2_BACK_1_SECOND 3_CLIP_START 4_NEXT_KILL 5_PAUSE 6_CAMERA 7_KEYFRAME 8_PLAY_PATH 9_RECORD 0_STOP -_PRINT =_SAVE\"\n\
          alias tf2frag_manual_clip_start \"demo_gototick {target_tick}; echo TF2FRAG_MANUAL_CLIP_START {target_tick}\"\n"
     );
     for (index, tick) in kill_ticks.iter().enumerate() {
@@ -2899,19 +2900,20 @@ fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64) -> String {
     }
     cfg.push_str(
         "alias tf2frag_manual_next_kill tf2frag_manual_kill_1\n\
-         bind \"F2\" \"mirv_skip time -1\"\n\
-         bind \"F3\" \"tf2frag_manual_clip_start\"\n\
-         bind \"F4\" \"tf2frag_manual_next_kill\"\n\
-         bind \"F5\" \"demo_togglepause\"\n\
-         bind \"F6\" \"sv_cheats 1; thirdperson; spec_autodirector 0; mirv_input camera\"\n\
-         bind \"F7\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED\"\n\
-         bind \"F8\" \"mirv_input end; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED\"\n\
-         bind \"F9\" \"tf2frag_manual_start\"\n\
-         bind \"F10\" \"tf2frag_manual_stop\"\n\
-         bind \"F11\" \"mirv_campath print\"\n\
-         bind \"F12\" \"tf2frag_manual_save\"\n\
+         bind \"1\" \"tf2frag_manual_help\"\n\
+         bind \"2\" \"mirv_skip time -1\"\n\
+         bind \"3\" \"tf2frag_manual_clip_start\"\n\
+         bind \"4\" \"tf2frag_manual_next_kill\"\n\
+         bind \"5\" \"demo_togglepause\"\n\
+         bind \"6\" \"sv_cheats 1; thirdperson; spec_autodirector 0; mirv_input camera\"\n\
+         bind \"7\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED\"\n\
+         bind \"8\" \"mirv_input end; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED\"\n\
+         bind \"9\" \"tf2frag_manual_start\"\n\
+         bind \"0\" \"tf2frag_manual_stop\"\n\
+         bind \"-\" \"mirv_campath print\"\n\
+         bind \"=\" \"tf2frag_manual_save\"\n\
          echo TF2FRAG_MANUAL_READY\n\
-         echo F2 BACK_1_SECOND F3 CLIP_START F4 NEXT_KILL F5 PAUSE F6 CAMERA F7 KEYFRAME F8_PLAY_PATH F9_RECORD F10_STOP F11_PRINT F12_SAVE\n",
+         tf2frag_manual_help\n",
     );
     cfg
 }
@@ -5168,9 +5170,13 @@ mod recording_tests {
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 TICK 900"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 TICK 925"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 TICK 970"));
-        assert!(cfg.contains("bind \"F6\""));
+        assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
+        assert!(cfg.contains("bind \"6\""));
         assert!(cfg.contains("mirv_input camera"));
-        assert!(cfg.contains("bind \"F9\""));
+        assert!(cfg.contains("bind \"9\" \"tf2frag_manual_start\""));
+        assert!(cfg.contains("bind \"0\" \"tf2frag_manual_stop\""));
+        assert!(cfg.contains("bind \"=\" \"tf2frag_manual_save\""));
+        assert!(!cfg.contains("bind \"F"));
     }
 
     #[test]

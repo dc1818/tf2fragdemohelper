@@ -26,6 +26,7 @@ const PROFILE_CFG: &str = "tf2fragdemohelper_recording_profile.cfg";
 const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
 const RECORDING_FLUSH_TICKS: i64 = 133;
 const VDM_ACTION_GAP_TICKS: i64 = 2;
+const MANUAL_SEEK_STEP_TICKS: i64 = 15_000;
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -1201,7 +1202,7 @@ pub fn launch_manual_hlae_candidate(
     let cfg_result = (|| -> Result<()> {
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual.cfg"),
-            manual_hotkey_cfg(candidate, target_tick),
+            manual_hotkey_cfg(candidate, target_tick, &staged_relative),
         )?;
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual_start.cfg"),
@@ -2837,18 +2838,46 @@ fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
     lines.join("\n")
 }
 
+fn manual_seek_targets(target_tick: i64) -> Vec<i64> {
+    let target_tick = target_tick.max(0);
+    let mut targets = Vec::new();
+    let mut tick = MANUAL_SEEK_STEP_TICKS;
+    while tick < target_tick {
+        targets.push(tick);
+        tick += MANUAL_SEEK_STEP_TICKS;
+    }
+    if target_tick > 0 {
+        targets.push(target_tick);
+    }
+    targets
+}
+
 fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
+    let target_tick = target_tick.max(0);
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
-    add_vdm_action(
-        &mut lines,
-        &mut action,
-        "SkipAhead",
-        "TF2 Frag Demo Helper manual HLAE seek",
-        1,
-        Some(target_tick),
-        "",
-    );
+    let seek_targets = manual_seek_targets(target_tick);
+    let mut previous_target = 0;
+    for (index, seek_target) in seek_targets.iter().enumerate() {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "SkipAhead",
+            &format!(
+                "TF2 Frag Demo Helper safe seek {}/{}",
+                index + 1,
+                seek_targets.len()
+            ),
+            if previous_target == 0 {
+                1
+            } else {
+                previous_target + 1
+            },
+            Some(*seek_target),
+            "",
+        );
+        previous_target = *seek_target;
+    }
     let focus = if candidate_needs_spectator_focus(candidate) {
         format!(
             "spec_autodirector 0; spec_player #{}; spec_mode 4; ",
@@ -2861,18 +2890,16 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         &mut lines,
         &mut action,
         "PlayCommands",
-        "Activate manual HLAE controls and pause",
+        "Focus candidate and pause after safe seek",
         target_tick + 1,
         None,
-        &format!(
-            "{focus}exec tf2fragdemohelper_manual; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
-        ),
+        &format!("{focus}demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"),
     );
     lines.push("}".into());
     lines.join("\n")
 }
 
-fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64) -> String {
+fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64, staged_demo: &str) -> String {
     let mut kill_ticks = candidate.point_of_kill_ticks.clone();
     kill_ticks.sort_unstable();
     kill_ticks.dedup();
@@ -2890,7 +2917,7 @@ fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64) -> String {
          alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"\n\
          alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"\n\
          alias tf2frag_manual_help \"echo TF2FRAG_KEYS RIGHT_ARROW_FORWARD_0.25_SECONDS UP_ARROW_TOGGLE_HUD 2_BACK_1_SECOND 3_CLIP_START 4_NEXT_KILL 5_PAUSE 6_CAMERA 7_KEYFRAME 8_PLAY_PATH 9_RECORD 0_STOP -_PRINT =_SAVE\"\n\
-         alias tf2frag_manual_clip_start \"demo_gototick {target_tick}; echo TF2FRAG_MANUAL_CLIP_START {target_tick}\"\n"
+         alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\"\n"
     );
     for (index, tick) in kill_ticks.iter().enumerate() {
         let current = index + 1;
@@ -5172,8 +5199,15 @@ mod recording_tests {
             point_of_kill_ticks: vec![900, 900, 925, 970],
             ..Candidate::default()
         };
-        let cfg = manual_hotkey_cfg(&candidate, 500);
-        assert!(cfg.contains("demo_gototick 500"));
+        let cfg = manual_hotkey_cfg(
+            &candidate,
+            500,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+        );
+        assert!(cfg.contains(
+            "playdemo demos/tf2fragdemohelper_manual/session/candidate.dem"
+        ));
+        assert!(!cfg.contains("demo_gototick 500"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 TICK 900"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 TICK 925"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 TICK 970"));
@@ -5196,14 +5230,28 @@ mod recording_tests {
         assert!(vdm.contains("skiptotick \"500\""));
         assert!(vdm.contains("starttick \"501\""));
         assert!(vdm.contains(
-            "exec tf2fragdemohelper_manual; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
         ));
-
-        let controls = vdm
-            .find("exec tf2fragdemohelper_manual")
-            .expect("manual controls command");
+        assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
         let pause = vdm.find("demo_pause").expect("pause command");
-        assert!(pause > controls);
+        let seek = vdm.find("skiptotick \"500\"").expect("safe seek command");
+        assert!(pause > seek);
+    }
+
+    #[test]
+    fn manual_hlae_seek_is_split_into_at_most_fifteen_thousand_tick_steps() {
+        assert_eq!(
+            manual_seek_targets(46_001),
+            vec![15_000, 30_000, 45_000, 46_001]
+        );
+        assert_eq!(manual_seek_targets(15_000), vec![15_000]);
+        assert!(manual_seek_targets(0).is_empty());
+
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 46_001);
+        for tick in [15_000, 30_000, 45_000, 46_001] {
+            assert!(vdm.contains(&format!("skiptotick \"{tick}\"")));
+        }
+        assert!(vdm.contains("starttick \"46002\""));
     }
 
     #[test]

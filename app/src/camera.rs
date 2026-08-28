@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, File},
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
 };
 
@@ -193,7 +193,7 @@ pub fn plan_candidates(candidates: &[Candidate], game_directory: &Path) -> Resul
         groups.entry(camera_state_path(candidate)?).or_default().push(index);
     }
     let mut output = vec![None; candidates.len()];
-    let mut geometry_cache = HashMap::<PathBuf, BspGeometry>::new();
+    let mut geometry_cache = HashMap::<String, (String, BspGeometry)>::new();
     for (state_path, indices) in groups {
         let mut users = BTreeSet::new();
         for &index in &indices {
@@ -206,19 +206,16 @@ pub fn plan_candidates(candidates: &[Candidate], game_directory: &Path) -> Resul
         let tracks = read_tracks(&state_path, &users)?;
         for index in indices {
             let candidate = &candidates[index];
-            let bsp_path = map_bsp_path(game_directory, &candidate.map_name)?;
-            if !geometry_cache.contains_key(&bsp_path) {
-                let geometry = BspGeometry::load(&bsp_path).with_context(|| {
-                    format!("cinematic angle unavailable: could not read exact map geometry from {}", bsp_path.display())
-                })?;
-                geometry_cache.insert(bsp_path.clone(), geometry);
+            let map_key = candidate.map_name.trim().to_ascii_lowercase();
+            if !geometry_cache.contains_key(&map_key) {
+                geometry_cache.insert(map_key.clone(), load_map_geometry(game_directory, &candidate.map_name)?);
             }
-            let geometry = geometry_cache.get(&bsp_path).unwrap();
+            let (geometry_label, geometry) = geometry_cache.get(&map_key).unwrap();
             output[index] = Some(plan_candidate_from_tracks(
                 candidate,
                 &state_path,
                 &tracks,
-                &bsp_path,
+                geometry_label,
                 geometry,
             )?);
         }
@@ -233,7 +230,7 @@ fn plan_candidate_from_tracks(
     candidate: &Candidate,
     state_path: &Path,
     tracks: &HashMap<i64, Vec<TrackPoint>>,
-    bsp_path: &Path,
+    geometry_label: &str,
     geometry: &BspGeometry,
 ) -> Result<CinematicPlan> {
     let kills = candidate
@@ -314,7 +311,7 @@ fn plan_candidate_from_tracks(
         attacker_user_id: candidate.attacker_user_id,
         activation_demo_tick,
         interval_per_tick: interval,
-        collision_map: bsp_path.display().to_string(),
+        collision_map: geometry_label.to_owned(),
         collision_coverage: "solid BSP brushes with swept camera-radius and subject visibility tests",
         track_source: state_path.display().to_string(),
         keyframes,
@@ -603,7 +600,7 @@ fn look_angles(camera: Vec3, target: Vec3) -> Option<(f32, f32)> {
     Some((pitch, yaw))
 }
 
-fn map_bsp_path(game_directory: &Path, map_name: &str) -> Result<PathBuf> {
+fn safe_map_relative(map_name: &str) -> Result<PathBuf> {
     let trimmed = map_name.trim().trim_end_matches(".bsp");
     if trimmed.is_empty() {
         bail!("cinematic angle unavailable: candidate map name is missing");
@@ -614,14 +611,46 @@ fn map_bsp_path(game_directory: &Path, map_name: &str) -> Result<PathBuf> {
     {
         bail!("cinematic angle unavailable: unsafe map name {map_name}");
     }
-    let path = game_directory.join("maps").join(relative).with_extension("bsp");
-    if !path.is_file() {
-        bail!(
-            "cinematic angle unavailable: exact BSP geometry is missing at {}. Place the matching map BSP there and retry",
-            path.display()
-        );
+    Ok(relative.with_extension("bsp"))
+}
+
+fn load_map_geometry(game_directory: &Path, map_name: &str) -> Result<(String, BspGeometry)> {
+    let relative = safe_map_relative(map_name)?;
+    let loose = game_directory.join("maps").join(&relative);
+    if loose.is_file() {
+        return Ok((
+            loose.display().to_string(),
+            BspGeometry::load(&loose).with_context(|| {
+                format!("cinematic angle unavailable: could not read exact map geometry from {}", loose.display())
+            })?,
+        ));
     }
-    Ok(path)
+
+    let target = format!("maps/{}", relative.to_string_lossy().replace('\\', "/"));
+    let mut vpk_directories = fs::read_dir(game_directory)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().ends_with("_dir.vpk"))
+        })
+        .collect::<Vec<_>>();
+    vpk_directories.sort_by_key(|path| {
+        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+        if name.contains("maps") { 0 } else if name.contains("misc") { 1 } else { 2 }
+    });
+    for directory in vpk_directories {
+        if let Some(bytes) = read_vpk_file(&directory, &target)? {
+            let label = format!("{}::{target}", directory.display());
+            return Ok((label, BspGeometry::from_bytes(&bytes)?));
+        }
+    }
+    bail!(
+        "cinematic angle unavailable: exact BSP geometry for {map_name} was not found loose under {} or in a TF2 VPK",
+        game_directory.join("maps").display()
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -638,6 +667,10 @@ struct BspGeometry {
 impl BspGeometry {
     fn load(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
+        Self::from_bytes(&bytes)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 1036 || &bytes[0..4] != b"VBSP" {
             bail!("not a Source BSP file");
         }
@@ -706,6 +739,121 @@ impl BspGeometry {
             .iter()
             .any(|brush| segment_intersects_brush(start, end, radius, brush))
     }
+}
+
+fn read_vpk_file(directory_path: &Path, target: &str) -> Result<Option<Vec<u8>>> {
+    const VPK_SIGNATURE: u32 = 0x55aa_1234;
+    const DIRECTORY_ARCHIVE: u16 = 0x7fff;
+    const MAX_BSP_BYTES: u32 = 512 * 1024 * 1024;
+    let mut directory = File::open(directory_path)?;
+    let mut fixed = [0u8; 12];
+    directory.read_exact(&mut fixed)?;
+    let signature = u32::from_le_bytes(fixed[0..4].try_into().unwrap());
+    let version = u32::from_le_bytes(fixed[4..8].try_into().unwrap());
+    let tree_length = u32::from_le_bytes(fixed[8..12].try_into().unwrap()) as usize;
+    if signature != VPK_SIGNATURE || !matches!(version, 1 | 2) {
+        return Ok(None);
+    }
+    let header_size = if version == 2 {
+        let mut extended = [0u8; 16];
+        directory.read_exact(&mut extended)?;
+        28u64
+    } else {
+        12u64
+    };
+    if tree_length == 0 || tree_length > 128 * 1024 * 1024 {
+        bail!("invalid VPK directory tree length in {}", directory_path.display());
+    }
+    let mut tree = vec![0u8; tree_length];
+    directory.read_exact(&mut tree)?;
+    let target = target.replace('\\', "/").to_ascii_lowercase();
+    let mut cursor = 0usize;
+    loop {
+        let extension = read_tree_string(&tree, &mut cursor)?;
+        if extension.is_empty() {
+            break;
+        }
+        loop {
+            let directory_name = read_tree_string(&tree, &mut cursor)?;
+            if directory_name.is_empty() {
+                break;
+            }
+            loop {
+                let filename = read_tree_string(&tree, &mut cursor)?;
+                if filename.is_empty() {
+                    break;
+                }
+                let entry_end = cursor.checked_add(18).context("invalid VPK entry offset")?;
+                let entry = tree.get(cursor..entry_end).context("truncated VPK entry")?;
+                let preload_bytes = u16::from_le_bytes(entry[4..6].try_into().unwrap()) as usize;
+                let archive_index = u16::from_le_bytes(entry[6..8].try_into().unwrap());
+                let entry_offset = u32::from_le_bytes(entry[8..12].try_into().unwrap());
+                let entry_length = u32::from_le_bytes(entry[12..16].try_into().unwrap());
+                let terminator = u16::from_le_bytes(entry[16..18].try_into().unwrap());
+                if terminator != 0xffff {
+                    bail!("invalid VPK entry terminator in {}", directory_path.display());
+                }
+                cursor = entry_end;
+                let preload_end = cursor
+                    .checked_add(preload_bytes)
+                    .context("invalid VPK preload size")?;
+                let preload = tree.get(cursor..preload_end).context("truncated VPK preload data")?;
+                cursor = preload_end;
+                let path = if directory_name == " " {
+                    format!("{filename}.{extension}")
+                } else {
+                    format!("{directory_name}/{filename}.{extension}")
+                }
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+                if path != target {
+                    continue;
+                }
+                if entry_length > MAX_BSP_BYTES {
+                    bail!("map BSP in {} is too large to validate safely", directory_path.display());
+                }
+                let mut output = Vec::with_capacity(preload_bytes + entry_length as usize);
+                output.extend_from_slice(preload);
+                if entry_length == 0 {
+                    return Ok(Some(output));
+                }
+                let mut data = vec![0u8; entry_length as usize];
+                if archive_index == DIRECTORY_ARCHIVE {
+                    directory.seek(SeekFrom::Start(
+                        header_size + tree_length as u64 + u64::from(entry_offset),
+                    ))?;
+                    directory.read_exact(&mut data)?;
+                } else {
+                    let name = directory_path
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .context("VPK directory filename is not UTF-8")?;
+                    let prefix = name.strip_suffix("_dir.vpk").context("VPK directory name is invalid")?;
+                    let archive_path = directory_path.with_file_name(format!("{prefix}_{archive_index:03}.vpk"));
+                    let mut archive = File::open(&archive_path).with_context(|| {
+                        format!("missing VPK archive {}", archive_path.display())
+                    })?;
+                    archive.seek(SeekFrom::Start(u64::from(entry_offset)))?;
+                    archive.read_exact(&mut data)?;
+                }
+                output.extend_from_slice(&data);
+                return Ok(Some(output));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn read_tree_string(tree: &[u8], cursor: &mut usize) -> Result<String> {
+    let start = *cursor;
+    let remaining = tree.get(start..).context("VPK directory cursor is out of range")?;
+    let end = remaining
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|offset| start + offset)
+        .context("unterminated VPK directory string")?;
+    *cursor = end + 1;
+    Ok(String::from_utf8_lossy(&tree[start..end]).into_owned())
 }
 
 fn segment_intersects_brush(start: Vec3, end: Vec3, radius: f32, brush: &[Plane]) -> bool {
@@ -847,5 +995,35 @@ mod tests {
             0.0,
             &brush,
         ));
+    }
+
+    #[test]
+    fn vpk_reader_finds_preloaded_map_case_insensitively() {
+        let payload = b"VBSP-test-payload";
+        let mut tree = Vec::new();
+        tree.extend_from_slice(b"bsp\0maps\0cp_test\0");
+        tree.extend_from_slice(&0u32.to_le_bytes());
+        tree.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        tree.extend_from_slice(&0x7fffu16.to_le_bytes());
+        tree.extend_from_slice(&0u32.to_le_bytes());
+        tree.extend_from_slice(&0u32.to_le_bytes());
+        tree.extend_from_slice(&0xffffu16.to_le_bytes());
+        tree.extend_from_slice(payload);
+        tree.extend_from_slice(b"\0\0\0");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x55aa_1234u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(tree.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&tree);
+
+        let path = std::env::temp_dir().join(format!(
+            "tf2fragdemohelper_camera_{}_dir.vpk",
+            std::process::id()
+        ));
+        fs::write(&path, bytes).unwrap();
+        let loaded = read_vpk_file(&path, "MAPS/CP_TEST.BSP").unwrap().unwrap();
+        let _ = fs::remove_file(path);
+        assert_eq!(loaded, payload);
     }
 }

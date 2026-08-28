@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    path::{Component, Path, PathBuf},
+    io::{BufRead, BufReader},
+    path::{Path, PathBuf},
 };
 
 const FALLBACK_TICK_INTERVAL: f64 = 1.0 / 66.666_666_7;
@@ -14,7 +14,6 @@ const PRE_KILL_SECONDS: f64 = 1.0;
 const POST_KILL_SECONDS: f64 = 0.70;
 const VICTIM_HOLD_SECONDS: f64 = 0.32;
 const MAX_TRACK_GAP_SECONDS: f64 = 0.22;
-const CAMERA_RADIUS: f32 = 12.0;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub struct Vec3 {
@@ -199,13 +198,12 @@ pub fn plan_candidate(candidate: &Candidate, game_directory: &Path) -> Result<Ci
         .context("cinematic planner returned no plan")
 }
 
-pub fn plan_candidates(candidates: &[Candidate], game_directory: &Path) -> Result<Vec<CinematicPlan>> {
+pub fn plan_candidates(candidates: &[Candidate], _game_directory: &Path) -> Result<Vec<CinematicPlan>> {
     let mut groups = BTreeMap::<PathBuf, Vec<usize>>::new();
     for (index, candidate) in candidates.iter().enumerate() {
         groups.entry(camera_state_path(candidate)?).or_default().push(index);
     }
     let mut output = vec![None; candidates.len()];
-    let mut geometry_cache = HashMap::<String, (String, BspGeometry)>::new();
     for (state_path, indices) in groups {
         let mut windows = BTreeMap::<i64, Vec<TrackWindow>>::new();
         for &index in &indices {
@@ -229,17 +227,10 @@ pub fn plan_candidates(candidates: &[Candidate], game_directory: &Path) -> Resul
         let tracks = read_tracks(&state_path, &windows)?;
         for index in indices {
             let candidate = &candidates[index];
-            let map_key = candidate.map_name.trim().to_ascii_lowercase();
-            if !geometry_cache.contains_key(&map_key) {
-                geometry_cache.insert(map_key.clone(), load_map_geometry(game_directory, &candidate.map_name)?);
-            }
-            let (geometry_label, geometry) = geometry_cache.get(&map_key).unwrap();
             output[index] = Some(plan_candidate_from_tracks(
                 candidate,
                 &state_path,
                 &tracks,
-                geometry_label,
-                geometry,
             )?);
         }
     }
@@ -270,8 +261,6 @@ fn plan_candidate_from_tracks(
     candidate: &Candidate,
     state_path: &Path,
     tracks: &HashMap<i64, Vec<TrackPoint>>,
-    geometry_label: &str,
-    geometry: &BspGeometry,
 ) -> Result<CinematicPlan> {
     let kills = candidate
         .kills
@@ -283,10 +272,8 @@ fn plan_candidate_from_tracks(
         .context("cinematic angle unavailable: the candidate has no kill with a victim ID and demo tick")?;
     let interval = camera_interval(candidate);
     let pre_ticks = (PRE_KILL_SECONDS / interval).round() as i64;
-    let post_ticks = (POST_KILL_SECONDS / interval).round() as i64;
     let start_tick = (primary.demo_tick - pre_ticks).max(0);
     let impact_tick = primary.demo_tick;
-    let end_tick = impact_tick + post_ticks;
     let attacker = tracks.get(&candidate.attacker_user_id).with_context(|| {
         format!("cinematic angle unavailable: attacker {} has no camera track", candidate.attacker_user_id)
     })?;
@@ -319,7 +306,6 @@ fn plan_candidate_from_tracks(
             for height in [90.0_f32, 140.0, 190.0] {
                 for along in [-90.0_f32, 0.0, 90.0] {
                     if let Some((score, keys)) = build_path_candidate(
-                        geometry,
                         &sample_ticks,
                         &offsets,
                         &subjects,
@@ -337,7 +323,7 @@ fn plan_candidate_from_tracks(
         }
     }
     let (_, keyframes) = best.context(
-        "cinematic angle unavailable: every generated camera path was blocked by map geometry or lost sight of the victim",
+        "cinematic angle unavailable: no generated path could keep the attacker and victim safely framed",
     )?;
     let activation_demo_tick = (primary.demo_tick - pre_ticks).max(candidate.clip_start_tick + 2);
     Ok(CinematicPlan {
@@ -351,8 +337,8 @@ fn plan_candidate_from_tracks(
         attacker_user_id: candidate.attacker_user_id,
         activation_demo_tick,
         interval_per_tick: interval,
-        collision_map: geometry_label.to_owned(),
-        collision_coverage: "solid BSP brushes with swept camera-radius and subject visibility tests",
+        collision_map: "disabled".into(),
+        collision_coverage: "disabled for victim-tracking test build",
         track_source: state_path.display().to_string(),
         keyframes,
     })
@@ -558,7 +544,6 @@ fn interpolate_track(points: &[TrackPoint], tick: i64, interval: f64, label: &st
 }
 
 fn build_path_candidate(
-    geometry: &BspGeometry,
     ticks: &[i64],
     offsets: &[f64],
     subjects: &[(Vec3, Vec3)],
@@ -591,12 +576,6 @@ fn build_path_candidate(
             .add(horizontal.scale(along * (1.0 - index as f32 * 0.04)))
             .add(Vec3 { x: 0.0, y: 0.0, z: height * (0.92 + index as f32 * 0.025) });
         let target = attacker.lerp(victim, 0.68);
-        if geometry.point_in_solid(camera, CAMERA_RADIUS)
-            || geometry.segment_hits(camera, victim, 0.0)
-            || (index >= 2 && index <= 4 && geometry.segment_hits(camera, attacker, 0.0))
-        {
-            return None;
-        }
         let attacker_ray = attacker.sub(camera).normalized()?;
         let victim_ray = victim.sub(camera).normalized()?;
         let framing_angle = attacker_ray.dot(victim_ray).clamp(-1.0, 1.0).acos().to_degrees();
@@ -625,9 +604,6 @@ fn build_path_candidate(
         });
     }
     for pair in keys.windows(2) {
-        if geometry.segment_hits(pair[0].position, pair[1].position, CAMERA_RADIUS) {
-            return None;
-        }
         let duration = (pair[1].time_seconds - pair[0].time_seconds).max(0.001) as f32;
         let speed = pair[1].position.sub(pair[0].position).length() / duration;
         if speed > 1_200.0 {
@@ -647,325 +623,6 @@ fn look_angles(camera: Vec3, target: Vec3) -> Option<(f32, f32)> {
     let yaw = delta.y.atan2(delta.x).to_degrees();
     let pitch = -delta.z.atan2(horizontal).to_degrees();
     Some((pitch, yaw))
-}
-
-fn safe_map_relative(map_name: &str) -> Result<PathBuf> {
-    let trimmed = map_name.trim().trim_end_matches(".bsp");
-    if trimmed.is_empty() {
-        bail!("cinematic angle unavailable: candidate map name is missing");
-    }
-    let relative = Path::new(trimmed);
-    if relative.is_absolute()
-        || relative.components().any(|component| !matches!(component, Component::Normal(_)))
-    {
-        bail!("cinematic angle unavailable: unsafe map name {map_name}");
-    }
-    Ok(relative.with_extension("bsp"))
-}
-
-fn load_map_geometry(game_directory: &Path, map_name: &str) -> Result<(String, BspGeometry)> {
-    let relative = safe_map_relative(map_name)?;
-    let loose = game_directory.join("maps").join(&relative);
-    if loose.is_file() {
-        return Ok((
-            loose.display().to_string(),
-            BspGeometry::load(&loose).with_context(|| {
-                format!("cinematic angle unavailable: could not read exact map geometry from {}", loose.display())
-            })?,
-        ));
-    }
-
-    let target = format!("maps/{}", relative.to_string_lossy().replace('\\', "/"));
-    let mut vpk_directories = fs::read_dir(game_directory)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.to_ascii_lowercase().ends_with("_dir.vpk"))
-        })
-        .collect::<Vec<_>>();
-    vpk_directories.sort_by_key(|path| {
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-        if name.contains("maps") { 0 } else if name.contains("misc") { 1 } else { 2 }
-    });
-    for directory in vpk_directories {
-        if let Some(bytes) = read_vpk_file(&directory, &target)? {
-            let label = format!("{}::{target}", directory.display());
-            return Ok((label, BspGeometry::from_bytes(&bytes)?));
-        }
-    }
-    bail!(
-        "cinematic angle unavailable: exact BSP geometry for {map_name} was not found loose under {} or in a TF2 VPK",
-        game_directory.join("maps").display()
-    )
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Plane {
-    normal: Vec3,
-    distance: f32,
-}
-
-#[derive(Default)]
-struct BspGeometry {
-    solid_brushes: Vec<Vec<Plane>>,
-}
-
-impl BspGeometry {
-    fn load(path: &Path) -> Result<Self> {
-        let bytes = fs::read(path)?;
-        Self::from_bytes(&bytes)
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 1036 || &bytes[0..4] != b"VBSP" {
-            bail!("not a Source BSP file");
-        }
-        let version = read_i32(&bytes, 4)?;
-        if !(19..=21).contains(&version) {
-            bail!("unsupported Source BSP version {version}");
-        }
-        let plane_lump = lump(&bytes, 1)?;
-        let brush_lump = lump(&bytes, 18)?;
-        let side_lump = lump(&bytes, 19)?;
-        if plane_lump.compressed || brush_lump.compressed || side_lump.compressed {
-            bail!("compressed BSP collision lumps are not supported safely");
-        }
-        if plane_lump.length % 20 != 0 || brush_lump.length % 12 != 0 || side_lump.length % 8 != 0 {
-            bail!("malformed BSP collision lump sizes");
-        }
-        let mut planes = Vec::new();
-        for offset in (plane_lump.offset..plane_lump.offset + plane_lump.length).step_by(20) {
-            planes.push(Plane {
-                normal: Vec3 {
-                    x: read_f32(&bytes, offset)?,
-                    y: read_f32(&bytes, offset + 4)?,
-                    z: read_f32(&bytes, offset + 8)?,
-                },
-                distance: read_f32(&bytes, offset + 12)?,
-            });
-        }
-        let mut sides = Vec::<usize>::new();
-        for offset in (side_lump.offset..side_lump.offset + side_lump.length).step_by(8) {
-            sides.push(read_u16(&bytes, offset)? as usize);
-        }
-        let mut solid_brushes = Vec::new();
-        for offset in (brush_lump.offset..brush_lump.offset + brush_lump.length).step_by(12) {
-            let first_side = read_i32(&bytes, offset)?;
-            let side_count = read_i32(&bytes, offset + 4)?;
-            let contents = read_i32(&bytes, offset + 8)?;
-            if contents & 1 == 0 || first_side < 0 || side_count < 4 {
-                continue;
-            }
-            let range = first_side as usize..first_side as usize + side_count as usize;
-            if range.end > sides.len() {
-                bail!("BSP brush references invalid sides");
-            }
-            let brush_planes = sides[range]
-                .iter()
-                .map(|&index| planes.get(index).copied().context("BSP brush references invalid plane"))
-                .collect::<Result<Vec<_>>>()?;
-            solid_brushes.push(brush_planes);
-        }
-        if solid_brushes.is_empty() {
-            bail!("BSP contains no usable solid brushes");
-        }
-        Ok(Self { solid_brushes })
-    }
-
-    fn point_in_solid(&self, point: Vec3, radius: f32) -> bool {
-        self.solid_brushes.iter().any(|brush| {
-            brush
-                .iter()
-                .all(|plane| point.dot(plane.normal) <= plane.distance + radius)
-        })
-    }
-
-    fn segment_hits(&self, start: Vec3, end: Vec3, radius: f32) -> bool {
-        self.solid_brushes
-            .iter()
-            .any(|brush| segment_intersects_brush(start, end, radius, brush))
-    }
-}
-
-fn read_vpk_file(directory_path: &Path, target: &str) -> Result<Option<Vec<u8>>> {
-    const VPK_SIGNATURE: u32 = 0x55aa_1234;
-    const DIRECTORY_ARCHIVE: u16 = 0x7fff;
-    const MAX_BSP_BYTES: u32 = 512 * 1024 * 1024;
-    let mut directory = File::open(directory_path)?;
-    let mut fixed = [0u8; 12];
-    directory.read_exact(&mut fixed)?;
-    let signature = u32::from_le_bytes(fixed[0..4].try_into().unwrap());
-    let version = u32::from_le_bytes(fixed[4..8].try_into().unwrap());
-    let tree_length = u32::from_le_bytes(fixed[8..12].try_into().unwrap()) as usize;
-    if signature != VPK_SIGNATURE || !matches!(version, 1 | 2) {
-        return Ok(None);
-    }
-    let header_size = if version == 2 {
-        let mut extended = [0u8; 16];
-        directory.read_exact(&mut extended)?;
-        28u64
-    } else {
-        12u64
-    };
-    if tree_length == 0 || tree_length > 128 * 1024 * 1024 {
-        bail!("invalid VPK directory tree length in {}", directory_path.display());
-    }
-    let mut tree = vec![0u8; tree_length];
-    directory.read_exact(&mut tree)?;
-    let target = target.replace('\\', "/").to_ascii_lowercase();
-    let mut cursor = 0usize;
-    loop {
-        let extension = read_tree_string(&tree, &mut cursor)?;
-        if extension.is_empty() {
-            break;
-        }
-        loop {
-            let directory_name = read_tree_string(&tree, &mut cursor)?;
-            if directory_name.is_empty() {
-                break;
-            }
-            loop {
-                let filename = read_tree_string(&tree, &mut cursor)?;
-                if filename.is_empty() {
-                    break;
-                }
-                let entry_end = cursor.checked_add(18).context("invalid VPK entry offset")?;
-                let entry = tree.get(cursor..entry_end).context("truncated VPK entry")?;
-                let preload_bytes = u16::from_le_bytes(entry[4..6].try_into().unwrap()) as usize;
-                let archive_index = u16::from_le_bytes(entry[6..8].try_into().unwrap());
-                let entry_offset = u32::from_le_bytes(entry[8..12].try_into().unwrap());
-                let entry_length = u32::from_le_bytes(entry[12..16].try_into().unwrap());
-                let terminator = u16::from_le_bytes(entry[16..18].try_into().unwrap());
-                if terminator != 0xffff {
-                    bail!("invalid VPK entry terminator in {}", directory_path.display());
-                }
-                cursor = entry_end;
-                let preload_end = cursor
-                    .checked_add(preload_bytes)
-                    .context("invalid VPK preload size")?;
-                let preload = tree.get(cursor..preload_end).context("truncated VPK preload data")?;
-                cursor = preload_end;
-                let path = if directory_name == " " {
-                    format!("{filename}.{extension}")
-                } else {
-                    format!("{directory_name}/{filename}.{extension}")
-                }
-                .replace('\\', "/")
-                .to_ascii_lowercase();
-                if path != target {
-                    continue;
-                }
-                if entry_length > MAX_BSP_BYTES {
-                    bail!("map BSP in {} is too large to validate safely", directory_path.display());
-                }
-                let mut output = Vec::with_capacity(preload_bytes + entry_length as usize);
-                output.extend_from_slice(preload);
-                if entry_length == 0 {
-                    return Ok(Some(output));
-                }
-                let mut data = vec![0u8; entry_length as usize];
-                if archive_index == DIRECTORY_ARCHIVE {
-                    directory.seek(SeekFrom::Start(
-                        header_size + tree_length as u64 + u64::from(entry_offset),
-                    ))?;
-                    directory.read_exact(&mut data)?;
-                } else {
-                    let name = directory_path
-                        .file_name()
-                        .and_then(|value| value.to_str())
-                        .context("VPK directory filename is not UTF-8")?;
-                    let prefix = name.strip_suffix("_dir.vpk").context("VPK directory name is invalid")?;
-                    let archive_path = directory_path.with_file_name(format!("{prefix}_{archive_index:03}.vpk"));
-                    let mut archive = File::open(&archive_path).with_context(|| {
-                        format!("missing VPK archive {}", archive_path.display())
-                    })?;
-                    archive.seek(SeekFrom::Start(u64::from(entry_offset)))?;
-                    archive.read_exact(&mut data)?;
-                }
-                output.extend_from_slice(&data);
-                return Ok(Some(output));
-            }
-        }
-    }
-    Ok(None)
-}
-
-fn read_tree_string(tree: &[u8], cursor: &mut usize) -> Result<String> {
-    let start = *cursor;
-    let remaining = tree.get(start..).context("VPK directory cursor is out of range")?;
-    let end = remaining
-        .iter()
-        .position(|byte| *byte == 0)
-        .map(|offset| start + offset)
-        .context("unterminated VPK directory string")?;
-    *cursor = end + 1;
-    Ok(String::from_utf8_lossy(&tree[start..end]).into_owned())
-}
-
-fn segment_intersects_brush(start: Vec3, end: Vec3, radius: f32, brush: &[Plane]) -> bool {
-    let mut enter = 0.0_f32;
-    let mut exit = 1.0_f32;
-    for plane in brush {
-        let expanded_distance = plane.distance + radius;
-        let start_distance = start.dot(plane.normal) - expanded_distance;
-        let end_distance = end.dot(plane.normal) - expanded_distance;
-        if start_distance > 0.0 && end_distance > 0.0 {
-            return false;
-        }
-        if start_distance <= 0.0 && end_distance <= 0.0 {
-            continue;
-        }
-        let fraction = start_distance / (start_distance - end_distance);
-        if start_distance > end_distance {
-            enter = enter.max(fraction);
-        } else {
-            exit = exit.min(fraction);
-        }
-        if enter > exit {
-            return false;
-        }
-    }
-    enter <= exit && exit >= 0.0 && enter <= 1.0
-}
-
-#[derive(Clone, Copy)]
-struct Lump {
-    offset: usize,
-    length: usize,
-    compressed: bool,
-}
-
-fn lump(bytes: &[u8], index: usize) -> Result<Lump> {
-    let base = 8 + index * 16;
-    let offset = read_i32(bytes, base)?;
-    let length = read_i32(bytes, base + 4)?;
-    let four_cc = read_i32(bytes, base + 12)?;
-    if offset < 0 || length < 0 || offset as usize + length as usize > bytes.len() {
-        bail!("BSP lump {index} is out of range");
-    }
-    Ok(Lump {
-        offset: offset as usize,
-        length: length as usize,
-        compressed: four_cc != 0,
-    })
-}
-
-fn read_i32(bytes: &[u8], offset: usize) -> Result<i32> {
-    let value = bytes.get(offset..offset + 4).context("unexpected end of BSP")?;
-    Ok(i32::from_le_bytes(value.try_into().unwrap()))
-}
-
-fn read_u16(bytes: &[u8], offset: usize) -> Result<u16> {
-    let value = bytes.get(offset..offset + 2).context("unexpected end of BSP")?;
-    Ok(u16::from_le_bytes(value.try_into().unwrap()))
-}
-
-fn read_f32(bytes: &[u8], offset: usize) -> Result<f32> {
-    let value = bytes.get(offset..offset + 4).context("unexpected end of BSP")?;
-    Ok(f32::from_le_bytes(value.try_into().unwrap()))
 }
 
 #[cfg(test)]
@@ -996,8 +653,8 @@ mod tests {
             attacker_user_id: 1,
             activation_demo_tick: 33,
             interval_per_tick: FALLBACK_TICK_INTERVAL,
-            collision_map: "map.bsp".into(),
-            collision_coverage: "test",
+            collision_map: "disabled".into(),
+            collision_coverage: "disabled for victim-tracking test build",
             track_source: "states.ndjson".into(),
             keyframes: (0..4)
                 .map(|index| CameraKeyframe {
@@ -1020,60 +677,6 @@ mod tests {
         let end = commands.find("mirv_input end").unwrap();
         let enabled = commands.find("mirv_campath enabled 1").unwrap();
         assert!(setup < end && end < enabled);
-    }
-
-    #[test]
-    fn brush_trace_rejects_wall_crossing() {
-        let brush = vec![
-            Plane { normal: Vec3 { x: 1.0, y: 0.0, z: 0.0 }, distance: 10.0 },
-            Plane { normal: Vec3 { x: -1.0, y: 0.0, z: 0.0 }, distance: 10.0 },
-            Plane { normal: Vec3 { x: 0.0, y: 1.0, z: 0.0 }, distance: 10.0 },
-            Plane { normal: Vec3 { x: 0.0, y: -1.0, z: 0.0 }, distance: 10.0 },
-            Plane { normal: Vec3 { x: 0.0, y: 0.0, z: 1.0 }, distance: 10.0 },
-            Plane { normal: Vec3 { x: 0.0, y: 0.0, z: -1.0 }, distance: 10.0 },
-        ];
-        assert!(segment_intersects_brush(
-            Vec3 { x: -20.0, y: 0.0, z: 0.0 },
-            Vec3 { x: 20.0, y: 0.0, z: 0.0 },
-            0.0,
-            &brush,
-        ));
-        assert!(!segment_intersects_brush(
-            Vec3 { x: -20.0, y: 20.0, z: 0.0 },
-            Vec3 { x: 20.0, y: 20.0, z: 0.0 },
-            0.0,
-            &brush,
-        ));
-    }
-
-    #[test]
-    fn vpk_reader_finds_preloaded_map_case_insensitively() {
-        let payload = b"VBSP-test-payload";
-        let mut tree = Vec::new();
-        tree.extend_from_slice(b"bsp\0maps\0cp_test\0");
-        tree.extend_from_slice(&0u32.to_le_bytes());
-        tree.extend_from_slice(&(payload.len() as u16).to_le_bytes());
-        tree.extend_from_slice(&0x7fffu16.to_le_bytes());
-        tree.extend_from_slice(&0u32.to_le_bytes());
-        tree.extend_from_slice(&0u32.to_le_bytes());
-        tree.extend_from_slice(&0xffffu16.to_le_bytes());
-        tree.extend_from_slice(payload);
-        tree.extend_from_slice(b"\0\0\0");
-
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0x55aa_1234u32.to_le_bytes());
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&(tree.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&tree);
-
-        let path = std::env::temp_dir().join(format!(
-            "tf2fragdemohelper_camera_{}_dir.vpk",
-            std::process::id()
-        ));
-        fs::write(&path, bytes).unwrap();
-        let loaded = read_vpk_file(&path, "MAPS/CP_TEST.BSP").unwrap().unwrap();
-        let _ = fs::remove_file(path);
-        assert_eq!(loaded, payload);
     }
 
     #[test]

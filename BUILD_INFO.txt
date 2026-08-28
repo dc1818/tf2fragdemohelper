@@ -10,8 +10,8 @@ Cinematic camera behavior:
 - Generates six smooth HLAE keyframes with a brief post-impact victim hold.
 - Frames attacker and victim together instead of switching to attacker third person.
 - Rejects POV PVS, entity, respawn, or identity gaps instead of extrapolating.
-- Reads the exact map BSP from tf/maps or the installed TF2 VPK archives and
-  rejects camera endpoints, sightlines, and swept movement through solid brushes.
+- BSP/VPK collision checking is disabled in this victim-tracking test build, so
+  missing map files and walls cannot reject an otherwise valid camera track.
 - Loads the campath only after the documented POV camera setup, then executes
   mirv_input end before enabling mirv_campath.
 - Offers Original Camera or Cancel when an angle is unavailable.
@@ -66,7 +66,7 @@ Preserved behavior:
 - Previously recorded candidates can be skipped or explicitly re-recorded.
 
 Validation performed in this environment:
-- Cinematic source, parser-field, HLAE-order, VDM-schedule, and BSP collision
+- Cinematic source, parser-field, HLAE-order, VDM-schedule, and collision-disabled
   cross-reference checks were run.
 - Archive source assertions and ZIP integrity are checked during packaging.
 

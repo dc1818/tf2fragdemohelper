@@ -1,5 +1,5 @@
-TF2 Frag Demo Helper - Grounded-Transition Airshot Build
-Source build ID: 3f5f15563c05
+TF2 Frag Demo Helper - Relative-Height Airshot Scoring Build
+Source build ID: 74178911a18e
 Prepared: 2026-08-28 UTC
 
 This archive removes the experimental per-kill camera system from the UI,
@@ -28,6 +28,13 @@ Airshot behavior:
 - Five regression tests cover stationary and moving elevated ledges, genuine
   pre-impact airborne motion, collision-induced Cannon launch, and genuine
   pre-existing airborne Cannon victims.
+- Confirmed airshots receive an additional 0-20 style points based on both the
+  victim's positive height relative to the attacker and the upward elevation
+  angle from attacker to victim; absolute map Z never earns points.
+- New searchable tags identify high-relative, steep-skyward, and extreme
+  skyward airshots.
+- Two geometry regression tests verify that a shared high ledge earns no bonus
+  and that steeper, higher airshots score progressively more.
 
 Preserved behavior:
 - Recording Settings autosave, including initial default settings persistence.

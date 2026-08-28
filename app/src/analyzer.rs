@@ -879,6 +879,47 @@ fn vector3(value: Option<&Value>) -> Option<[f64; 3]> {
     (values.len() >= 3).then(|| [values[0].as_f64().unwrap_or_default(), values[1].as_f64().unwrap_or_default(), values[2].as_f64().unwrap_or_default()])
 }
 
+/// Returns victim height relative to the attacker, horizontal separation, and
+/// the upward elevation angle required to aim from attacker origin to victim
+/// origin. World-space Z is never scored by itself.
+fn airshot_geometry(
+    attacker: &Map<String, Value>,
+    victim: &Map<String, Value>,
+) -> Option<(f64, f64, f64)> {
+    let attacker = vector3(attacker.get("position"))?;
+    let victim = vector3(victim.get("position"))?;
+    let delta_x = victim[0] - attacker[0];
+    let delta_y = victim[1] - attacker[1];
+    let relative_height = victim[2] - attacker[2];
+    let horizontal_distance = (delta_x.powi(2) + delta_y.powi(2)).sqrt();
+    let elevation_degrees = relative_height.atan2(horizontal_distance.max(0.001)).to_degrees();
+    Some((relative_height, horizontal_distance, elevation_degrees))
+}
+
+/// Rewards visually difficult skyward airshots only after airborne eligibility
+/// has already been proven. Requiring both meaningful relative height and a
+/// steep upward angle prevents either measurement from dominating by itself.
+fn airshot_style_bonus(relative_height: f64, elevation_degrees: f64) -> f64 {
+    if relative_height <= 0.0 || elevation_degrees <= 0.0 {
+        return 0.0;
+    }
+    let height_points: f64 = match relative_height {
+        value if value >= 256.0 => 10.0,
+        value if value >= 192.0 => 7.0,
+        value if value >= 128.0 => 4.0,
+        value if value >= 64.0 => 2.0,
+        _ => 0.0,
+    };
+    let angle_points: f64 = match elevation_degrees {
+        value if value >= 50.0 => 10.0,
+        value if value >= 35.0 => 7.0,
+        value if value >= 20.0 => 4.0,
+        value if value >= 10.0 => 2.0,
+        _ => 0.0,
+    };
+    (height_points + angle_points).min(20.0)
+}
+
 fn matching_projectile(death: &Death, scan: &StateScan) -> Option<Value> {
     let victim = vector3(death.state.victim.get("position"))?;
     let handles = death.state.attacker.get("weapon_handles").and_then(Value::as_array)?
@@ -1349,6 +1390,27 @@ fn score_group(group: &[Death], round: &Round, buildings: &[BuildingEvent], obje
             let projectile = kill.state.projectile.as_ref().unwrap();
             if projectile.get("impact_proximity").and_then(Value::as_str) == Some("direct") { score += 6.0; tags.insert("direct_airshot".into()); breakdown.push(json!({"reason":"direct_airshot_proximity","points":6.0,"event_tick":kill.event_tick,"distance":projectile.get("distance_to_victim")})); }
             if projectile.get("flight_seconds").and_then(Value::as_f64).unwrap_or_default() >= 0.5 { score += 5.0; tags.insert("long_flight_airshot".into()); breakdown.push(json!({"reason":"long_flight_airshot","points":5.0,"event_tick":kill.event_tick,"flight_seconds":projectile.get("flight_seconds")})); }
+            if let Some((relative_height, horizontal_distance, elevation_degrees)) =
+                airshot_geometry(&kill.state.attacker, &kill.state.victim)
+            {
+                let style_points = airshot_style_bonus(relative_height, elevation_degrees);
+                if style_points > 0.0 {
+                    score += style_points;
+                    if relative_height >= 128.0 { tags.insert("high_airshot".into()); }
+                    if elevation_degrees >= 35.0 { tags.insert("skyward_airshot".into()); }
+                    if relative_height >= 256.0 && elevation_degrees >= 50.0 {
+                        tags.insert("extreme_airshot".into());
+                    }
+                    breakdown.push(json!({
+                        "reason":"relative_height_airshot_style",
+                        "points":style_points,
+                        "event_tick":kill.event_tick,
+                        "relative_height_units":(relative_height*100.0).round()/100.0,
+                        "horizontal_distance_units":(horizontal_distance*100.0).round()/100.0,
+                        "upward_elevation_degrees":(elevation_degrees*100.0).round()/100.0
+                    }));
+                }
+            }
         } else if victim_airborne && projectile_weapon {
             score += 8.0; tags.insert("airborne_projectile_kill".into()); breakdown.push(json!({"reason":"state_confirmed_airborne_victim","points":8.0,"event_tick":kill.event_tick}));
         } else if kill.rocket_jump_victim {
@@ -1668,6 +1730,10 @@ mod tests {
         ])
     }
 
+    fn position_state(x: f64, y: f64, z: f64) -> Map<String, Value> {
+        Map::from_iter([("position".into(), json!([x, y, z]))])
+    }
+
     #[test]
     fn tolerant_sixes_allows_one_offclass() {
         let roster = HashMap::from([
@@ -1750,5 +1816,29 @@ mod tests {
             1_000,
             AIRSHOT_LOOSE_CANNON_IMPACT_GUARD_TICKS,
         ));
+    }
+
+    #[test]
+    fn airshot_geometry_uses_height_relative_to_attacker_not_world_height() {
+        let attacker = position_state(0.0, 0.0, 1_000.0);
+        let same_high_ledge = position_state(100.0, 0.0, 1_000.0);
+        let victim_above = position_state(100.0, 0.0, 1_200.0);
+        let (ledge_height, _, ledge_angle) = airshot_geometry(&attacker, &same_high_ledge).unwrap();
+        let (air_height, _, air_angle) = airshot_geometry(&attacker, &victim_above).unwrap();
+        assert_eq!(ledge_height, 0.0);
+        assert_eq!(airshot_style_bonus(ledge_height, ledge_angle), 0.0);
+        assert!(air_height >= 192.0);
+        assert!(air_angle > 50.0);
+        assert_eq!(airshot_style_bonus(air_height, air_angle), 17.0);
+    }
+
+    #[test]
+    fn steeper_higher_airshot_receives_more_style_points() {
+        let low = airshot_style_bonus(80.0, 15.0);
+        let medium = airshot_style_bonus(150.0, 30.0);
+        let extreme = airshot_style_bonus(300.0, 55.0);
+        assert!(low < medium);
+        assert!(medium < extreme);
+        assert_eq!(extreme, 20.0);
     }
 }

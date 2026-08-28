@@ -2889,7 +2889,7 @@ fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64) -> String {
          alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"\n\
          alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"\n\
          alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"\n\
-         alias tf2frag_manual_help \"echo TF2FRAG_KEYS 2_BACK_1_SECOND 3_CLIP_START 4_NEXT_KILL 5_PAUSE 6_CAMERA 7_KEYFRAME 8_PLAY_PATH 9_RECORD 0_STOP -_PRINT =_SAVE\"\n\
+         alias tf2frag_manual_help \"echo TF2FRAG_KEYS RIGHT_ARROW_FORWARD_0.25_SECONDS UP_ARROW_TOGGLE_HUD 2_BACK_1_SECOND 3_CLIP_START 4_NEXT_KILL 5_PAUSE 6_CAMERA 7_KEYFRAME 8_PLAY_PATH 9_RECORD 0_STOP -_PRINT =_SAVE\"\n\
          alias tf2frag_manual_clip_start \"demo_gototick {target_tick}; echo TF2FRAG_MANUAL_CLIP_START {target_tick}\"\n"
     );
     for (index, tick) in kill_ticks.iter().enumerate() {
@@ -2901,7 +2901,12 @@ fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64) -> String {
         ));
     }
     cfg.push_str(
-        "alias tf2frag_manual_next_kill tf2frag_manual_kill_1\n\
+        "alias tf2frag_manual_hud_off \"cl_drawhud 0; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_on; echo TF2FRAG_MANUAL_HUD_HIDDEN\"\n\
+         alias tf2frag_manual_hud_on \"cl_drawhud 1; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off; echo TF2FRAG_MANUAL_HUD_VISIBLE\"\n\
+         alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off\n\
+         alias tf2frag_manual_next_kill tf2frag_manual_kill_1\n\
+         bind \"RIGHTARROW\" \"mirv_skip time 0.25\"\n\
+         bind \"UPARROW\" \"tf2frag_manual_toggle_hud\"\n\
          bind \"1\" \"tf2frag_manual_help\"\n\
          bind \"2\" \"mirv_skip time -1\"\n\
          bind \"3\" \"tf2frag_manual_clip_start\"\n\
@@ -5173,6 +5178,10 @@ mod recording_tests {
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 TICK 925"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 TICK 970"));
         assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
+        assert!(cfg.contains("bind \"RIGHTARROW\" \"mirv_skip time 0.25\""));
+        assert!(cfg.contains("bind \"UPARROW\" \"tf2frag_manual_toggle_hud\""));
+        assert!(cfg.contains("cl_drawhud 0"));
+        assert!(cfg.contains("cl_drawhud 1"));
         assert!(cfg.contains("bind \"6\""));
         assert!(cfg.contains("mirv_input camera"));
         assert!(cfg.contains("bind \"9\" \"tf2frag_manual_start\""));

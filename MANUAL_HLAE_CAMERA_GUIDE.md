@@ -19,6 +19,8 @@ These binds exist only in the isolated session. Your complete original `tf/cfg` 
 
 | Key | Action |
 |---|---|
+| Right Arrow | Advance demo time by 0.25 seconds, including while paused for keyframe placement |
+| Up Arrow | Toggle the entire HUD off or on |
 | 1 | Print the complete temporary hotkey reminder in the console |
 | 2 | Move demo time back one second with `mirv_skip time -1` |
 | 3 | Return to the selected lead-in before the first kill |
@@ -39,7 +41,7 @@ While `mirv_input camera` is active, use W/A/S/D to move, R/F to move up/down, P
 1. The demo is already paused at the selected lead-in.
 2. Press 6 to enter the camera and compose the opening view.
 3. Press 7 to add the first keyframe.
-4. Advance demo time before each new keyframe. You can resume slowly, use 4 to visit the next kill tick, or use console commands such as `mirv_skip time 0.25`.
+4. Advance demo time before each new keyframe. Use Right Arrow for a 0.25-second step, resume slowly, or use 4 to visit the next kill tick.
 5. Reposition the camera and press 7 again. A normal HLAE campath needs at least four keyframes.
 6. For a simultaneous kill, place one view that contains both victims. For kills a few ticks apart, add a key near each victim and leave enough demo time between keys for a readable transition.
 7. Press - and inspect the keyframe list. To remove a bad key, use `mirv_campath remove <id>` in the console.
@@ -62,7 +64,7 @@ mirv_campath load "C:/path/to/camera_path.xml"
 
 1. Rewind with 3.
 2. Make sure campath playback is enabled with 8 and the console is closed.
-3. Press 9 just before the portion you want to keep. The helper sets both `host_framerate` and `mirv_streams record fps` for encoded formats.
+3. Press Up Arrow if you want the HUD hidden, then press 9 just before the portion you want to keep. The helper sets both `host_framerate` and `mirv_streams record fps` for encoded formats.
 4. Let the complete multi-kill sequence play.
 5. Press 0 after the last kill/outro. Wait a moment for the encoder to flush before closing TF2.
 

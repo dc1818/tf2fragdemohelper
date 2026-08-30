@@ -106,6 +106,18 @@ impl Candidate {
     }
 
     pub fn inferred_primary_tag(&self) -> String {
+        // A candidate's output category follows its story chronologically: the
+        // first tag on the earliest kill tick wins. This makes Details and the
+        // recording folders agree, even if a later tick earns more points.
+        if let Some(tag) = self
+            .tick_tags
+            .iter()
+            .filter(|group| !group.tags.is_empty())
+            .min_by_key(|group| group.demo_tick)
+            .and_then(|group| group.tags.iter().find(|tag| !tag.trim().is_empty()))
+        {
+            return tag.clone();
+        }
         if !self.primary_tag.trim().is_empty()
             && self.tags.iter().any(|tag| tag == &self.primary_tag)
         {
@@ -462,7 +474,7 @@ mod candidate_tag_tests {
     use serde_json::json;
 
     #[test]
-    fn primary_tag_uses_strongest_positive_score_evidence() {
+    fn primary_tag_uses_the_first_tag_on_the_earliest_tick() {
         let candidate = Candidate {
             tags: vec!["projectile_kill".into(), "confirmed_airshot".into(), "late_round".into()],
             tick_tags: vec![TickTagGroup {
@@ -478,7 +490,7 @@ mod candidate_tag_tests {
             ],
             ..Candidate::default()
         };
-        assert_eq!(candidate.inferred_primary_tag(), "confirmed_airshot");
+        assert_eq!(candidate.inferred_primary_tag(), "projectile_kill");
     }
 
     #[test]

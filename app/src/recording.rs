@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -17,6 +17,9 @@ use std::{
     sync::{Arc, OnceLock},
     thread,
     time::{Duration, Instant, SystemTime},
+};
+use tf2_mirv_director::{
+    DirectorControl, DirectorCue, DirectorSession, DIRECTOR_SESSION_SCHEMA,
 };
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -80,6 +83,7 @@ pub struct ManualHlaeLaunch {
     pub target_tick: i64,
     pub output_path: PathBuf,
     pub session: PathBuf,
+    pub director_session: PathBuf,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1074,6 +1078,125 @@ pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Resul
     Ok(target_tick)
 }
 
+fn director_display_tag(tag: &str) -> String {
+    tag.trim().replace(['_', '-'], " ")
+}
+
+fn build_director_session(
+    candidate: &Candidate,
+    target_tick: i64,
+    end_tick: i64,
+    output_path: &Path,
+) -> DirectorSession {
+    let mut victims_by_tick = BTreeMap::<i64, BTreeSet<String>>::new();
+    for kill in &candidate.kills {
+        let Some(tick) = kill
+            .get("demo_tick")
+            .or_else(|| kill.get("tick"))
+            .and_then(serde_json::Value::as_i64)
+        else {
+            continue;
+        };
+        if let Some(name) = kill
+            .get("victim_name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            victims_by_tick.entry(tick).or_default().insert(name.into());
+        }
+    }
+
+    let mut cue_ticks = candidate.point_of_kill_ticks.clone();
+    cue_ticks.extend(candidate.tick_tags.iter().map(|group| group.demo_tick));
+    cue_ticks.sort_unstable();
+    cue_ticks.dedup();
+    let cues = cue_ticks
+        .into_iter()
+        .enumerate()
+        .map(|(index, tick)| DirectorCue {
+            tick,
+            label: format!("FRAG CUE {}", index + 1),
+            tags: candidate
+                .tick_tags
+                .iter()
+                .find(|group| group.demo_tick == tick)
+                .map(|group| {
+                    group
+                        .tags
+                        .iter()
+                        .map(|tag| director_display_tag(tag))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            victims: victims_by_tick
+                .remove(&tick)
+                .map(|names| names.into_iter().collect())
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    DirectorSession {
+        schema_version: DIRECTOR_SESSION_SCHEMA,
+        candidate_id: candidate.candidate_id.clone(),
+        demo_file: Path::new(&candidate.source_demo)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&candidate.source_demo)
+            .to_owned(),
+        map_name: candidate.map_name.clone(),
+        start_tick: target_tick,
+        end_tick,
+        cues,
+        whole_candidate_tags: candidate
+            .sequence_tags
+            .iter()
+            .map(|tag| director_display_tag(tag))
+            .collect(),
+        campath_file: output_path.join("camera_path.xml"),
+        output_directory: output_path.to_owned(),
+        control: DirectorControl::HotkeysOnly,
+    }
+}
+
+fn write_director_session(
+    candidate: &Candidate,
+    target_tick: i64,
+    end_tick: i64,
+    output_path: &Path,
+) -> Result<PathBuf> {
+    let session = build_director_session(candidate, target_tick, end_tick, output_path);
+    session.validate()?;
+    let path = output_path.join("director_session.json");
+    fs::write(&path, serde_json::to_vec_pretty(&session)?)
+        .with_context(|| format!("could not write Director session {}", path.display()))?;
+    Ok(path)
+}
+
+fn launch_director_companion(session_path: &Path) -> Result<Option<std::process::Child>> {
+    let current = std::env::current_exe().context("could not locate the helper executable")?;
+    let directory = current
+        .parent()
+        .context("could not locate the helper executable directory")?;
+    let names: &[&str] = if cfg!(target_os = "windows") {
+        &["TF2_MIRV_Director.exe", "tf2-mirv-director.exe"]
+    } else {
+        &["TF2_MIRV_Director", "tf2-mirv-director"]
+    };
+    let Some(executable) = names
+        .iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file())
+    else {
+        return Ok(None);
+    };
+    let child = Command::new(&executable)
+        .arg(session_path)
+        .spawn()
+        .with_context(|| format!("could not launch {}", executable.display()))?;
+    Ok(Some(child))
+}
+
 pub fn launch_manual_hlae_candidate(
     candidate: &Candidate,
     settings: &AppSettings,
@@ -1188,6 +1311,12 @@ pub fn launch_manual_hlae_candidate(
             Utc::now().format("%Y%m%d_%H%M%S")
         ));
     fs::create_dir_all(&output_path)?;
+    let director_session = write_director_session(
+        candidate,
+        target_tick,
+        end_tick,
+        &output_path,
+    )?;
     let launch_log = session.join("hlae_launch.log");
     let launch_log_file = File::create(&launch_log)?;
     let profile = stage_recording_profile(
@@ -1282,6 +1411,16 @@ pub fn launch_manual_hlae_candidate(
             return Err(error).context("could not launch TF2 through HLAE");
         }
     };
+    let mut director_child = match launch_director_companion(&director_session) {
+        Ok(child) => child,
+        Err(error) => {
+            log_recording_diagnostic(
+                &diagnostic_log,
+                format!("WARNING: TF2 MIRV Director did not open: {error:#}"),
+            );
+            None
+        }
+    };
 
     let monitor_log = diagnostic_log.clone();
     let monitor_output = output_path.clone();
@@ -1322,6 +1461,12 @@ pub fn launch_manual_hlae_candidate(
             );
         }
         wait_for_hlae_shutdown(&mut child, &monitor_log);
+        if let Some(director) = director_child.as_mut() {
+            if director.try_wait().ok().flatten().is_none() {
+                let _ = director.kill();
+                let _ = director.wait();
+            }
+        }
         log_recording_diagnostic(&monitor_log, "TF2 closed; restoring the original TF2 profile");
         let session_for_logs = if let Err(error) = restore_recording_profile(&profile) {
             log_recording_diagnostic(&monitor_log, format!("ERROR: restore failed: {error}"));
@@ -1345,6 +1490,7 @@ pub fn launch_manual_hlae_candidate(
         target_tick,
         output_path,
         session,
+        director_session,
     })
 }
 
@@ -5192,6 +5338,44 @@ mod recording_tests {
             ..Candidate::default()
         };
         assert_eq!(candidate_output_category(&candidate), "Confirmed Airshot");
+    }
+
+    #[test]
+    fn director_session_keeps_tick_tags_and_available_victim_names_together() {
+        let candidate = Candidate {
+            candidate_id: "r1-p2-t12000".into(),
+            source_demo: r"C:\demos\match.dem".into(),
+            map_name: "cp_process_final".into(),
+            point_of_kill_ticks: vec![12_000, 12_060],
+            tick_tags: vec![
+                crate::models::TickTagGroup {
+                    demo_tick: 12_000,
+                    tags: vec!["confirmed_airshot".into()],
+                    ..crate::models::TickTagGroup::default()
+                },
+                crate::models::TickTagGroup {
+                    demo_tick: 12_060,
+                    tags: vec!["medic_pick".into()],
+                    ..crate::models::TickTagGroup::default()
+                },
+            ],
+            sequence_tags: vec!["multi_kill".into()],
+            kills: vec![
+                json!({"demo_tick": 12_000, "victim_name": "Alice"}),
+                json!({"demo_tick": 12_060}),
+            ],
+            ..Candidate::default()
+        };
+        let output = Path::new(r"C:\captures\candidate");
+        let session = build_director_session(&candidate, 11_000, 13_000, output);
+
+        session.validate().unwrap();
+        assert_eq!(session.cues.len(), 2);
+        assert_eq!(session.cues[0].tags, vec!["confirmed airshot"]);
+        assert_eq!(session.cues[0].victims, vec!["Alice"]);
+        assert!(session.cues[1].victims.is_empty());
+        assert_eq!(session.whole_candidate_tags, vec!["multi kill"]);
+        assert_eq!(session.campath_file, output.join("camera_path.xml"));
     }
 
     #[test]

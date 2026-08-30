@@ -44,6 +44,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target/release/tf2-frag-helper.exe dist/TF2_Frag_Demo_Helper.exe
+          Copy-Item target/release/tf2-mirv-director.exe dist/TF2_MIRV_Director.exe
           Copy-Item target/release/export_all.exe dist/export_all.exe
           Copy-Item recording_resources_archive dist/recording_resources_archive -Recurse
       - uses: actions/upload-artifact@v4

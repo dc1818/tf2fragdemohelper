@@ -140,7 +140,7 @@ export component DirectorWindow inherits Window {
                             spacing: 5px;
                             for cue[index] in root.cues : Rectangle {
                                 height: cue.victims == "" ? 58px : 76px;
-                                background: index % 2 == 0 ? Colors.row : Colors.panel-alt;
+                                background: Math.mod(index, 2) == 0 ? Colors.row : Colors.panel-alt;
                                 border-width: 1px;
                                 border-color: index == 0 ? Colors.blue : Colors.border;
                                 VerticalLayout {

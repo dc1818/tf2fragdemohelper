@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 55955)
-Total output lines: 5956
-
 use crate::{
     models::{AppSettings, Candidate},
     preflight::{disk_space_for, format_bytes, require_disk_space},
@@ -2698,7 +2695,629 @@ fn extract_resource_archive(parts_directory: &Path, cache: &Path) -> Result<()> 
         fs::remove_dir_all(&staging)?;
     }
     if joined.exists() {
-        fs::rem…5955 tokens truncated…     let sequence = settings
+        fs::remove_file(&joined)?;
+    }
+    fs::create_dir_all(&staging)?;
+
+    let mut parts = fs::read_dir(parts_directory)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("resources.part"))
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+    if parts.is_empty() {
+        bail!("recording resource archive has no parts");
+    }
+    let mut output = File::create(&joined)?;
+    for part in parts {
+        io::copy(&mut File::open(part)?, &mut output)?;
+    }
+    drop(output);
+
+    let mut archive = ZipArchive::new(File::open(&joined)?)?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index)?;
+        let relative = entry
+            .enclosed_name()
+            .context("recording resource archive contains an unsafe path")?;
+        let destination = staging.join(relative);
+        if entry.is_dir() {
+            fs::create_dir_all(destination)?;
+        } else {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            io::copy(&mut entry, &mut File::create(destination)?)?;
+        }
+    }
+    fs::write(
+        staging.join("complete.marker"),
+        b"TF2 Frag Demo Helper recording resources v2\n",
+    )?;
+    if cache.exists() {
+        fs::remove_dir_all(cache)?;
+    }
+    fs::rename(&staging, cache)?;
+    fs::remove_file(joined)?;
+    Ok(())
+}
+
+fn install_skybox(source: &Path, destination: &Path, selected: &str) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let path = entry?.path();
+        if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("vmt"))
+        {
+            fs::copy(
+                &path,
+                destination.join(path.file_name().unwrap_or_default()),
+            )?;
+        }
+    }
+    for side in ["bk", "dn", "ft", "lf", "rt", "up"] {
+        let texture = source.join(format!("{selected}{side}.vtf"));
+        if !texture.is_file() {
+            bail!(
+                "selected recording skybox is incomplete: {}",
+                texture.display()
+            );
+        }
+        for entry in fs::read_dir(destination)? {
+            let path = entry?.path();
+            if path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.ends_with(side))
+                && path.extension().and_then(|value| value.to_str()) == Some("vmt")
+            {
+                fs::copy(&texture, path.with_extension("vtf"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_path(source: &Path, destination: &Path) -> Result<()> {
+    if source.is_dir() {
+        copy_directory(source, destination)
+    } else if source.is_file() {
+        fs::copy(source, destination)
+            .map(|_| ())
+            .map_err(Into::into)
+    } else {
+        bail!("selected custom resource is missing: {}", source.display())
+    }
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    if !source.is_dir() {
+        bail!(
+            "required recording resource is missing: {}",
+            source.display()
+        );
+    }
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let path = entry?.path();
+        let target = destination.join(path.file_name().unwrap_or_default());
+        if path.is_dir() {
+            copy_directory(&path, &target)?;
+        } else {
+            fs::copy(path, target)?;
+        }
+    }
+    Ok(())
+}
+
+fn windows_process_is_running(image_name: &str) -> bool {
+    // Fail closed: an unavailable Windows process query must never permit a
+    // second launch or trigger restoration while TF2 could still be running.
+    windows_process_state(image_name).unwrap_or(true)
+}
+
+/// `None` means Windows could not answer the query. A failed `tasklist` poll
+/// must not be interpreted as TF2 exiting during an active recording.
+fn windows_process_state(image_name: &str) -> Option<bool> {
+    if !cfg!(target_os = "windows") {
+        return Some(false);
+    }
+    let mut tasklist = Command::new("tasklist");
+    tasklist.args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        tasklist.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = tasklist.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .to_ascii_lowercase()
+            .contains(&image_name.to_ascii_lowercase()),
+    )
+}
+
+fn stop_windows_process(image_name: &str) -> Result<()> {
+    if !cfg!(target_os = "windows") {
+        return Ok(());
+    }
+    let mut taskkill = Command::new("taskkill");
+    taskkill.args(["/IM", image_name, "/T", "/F"]);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        taskkill.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = taskkill.output()?;
+    if !output.status.success() && windows_process_is_running(image_name) {
+        bail!(
+            "could not close TF2: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Resolve TF2's actual game directory from both current x64 installs
+/// (`tf/win64/tf_win64.exe`) and older layouts (`tf/tf.exe`).  Treating the
+/// executable's parent as the install root created the invalid `tf/win64/tf`
+/// path responsible for Windows error 3 during preview and HLAE launch.
+fn tf2_game_directory(executable: &Path) -> Result<PathBuf> {
+    let binary_directory = executable
+        .parent()
+        .context("could not find the TF2 executable directory")?;
+    let direct_game = binary_directory.join("cfg");
+    if direct_game.is_dir() {
+        return Ok(binary_directory.to_path_buf());
+    }
+    let sibling_game = binary_directory.join("tf");
+    if sibling_game.join("cfg").is_dir() {
+        return Ok(sibling_game);
+    }
+    if let Some(game) = binary_directory.parent() {
+        if game.join("cfg").is_dir() {
+            return Ok(game.to_path_buf());
+        }
+    }
+    if let Some(root) = binary_directory.parent() {
+        let game = root.join("tf");
+        if game.join("cfg").is_dir() {
+            return Ok(game);
+        }
+    }
+    bail!(
+        "could not locate TF2's tf/cfg directory from {}",
+        executable.display()
+    )
+}
+
+fn validate_tf2_executable(executable: &Path) -> Result<()> {
+    validate_named_executable(executable, &["tf_win64.exe", "tf.exe"], "TF2")
+}
+
+fn validate_named_executable(executable: &Path, expected: &[&str], label: &str) -> Result<()> {
+    let actual = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if expected
+        .iter()
+        .any(|name| actual.eq_ignore_ascii_case(name))
+    {
+        return Ok(());
+    }
+    bail!(
+        "{label} executable must be {}; selected {}",
+        expected.join(" or "),
+        executable.display()
+    )
+}
+
+fn log_recording_diagnostic(path: &Path, message: impl AsRef<str>) {
+    let result = (|| -> io::Result<()> {
+        let mut log = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(log, "[{}] {}", Utc::now().to_rfc3339(), message.as_ref())
+    })();
+    let _ = result;
+}
+
+fn log_recording_finalize(session: &Path, message: impl AsRef<str>) {
+    log_recording_diagnostic(&session.join("recording_finalize.log"), message);
+}
+
+fn clip_window(candidate: &Candidate, settings: &AppSettings) -> (i64, i64) {
+    let first = candidate
+        .point_of_kill_ticks
+        .first()
+        .copied()
+        .unwrap_or(candidate.clip_start_tick);
+    let last = candidate
+        .point_of_kill_ticks
+        .last()
+        .copied()
+        .unwrap_or(candidate.clip_end_tick);
+    let lead_ticks = (settings.lead_seconds as f64 * 66.666_666_7).round() as i64;
+    let outro_ticks = (settings.outro_seconds as f64 * 66.666_666_7).round() as i64;
+    let start = (first - lead_ticks).max(0);
+    let end = last + outro_ticks;
+    (start, end.max(start + 1))
+}
+
+/// Assign exact clip windows to independent demo playbacks whenever the
+/// recorder flush period makes a forward-only VDM schedule impossible. This
+/// preserves every requested lead-in and never seeks past a candidate's kill.
+fn split_recording_passes(
+    clips: &[(usize, Candidate)],
+    settings: &AppSettings,
+) -> Vec<Vec<(usize, Candidate)>> {
+    let windows = clips
+        .iter()
+        .map(|(_, candidate)| clip_window(candidate, settings))
+        .collect::<Vec<_>>();
+    partition_recording_windows(&windows)
+        .into_iter()
+        .map(|indices| {
+            indices
+                .into_iter()
+                .map(|index| clips[index].clone())
+                .collect()
+        })
+        .collect()
+}
+
+fn partition_recording_windows(windows: &[(i64, i64)]) -> Vec<Vec<usize>> {
+    let mut passes: Vec<Vec<usize>> = Vec::new();
+    let mut pass_finalize_ticks: Vec<i64> = Vec::new();
+    for (index, &(start, end)) in windows.iter().enumerate() {
+        let compatible = pass_finalize_ticks
+            .iter()
+            .position(|finalize_tick| start > *finalize_tick + VDM_ACTION_GAP_TICKS);
+        if let Some(pass_index) = compatible {
+            passes[pass_index].push(index);
+            pass_finalize_ticks[pass_index] = end + RECORDING_FLUSH_TICKS;
+        } else {
+            passes.push(vec![index]);
+            pass_finalize_ticks.push(end + RECORDING_FLUSH_TICKS);
+        }
+    }
+    passes
+}
+
+fn candidate_needs_spectator_focus(candidate: &Candidate) -> bool {
+    if candidate.attacker_user_id <= 0 {
+        return false;
+    }
+    if candidate.demo_context.capture_type.eq_ignore_ascii_case("stv") {
+        return true;
+    }
+    // Older exports could mislabel an STV as POV when dem_usercmd packets were
+    // present.  A supposed POV with no identified POV player and all-player
+    // analysis cannot safely preserve a single recorded POV, so explicitly
+    // focus the selected candidate just as an STV requires.
+    candidate.demo_context.analysis_scope.eq_ignore_ascii_case("all_players")
+        && candidate.demo_context.pov_player_user_id.is_none()
+}
+
+fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
+    let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
+    let mut action = 1;
+    add_vdm_action(
+        &mut lines,
+        &mut action,
+        "SkipAhead",
+        "TF2 Frag Demo Helper seek",
+        1,
+        Some(target_tick),
+        "",
+    );
+    if candidate_needs_spectator_focus(candidate) {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "PlayCommands",
+            "Focus selected STV candidate",
+            target_tick + 1,
+            None,
+            &format!("spec_autodirector 0; spec_player #{}; spec_mode 4", candidate.attacker_user_id),
+        );
+    }
+    lines.push("}".into());
+    lines.join("\n")
+}
+
+fn manual_seek_targets(target_tick: i64) -> Vec<i64> {
+    let target_tick = target_tick.max(0);
+    let mut targets = Vec::new();
+    let mut tick = MANUAL_SEEK_STEP_TICKS;
+    while tick < target_tick {
+        targets.push(tick);
+        tick += MANUAL_SEEK_STEP_TICKS;
+    }
+    if target_tick > 0 {
+        targets.push(target_tick);
+    }
+    targets
+}
+
+fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64, end_tick: i64) -> String {
+    let target_tick = target_tick.max(0);
+    let end_tick = end_tick.max(target_tick + 1);
+    let first_live_tick = target_tick + 1;
+    let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
+    let mut action = 1;
+    let seek_targets = manual_seek_targets(target_tick);
+    let mut previous_target = 0;
+    for (index, seek_target) in seek_targets.iter().enumerate() {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "SkipAhead",
+            &format!(
+                "TF2 Frag Demo Helper safe seek {}/{}",
+                index + 1,
+                seek_targets.len()
+            ),
+            if previous_target == 0 {
+                1
+            } else {
+                previous_target + 1
+            },
+            Some(*seek_target),
+            "",
+        );
+        previous_target = *seek_target;
+    }
+    let focus = if candidate_needs_spectator_focus(candidate) {
+        format!(
+            "spec_autodirector 0; spec_player #{}; spec_mode 4; ",
+            candidate.attacker_user_id
+        )
+    } else {
+        String::new()
+    };
+    add_vdm_action(
+        &mut lines,
+        &mut action,
+        "PlayCommands",
+        "Focus candidate and pause after safe seek",
+        target_tick + 1,
+        None,
+        &format!(
+            "{focus}thirdperson; r_drawviewmodel 0; mirv_cmd clear; mirv_cmd enabled 1; mirv_cmd addCurves tick {first_live_tick} {end_tick} - interp=linear space=abs {first_live_tick} {first_live_tick} {end_tick} {end_tick} -- \"echo {DIRECTOR_TICK_MARKER_PREFIX} {{0}}\"; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; echo {DIRECTOR_TICK_MARKER_PREFIX} {first_live_tick}"
+        ),
+    );
+    lines.push("}".into());
+    lines.join("\n")
+}
+
+fn manual_hotkey_cfg(
+    candidate: &Candidate,
+    target_tick: i64,
+    staged_demo: &str,
+    settings: &AppSettings,
+) -> String {
+    let mut shortcuts = settings.mirv_shortcuts.clone();
+    shortcuts.normalize();
+    let mut kill_ticks = candidate.point_of_kill_ticks.clone();
+    kill_ticks.sort_unstable();
+    kill_ticks.dedup();
+    if kill_ticks.is_empty() {
+        kill_ticks.push(target_tick);
+    }
+    let mut lines = vec![
+        "// Temporary manual HLAE controls generated by TF2 Frag Demo Helper.".into(),
+        "sv_cheats 1".into(),
+        "con_enable 1".into(),
+        "mirv_campath enabled 0".into(),
+        "mirv_campath clear".into(),
+        "mirv_input end".into(),
+        "alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"".into(),
+        "alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"".into(),
+        "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
+        format!(
+            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE\"",
+            shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
+            shortcuts.back_one_second, shortcuts.safe_restart, shortcuts.next_kill_tick,
+            shortcuts.pause_resume, shortcuts.enter_camera, shortcuts.add_keyframe,
+            shortcuts.play_campath, shortcuts.start_recording, shortcuts.stop_recording,
+            shortcuts.print_keyframes, shortcuts.save_campath,
+        ),
+        format!("alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\""),
+    ];
+    for (index, tick) in kill_ticks.iter().enumerate() {
+        let current = index + 1;
+        let next = if current == kill_ticks.len() { 1 } else { current + 1 };
+        lines.push(format!(
+            "alias tf2frag_manual_kill_{current} \"demo_gototick {tick}; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo TF2FRAG_MANUAL_KILL {current}/{} TICK {tick}\"",
+            kill_ticks.len()
+        ));
+    }
+    lines.extend([
+        "alias tf2frag_manual_hud_off \"cl_drawhud 0; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_on; echo TF2FRAG_MANUAL_HUD_HIDDEN\"".into(),
+        "alias tf2frag_manual_hud_on \"cl_drawhud 1; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off; echo TF2FRAG_MANUAL_HUD_VISIBLE\"".into(),
+        "alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off".into(),
+        "alias tf2frag_manual_next_kill tf2frag_manual_kill_1".into(),
+        format!("bind \"{}\" \"mirv_skip time 0.25\"", shortcuts.advance_time),
+        format!("bind \"{}\" \"tf2frag_manual_toggle_hud\"", shortcuts.toggle_hud),
+        format!("bind \"{}\" \"tf2frag_manual_help\"", shortcuts.show_help),
+        format!("bind \"{}\" \"mirv_skip time -1\"", shortcuts.back_one_second),
+        format!("bind \"{}\" \"tf2frag_manual_clip_start\"", shortcuts.safe_restart),
+        format!("bind \"{}\" \"tf2frag_manual_next_kill\"", shortcuts.next_kill_tick),
+        format!("bind \"{}\" \"demo_togglepause\"", shortcuts.pause_resume),
+        format!("bind \"{}\" \"sv_cheats 1; thirdperson; r_drawviewmodel 0; spec_autodirector 0; mirv_input camera\"", shortcuts.enter_camera),
+        format!("bind \"{}\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED\"", shortcuts.add_keyframe),
+        format!("bind \"{}\" \"mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED_THIRDPERSON\"", shortcuts.play_campath),
+        format!("bind \"{}\" \"tf2frag_manual_start\"", shortcuts.start_recording),
+        format!("bind \"{}\" \"tf2frag_manual_stop\"", shortcuts.stop_recording),
+        format!("bind \"{}\" \"mirv_campath print\"", shortcuts.print_keyframes),
+        format!("bind \"{}\" \"tf2frag_manual_save\"", shortcuts.save_campath),
+        "echo TF2FRAG_MANUAL_READY".into(),
+        "tf2frag_manual_help".into(),
+    ]);
+    format!("{}\n", lines.join("\n"))
+}
+
+fn vdm_text(
+    clips: &[(usize, Candidate)],
+    session_name: &str,
+    next_demo: Option<&str>,
+    settings: &AppSettings,
+) -> Result<String> {
+    let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
+    let mut action = 1;
+    add_vdm_action(
+        &mut lines,
+        &mut action,
+        "PlayCommands",
+        "Apply movie profile",
+        1,
+        None,
+        &format!("mirv_campath enabled 0; mirv_campath clear; mirv_input end; exec tf2fragdemohelper_recording_profile; {}", clean_capture_screen_commands()),
+    );
+    let mut previous_finalize_tick = -1;
+    for (order, candidate) in clips {
+        let (start, end) = clip_window(candidate, settings);
+        if previous_finalize_tick >= 0 && start <= previous_finalize_tick + VDM_ACTION_GAP_TICKS {
+            bail!(
+                "overlapping recording windows reached one VDM pass (candidate {}, start tick {}, previous finalize tick {})",
+                candidate.candidate_id,
+                start,
+                previous_finalize_tick
+            );
+        }
+        let base = format!("{:03}_{}_t{}-{}", order, sanitize(&candidate.candidate_id), candidate.clip_start_tick, candidate.clip_end_tick);
+        let seek_at = if previous_finalize_tick < 0 { 2 } else { previous_finalize_tick + 2 };
+        if start > seek_at {
+            add_vdm_action(&mut lines, &mut action, "SkipAhead", "Batch seek", seek_at, Some(start), "");
+        }
+        let focus = if candidate_needs_spectator_focus(candidate) {
+            format!("spec_autodirector 0; spec_player #{}; spec_mode 4; ", candidate.attacker_user_id)
+        } else { String::new() };
+        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Start clip", start + 1, None, &format!("{focus}exec tf2fragdemohelper_batch/{session_name}/{base}_start"));
+        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Stop clip", end, None, &format!("exec tf2fragdemohelper_batch/{session_name}/{base}_stop"));
+        previous_finalize_tick = end + RECORDING_FLUSH_TICKS;
+        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Finalize clip", previous_finalize_tick, None, &format!("echo TF2FRAG_RECORD_FINALIZED {base}"));
+    }
+    if let Some(demo) = next_demo {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "PlayCommands",
+            "Continue batch",
+            previous_finalize_tick + 2,
+            None,
+            &format!("echo TF2FRAG_PASS_FINISHED; playdemo {demo}"),
+        );
+    } else {
+        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Finish batch", previous_finalize_tick + 2, None, "echo TF2FRAG_BATCH_FINISHED");
+        add_vdm_action(&mut lines, &mut action, "PlayCommands", "Close TF2", previous_finalize_tick + 3, None, "quit");
+    }
+    lines.push("}".into());
+    Ok(lines.join("\n"))
+}
+
+fn add_vdm_action(
+    lines: &mut Vec<String>,
+    action: &mut i32,
+    factory: &str,
+    name: &str,
+    tick: i64,
+    skip_to: Option<i64>,
+    commands: &str,
+) {
+    lines.extend([
+        format!("    \"{}\"", *action),
+        "    {".into(),
+        format!("        factory \"{factory}\""),
+        format!("        name \"{name}\""),
+        format!("        starttick \"{tick}\""),
+    ]);
+    if let Some(target) = skip_to {
+        lines.push(format!("        skiptotick \"{target}\""));
+    }
+    if !commands.is_empty() {
+        lines.push(format!(
+            "        commands \"{}\"",
+            commands.replace('"', "\\\"")
+        ));
+    }
+    lines.push("    }".into());
+    *action += 1;
+}
+
+fn prepare_recording_clips(
+    candidates: &[Candidate],
+    session_name: &str,
+    session: &Path,
+    settings: &AppSettings,
+    replace_existing: bool,
+) -> Result<Vec<PreparedClip>> {
+    let encoded = !settings.recording_format.contains("Image");
+    let extension = encoded_extension(settings);
+    let mut clips = Vec::new();
+    let mut reserved_identifiers = HashSet::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let source = Path::new(&candidate.source_demo);
+        if !source.is_file() {
+            continue;
+        }
+        let order = index + 1;
+        let (start_tick, end_tick) = clip_window(candidate, settings);
+        let recording_key = recording_key(candidate)?;
+        let demo_signature = portable_demo_signature(source)?;
+        let demo_name = sanitize(
+            source
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("demo"),
+        );
+        let candidate_name = sanitize(if candidate.candidate_id.trim().is_empty() {
+            "candidate"
+        } else {
+            &candidate.candidate_id
+        });
+        let base_identifier = format!(
+            "{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__k{}",
+            recording_key_token(&recording_key)
+        );
+        let output_category = candidate_output_category(candidate);
+        let recording_identifier = unique_recording_identifier(
+            &settings.recording_output_directory,
+            &output_category,
+            &base_identifier,
+            encoded,
+            extension,
+            &reserved_identifiers,
+        );
+        reserved_identifiers.insert(recording_identifier.clone());
+        let config_base = format!(
+            "{:03}_{}_t{}-{}",
+            order, candidate_name, candidate.clip_start_tick, candidate.clip_end_tick
+        );
+        let capture_base = format!("tf2frag_{session_name}_{order:03}");
+        let (working_path, final_output_path, frames_path, audio_path) = if encoded {
+            // HLAE writes into a short private folder. The descriptive output
+            // name is applied only when the completed file is moved out.
+            let working = session.join("working").join(format!("{order:03}"));
+            let final_path = settings
+                .recording_output_directory
+                .join("Videos")
+                .join(&output_category)
+                .join(format!("{recording_identifier}.{extension}"));
+            fs::create_dir_all(&working)?;
+            (Some(working), final_path, None, None)
+        } else {
+            let sequence = settings
                 .recording_output_directory
                 .join("Image Sequences")
                 .join(&recording_identifier);

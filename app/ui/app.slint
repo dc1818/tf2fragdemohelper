@@ -17,9 +17,11 @@ component AutoScrollLog inherits ScrollView {
     vertical-scrollbar-policy: always-on;
     horizontal-scrollbar-policy: always-off;
     viewport-width: self.width;
-    viewport-height: Math.max(root.height, log-content.height + 12px);
-    // Keep parser output pinned to the newest line whenever the log grows.
-    viewport-y: root.height - self.viewport-height;
+    viewport-height: Math.max(self.visible-height, log-content.height + 12px);
+    // `viewport-y` is the viewport's position relative to the visible area.
+    // Binding it to the exact lower bound, rather than the outer component's
+    // height, keeps a growing parser/analyzer log pinned to its newest line.
+    viewport-y: self.visible-height - self.viewport-height;
     log-content := Text {
         x: 9px; y: 7px;
         width: root.width - 28px;
@@ -478,14 +480,23 @@ export component AppWindow inherits Window {
     in-out property <string> recording-output-description;
     in-out property <string> candidate-detail-player;
     in-out property <string> candidate-detail-player-meta;
+    in-out property <bool> candidate-detail-has-player;
     in-out property <string> candidate-detail-map;
     in-out property <string> candidate-detail-map-meta;
+    in-out property <bool> candidate-detail-has-map;
+    in-out property <string> candidate-detail-demo;
+    in-out property <string> candidate-detail-demo-meta;
+    in-out property <bool> candidate-detail-has-demo;
     in-out property <string> candidate-detail-score;
     in-out property <string> candidate-detail-score-meta;
     in-out property <string> candidate-detail-summary;
+    in-out property <bool> candidate-detail-has-summary;
     in-out property <string> candidate-detail-kills;
+    in-out property <bool> candidate-detail-has-kills;
     in-out property <string> candidate-detail-score-breakdown;
+    in-out property <bool> candidate-detail-has-score-breakdown;
     in-out property <string> candidate-detail-tags;
+    in-out property <bool> candidate-detail-has-tags;
     in-out property <string> tf2-path;
     in-out property <string> hlae-path;
     in-out property <string> ffmpeg-path;
@@ -1074,20 +1085,22 @@ export component AppWindow inherits Window {
                         x: 8px; y: 8px; width: parent.width - 28px; height: self.preferred-height; spacing: 8px;
                         if !root.compact : HorizontalLayout {
                             height: 100px; spacing: 8px;
-                            CandidateDetailCard { heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
-                            CandidateDetailCard { heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            if root.candidate-detail-has-player : CandidateDetailCard { heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
+                            if root.candidate-detail-has-map : CandidateDetailCard { heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            if root.candidate-detail-has-demo : CandidateDetailCard { heading: "SOURCE DEMO"; value: root.candidate-detail-demo; supporting-text: root.candidate-detail-demo-meta; }
                             CandidateDetailCard { heading: "CANDIDATE SCORE"; value: root.candidate-detail-score; supporting-text: root.candidate-detail-score-meta; }
                         }
                         if root.compact : VerticalLayout {
-                            height: 264px; spacing: 6px;
-                            CandidateDetailCard { height: 84px; heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
-                            CandidateDetailCard { height: 84px; heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            height: self.preferred-height; spacing: 6px;
+                            if root.candidate-detail-has-player : CandidateDetailCard { height: 84px; heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
+                            if root.candidate-detail-has-map : CandidateDetailCard { height: 84px; heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            if root.candidate-detail-has-demo : CandidateDetailCard { height: 84px; heading: "SOURCE DEMO"; value: root.candidate-detail-demo; supporting-text: root.candidate-detail-demo-meta; }
                             CandidateDetailCard { height: 84px; heading: "CANDIDATE SCORE"; value: root.candidate-detail-score; supporting-text: root.candidate-detail-score-meta; }
                         }
-                        CandidateDetailSection { heading: "WHAT HAPPENS IN THIS CLIP"; body: root.candidate-detail-summary; section-floor-height: 92px; }
-                        CandidateDetailSection { heading: "KILL-BY-KILL"; body: root.candidate-detail-kills; section-floor-height: 92px; }
-                        CandidateDetailSection { heading: "WHY IT RECEIVED THIS SCORE"; body: root.candidate-detail-score-breakdown; section-floor-height: 110px; }
-                        CandidateDetailSection { heading: "FRAG TAGS"; body: root.candidate-detail-tags; section-floor-height: 72px; }
+                        if root.candidate-detail-has-summary : CandidateDetailSection { heading: "WHAT HAPPENS IN THIS CLIP"; body: root.candidate-detail-summary; section-floor-height: 92px; }
+                        if root.candidate-detail-has-kills : CandidateDetailSection { heading: "KILL-BY-KILL"; body: root.candidate-detail-kills; section-floor-height: 92px; }
+                        if root.candidate-detail-has-score-breakdown : CandidateDetailSection { heading: "WHY IT RECEIVED THIS SCORE"; body: root.candidate-detail-score-breakdown; section-floor-height: 110px; }
+                        if root.candidate-detail-has-tags : CandidateDetailSection { heading: "TAG BREAKDOWN BY TICK"; body: root.candidate-detail-tags; section-floor-height: 72px; }
                     }
                 }
             }

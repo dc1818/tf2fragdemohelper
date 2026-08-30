@@ -1,5 +1,5 @@
 use crate::{
-    models::{Candidate, DemoContext},
+    models::{Candidate, DemoContext, TickTagGroup},
     scheduler::RuntimeGovernor,
 };
 use anyhow::{Context, Result};
@@ -1269,7 +1269,18 @@ fn build_candidates(
                 "player_count_swing":scored.metrics.get("player_count_swing"),
                 "sack_uber_recovery":scored.metrics.get("sack_uber_recovery"),
             });
-            candidates.push(Candidate {
+            let tick_tags = tick_tag_groups(group);
+            let tick_tag_set = tick_tags
+                .iter()
+                .flat_map(|group| group.tags.iter().cloned())
+                .collect::<HashSet<_>>();
+            let sequence_tags = scored
+                .tags
+                .iter()
+                .filter(|tag| !tick_tag_set.contains(*tag))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut candidate = Candidate {
                 candidate_id: format!("r{round_index}-p{attacker}-t{}", first.event_tick),
                 source_demo: source_demo.into(),
                 map_name: map_name.into(),
@@ -1282,6 +1293,8 @@ fn build_candidates(
                 clip_end_tick: last.demo_tick + POST_ROLL,
                 point_of_kill_ticks: group.iter().map(|kill| kill.demo_tick).collect(),
                 tags: scored.tags,
+                tick_tags,
+                sequence_tags,
                 metrics: scored.metrics,
                 kills: kill_values,
                 score_breakdown: scored.breakdown,
@@ -1315,12 +1328,120 @@ fn build_candidates(
                     ("state_pass".into(), state_pass),
                 ]),
                 ..Candidate::default()
-            });
+            };
+            candidate.primary_tag = candidate.inferred_primary_tag();
+            candidates.push(candidate);
     }
     Ok((candidates, jobs.len(), if workers > 1 && jobs.len() >= 4 { workers } else { 1 }))
 }
 
 struct ScoredGroup { score: f64, tags: Vec<String>, metrics: Value, breakdown: Vec<Value>, objective_followups: Vec<Value>, building_followups: Vec<Value> }
+
+fn tick_tag_groups(group: &[Death]) -> Vec<TickTagGroup> {
+    let mut grouped = BTreeMap::<i64, (BTreeSet<i64>, BTreeSet<String>)>::new();
+    for kill in group {
+        let entry = grouped.entry(kill.demo_tick).or_default();
+        entry.0.insert(kill.event_tick);
+        entry.1.extend(kill_tags(kill));
+    }
+    grouped
+        .into_iter()
+        .map(|(demo_tick, (server_ticks, tags))| TickTagGroup {
+            demo_tick,
+            server_ticks: server_ticks.into_iter().collect(),
+            tags: tags.into_iter().collect(),
+        })
+        .collect()
+}
+
+fn kill_tags(kill: &Death) -> BTreeSet<String> {
+    let mut tags = BTreeSet::new();
+    let weapon = kill.weapon.to_ascii_lowercase();
+    if matches!(weapon.as_str(), "rocketlauncher" | "directhit" | "blackbox" | "liberty_launcher" | "airstrike" | "grenadelauncher" | "loch_n_load" | "iron_bomber" | "stickybomb_launcher" | "quickiebomb_launcher" | "flaregun" | "detonator" | "scorch_shot" | "compound_bow" | "crusaders_crossbow" | "syringegun_medic" | "rescue_ranger" | "righteous_bison" | "loose_cannon" | "loose_cannon_impact" | "loose_cannon_explosion") {
+        tags.insert("projectile_kill".into());
+    }
+    if matches!(weapon.as_str(), "grenadelauncher" | "loch_n_load" | "iron_bomber") { tags.insert("pipe".into()); }
+    if matches!(weapon.as_str(), "rocketlauncher" | "directhit" | "blackbox" | "liberty_launcher" | "airstrike") { tags.insert("rocket".into()); }
+    if matches!(weapon.as_str(), "compound_bow" | "huntsman") { tags.insert("huntsman".into()); }
+    if matches!(weapon.as_str(), "crusaders_crossbow" | "crossbow") { tags.insert("crossbow".into()); }
+    if let Some(tag) = match weapon.as_str() {
+        "market_gardener" => Some("market_gardener"), "axtinguisher" => Some("axtinguisher"),
+        "backburner" => Some("backburner"), "ambassador" => Some("ambassador"), "kunai" => Some("kunai"),
+        "eternal_reward" => Some("eternal_reward"), "tribalkukri" => Some("tribalman's_shiv"), _ => None,
+    } { tags.insert(tag.into()); }
+
+    if kill.state.confirmed_kritzkrieg_boost && kill.crit_type > 0 { tags.insert("kritzkrieg_kill".into()); }
+    let market = weapon == "market_gardener"
+        && kill.crit_type > 0
+        && kill.state.attacker.get("blast_jumping").and_then(Value::as_bool).unwrap_or(false);
+    if market { tags.insert("market_garden".into()); }
+    if kill.state.confirmed_double_donk { tags.insert("double_donk".into()); }
+    let velocity_z = vector3(kill.state.attacker.get("velocity")).map(|value| value[2]).unwrap_or_default();
+    if kill.attacker_class == "sniper"
+        && matches!(weapon.as_str(), "sniperrifle" | "sniperrifle_classic" | "sniperrifle_decap")
+        && kill.state.attacker.get("scoped").and_then(Value::as_bool).unwrap_or(false)
+        && kill.state.attacker.get("on_ground").and_then(Value::as_bool) == Some(false)
+        && velocity_z < -20.0
+    {
+        tags.insert("sniper_dropshot".into());
+    }
+    let shield_bash = kill.custom_kill == 23;
+    let charge_melee = !shield_bash
+        && kill.attacker_class == "demoman"
+        && is_melee(kill)
+        && kill.state.attacker_recent_shield_charge_tick.is_some();
+    if shield_bash {
+        tags.extend(["demoknight".into(), "shield_bash_kill".into()]);
+    } else if charge_melee {
+        tags.extend(["demoknight".into(), "charge_melee_kill".into()]);
+    }
+    let backstab = kill.custom_kill == 2;
+    let taunt = taunt_kill_name(kill.custom_kill);
+    if is_melee(kill) && !backstab && taunt.is_none() && !shield_bash && !charge_melee && !market {
+        tags.insert("melee_kill".into());
+    }
+    if backstab { tags.insert("backstab".into()); }
+    if taunt.is_some() { tags.insert("taunt_kill".into()); }
+    if kill.victim_class == "medic" {
+        tags.insert("medic_pick".into());
+        if kill.state.confirmed_uber_drop { tags.insert("uber_drop".into()); }
+    }
+    if kill.victim_class == "demoman" { tags.insert("demoman_pick".into()); }
+
+    let victim_airborne = kill.state.victim_airborne_before_projectile_impact;
+    let projectile_weapon = ["rocket", "directhit", "blackbox", "grenade", "loch", "iron_bomber", "loose_cannon", "flare", "huntsman", "crossbow"]
+        .iter().any(|name| weapon.contains(name));
+    let confirmed_airshot = victim_airborne
+        && kill.state.projectile.as_ref().and_then(|value| value.get("airshot_eligible")).and_then(Value::as_bool).unwrap_or(false);
+    if confirmed_airshot {
+        tags.insert("confirmed_airshot".into());
+        if let Some(projectile) = kill.state.projectile.as_ref() {
+            if projectile.get("impact_proximity").and_then(Value::as_str) == Some("direct") { tags.insert("direct_airshot".into()); }
+            if projectile.get("flight_seconds").and_then(Value::as_f64).unwrap_or_default() >= 0.5 { tags.insert("long_flight_airshot".into()); }
+        }
+        if let Some((relative_height, _, elevation_degrees)) = airshot_geometry(&kill.state.attacker, &kill.state.victim) {
+            if airshot_style_bonus(relative_height, elevation_degrees) > 0.0 {
+                if relative_height >= 128.0 { tags.insert("high_airshot".into()); }
+                if elevation_degrees >= 35.0 { tags.insert("skyward_airshot".into()); }
+                if relative_height >= 256.0 && elevation_degrees >= 50.0 { tags.insert("extreme_airshot".into()); }
+            }
+        }
+    } else if victim_airborne && projectile_weapon {
+        tags.insert("airborne_projectile_kill".into());
+    } else if kill.rocket_jump_victim {
+        tags.insert("rocket_jump_victim".into());
+    }
+    if kill.kill_streak_total >= 10 { tags.insert("streak_10_plus".into()); }
+    if kill.crit_type == 2
+        && !charge_melee
+        && !kill.state.confirmed_kritzkrieg_boost
+        && weapon != "market_gardener"
+        && !backstab
+    {
+        tags.insert("random_full_crit".into());
+    }
+    tags
+}
 
 fn score_group(group: &[Death], round: &Round, buildings: &[BuildingEvent], objectives: &[ObjectiveEvent]) -> ScoredGroup {
     let mut score = 10.0;
@@ -1713,12 +1834,17 @@ fn append_bookmarks(export: &Path, source_demo: &str, context: &DemoContext, can
         candidate.tags.push("bookmark".into());
         candidate.tags.sort();
         candidate.tags.dedup();
+        candidate.sequence_tags.push("bookmark".into());
+        candidate.sequence_tags.sort();
+        candidate.sequence_tags.dedup();
         candidate.bookmark_comment = comment;
         candidate.bookmark_tick = Some(tick);
         if !candidate.metrics.is_object() { candidate.metrics = json!({}); }
         candidate.metrics["bookmarks"] = json!(1);
         candidate.metrics["bookmark_score"] = json!(BOOKMARK_SCORE);
         candidate.score_breakdown.push(json!({"reason":"bookmark","points":BOOKMARK_SCORE,"event_tick":tick}));
+        candidate.primary_tag.clear();
+        candidate.primary_tag = candidate.inferred_primary_tag();
         candidates.push(candidate);
     }
     Ok(())
@@ -1734,7 +1860,7 @@ fn write_candidates(export: &Path, candidates: &[Candidate], context: &DemoConte
     output.flush()?;
     let summary = json!({
         "format":"tf2-frag-candidates-rust",
-        "format_version":2,
+        "format_version":3,
         "source_demo":source_demo,
         "map_name":map_name,
         "candidate_count":candidates.len(),

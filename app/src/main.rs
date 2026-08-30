@@ -126,14 +126,23 @@ fn candidate_server_type(candidate: &Candidate) -> &str {
 struct CandidateDetailText {
     player: String,
     player_meta: String,
+    has_player: bool,
     map: String,
     map_meta: String,
+    has_map: bool,
+    demo: String,
+    demo_meta: String,
+    has_demo: bool,
     score: String,
     score_meta: String,
     summary: String,
+    has_summary: bool,
     kills: String,
+    has_kills: bool,
     score_breakdown: String,
+    has_score_breakdown: bool,
     tags: String,
+    has_tags: bool,
 }
 
 fn nonempty_json_string(value: &serde_json::Value) -> Option<&str> {
@@ -337,7 +346,7 @@ fn human_join(values: &[String]) -> String {
     }
 }
 
-fn candidate_player_name(candidate: &Candidate) -> String {
+fn known_candidate_player_name(candidate: &Candidate) -> Option<String> {
     candidate
         .extra
         .get("attacker_name")
@@ -364,7 +373,10 @@ fn candidate_player_name(candidate: &Candidate) -> String {
                 .flatten()
         })
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("Player #{}", candidate.attacker_user_id))
+}
+
+fn candidate_player_name(candidate: &Candidate) -> String {
+    known_candidate_player_name(candidate).unwrap_or_else(|| format!("Player #{}", candidate.attacker_user_id))
 }
 
 fn kill_notes(kill: &serde_json::Value) -> Vec<String> {
@@ -423,7 +435,12 @@ fn kill_notes(kill: &serde_json::Value) -> Vec<String> {
 }
 
 fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
-    let player = candidate_player_name(candidate);
+    let known_player = known_candidate_player_name(candidate);
+    let has_player = known_player.is_some()
+        || (candidate.attacker_user_id != 0
+            && !candidate.attacker_class.eq_ignore_ascii_case("bookmark"));
+    let player = known_player
+        .unwrap_or_else(|| format!("Player #{}", candidate.attacker_user_id));
     let class = if candidate.attacker_class.is_empty() {
         "Unknown class".into()
     } else {
@@ -434,11 +451,8 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     } else {
         candidate.attacker_team.to_ascii_uppercase()
     };
-    let map = if candidate.map_name.is_empty() {
-        "Unknown map".into()
-    } else {
-        candidate.map_name.clone()
-    };
+    let has_map = !candidate.map_name.trim().is_empty();
+    let map = candidate.map_name.clone();
     let demo_name = Path::new(&candidate.source_demo)
         .file_name()
         .and_then(|name| name.to_str())
@@ -448,16 +462,17 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     } else {
         String::new()
     };
-    let map_meta = if demo_name.is_empty() {
-        format!("{}{}", candidate_server_type(candidate), round)
-    } else {
-        format!(
-            "{}{} • {}",
-            candidate_server_type(candidate),
-            round,
-            demo_name
-        )
-    };
+    let mut map_meta_parts = Vec::new();
+    if candidate_server_type(candidate) != "Unknown / Mixed" {
+        map_meta_parts.push(candidate_server_type(candidate).to_owned());
+    }
+    if !round.is_empty() {
+        map_meta_parts.push(round.trim_start_matches(" • ").to_owned());
+    }
+    let map_meta = map_meta_parts.join(" • ");
+    let has_demo = !demo_name.trim().is_empty();
+    let demo = demo_name.to_owned();
+    let demo_meta = "Source demo file".to_owned();
     let kill_count = candidate.kill_count();
     let kill_word = if kill_count == 1 { "kill" } else { "kills" };
 
@@ -543,12 +558,16 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
         });
     let mut summary = if kill_count == 0 {
         if candidate.bookmark_comment.trim().is_empty() {
-            format!("{player} has a bookmarked moment on {map}.")
+            candidate
+                .extra
+                .get("description")
+                .or_else(|| candidate.extra.get("summary"))
+                .and_then(nonempty_json_string)
+                .map(str::to_owned)
+                .unwrap_or_else(|| "A non-kill candidate was identified.".into())
         } else {
-            format!(
-                "{player} has a bookmarked moment on {map}: {}",
-                candidate.bookmark_comment.trim()
-            )
+            let location = has_map.then_some(map.as_str()).unwrap_or("this demo");
+            format!("A bookmarked moment was identified on {location}: {}", candidate.bookmark_comment.trim())
         }
     } else if kill_count == 1 {
         format!("{player}, playing {class} for {team}, gets a kill on {map}")
@@ -604,7 +623,7 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     }
 
     let score_breakdown = if candidate.score_breakdown.is_empty() {
-        "No itemized score evidence is available for this imported candidate.".into()
+        String::new()
     } else {
         candidate
             .score_breakdown
@@ -638,24 +657,56 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
             .join("\n")
     };
 
-    CandidateDetailText {
-        player,
-        player_meta: format!("{class} • {team} • User ID #{}", candidate.attacker_user_id),
-        map,
-        map_meta,
-        score: format!("{:.1} POINTS", candidate.overall_score),
-        score_meta: format!(
+    let mut player_meta_parts = Vec::new();
+    if class != "Unknown class" && !class.eq_ignore_ascii_case("bookmark") {
+        player_meta_parts.push(class.clone());
+    }
+    if team != "Unknown team" {
+        player_meta_parts.push(team.clone());
+    }
+    if candidate.attacker_user_id != 0 {
+        player_meta_parts.push(format!("User ID #{}", candidate.attacker_user_id));
+    }
+    let player_meta = player_meta_parts.join(" • ");
+    let score_meta = if kill_count > 0 {
+        format!(
             "{kill_count} {kill_word} • Clip ticks {}–{}",
             candidate.clip_start_tick, candidate.clip_end_tick
-        ),
+        )
+    } else if candidate.clip_start_tick != 0 || candidate.clip_end_tick != 0 {
+        format!(
+            "Clip ticks {}–{}",
+            candidate.clip_start_tick, candidate.clip_end_tick
+        )
+    } else {
+        "Candidate score".into()
+    };
+    let tags = if candidate.tags.is_empty() {
+        String::new()
+    } else {
+        candidate_tag_text(candidate, true, true)
+    };
+
+    CandidateDetailText {
+        player,
+        player_meta,
+        has_player,
+        map,
+        map_meta,
+        has_map,
+        demo,
+        demo_meta,
+        has_demo,
+        score: format!("{:.1} POINTS", candidate.overall_score),
+        score_meta,
         summary,
-        kills: if kill_lines.is_empty() {
-            "No parsed kill events are attached to this bookmarked candidate.".into()
-        } else {
-            kill_lines.join("\n")
-        },
+        has_summary: true,
+        kills: kill_lines.join("\n"),
+        has_kills: !kill_lines.is_empty(),
+        has_score_breakdown: !score_breakdown.is_empty(),
         score_breakdown,
-        tags: candidate_tag_text(candidate, true, true),
+        has_tags: !tags.is_empty(),
+        tags,
     }
 }
 
@@ -2056,14 +2107,23 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let details = candidate_detail_text(selected[0]);
         ui.set_candidate_detail_player(details.player.into());
         ui.set_candidate_detail_player_meta(details.player_meta.into());
+        ui.set_candidate_detail_has_player(details.has_player);
         ui.set_candidate_detail_map(details.map.into());
         ui.set_candidate_detail_map_meta(details.map_meta.into());
+        ui.set_candidate_detail_has_map(details.has_map);
+        ui.set_candidate_detail_demo(details.demo.into());
+        ui.set_candidate_detail_demo_meta(details.demo_meta.into());
+        ui.set_candidate_detail_has_demo(details.has_demo);
         ui.set_candidate_detail_score(details.score.into());
         ui.set_candidate_detail_score_meta(details.score_meta.into());
         ui.set_candidate_detail_summary(details.summary.into());
+        ui.set_candidate_detail_has_summary(details.has_summary);
         ui.set_candidate_detail_kills(details.kills.into());
+        ui.set_candidate_detail_has_kills(details.has_kills);
         ui.set_candidate_detail_score_breakdown(details.score_breakdown.into());
+        ui.set_candidate_detail_has_score_breakdown(details.has_score_breakdown);
         ui.set_candidate_detail_tags(details.tags.into());
+        ui.set_candidate_detail_has_tags(details.has_tags);
         ui.set_selected_page(4);
     });
 
@@ -2660,4 +2720,61 @@ fn open_path(path: &Path) -> Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     Command::new("xdg-open").arg(path).spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn kill_details_name_the_source_demo_victims_and_tick_tag_groups() {
+        let candidate = Candidate {
+            source_demo: "C:/TF2/demos/example_match.dem".into(),
+            map_name: "koth_product_final".into(),
+            attacker_user_id: 42,
+            attacker_class: "demoman".into(),
+            attacker_team: "blu".into(),
+            tags: vec!["confirmed_airshot".into(), "multi_kill".into()],
+            tick_tags: vec![crate::models::TickTagGroup {
+                demo_tick: 4_200,
+                server_ticks: vec![8_400],
+                tags: vec!["confirmed_airshot".into()],
+            }],
+            sequence_tags: vec!["multi_kill".into()],
+            kills: vec![json!({
+                "demo_tick": 4200,
+                "victim_user_id": 9,
+                "victim_name": "Victim",
+                "victim_class": "soldier",
+                "weapon": "grenadelauncher"
+            })],
+            metrics: json!({"kills":1}),
+            ..Candidate::default()
+        };
+
+        let details = candidate_detail_text(&candidate);
+        assert!(details.has_demo);
+        assert_eq!(details.demo, "example_match.dem");
+        assert!(details.has_kills);
+        assert!(details.kills.contains("Victim (Soldier)"));
+        assert!(details.tags.contains("Tick 4200"));
+        assert!(details.tags.contains("Whole candidate"));
+    }
+
+    #[test]
+    fn non_kill_details_do_not_render_empty_kill_or_player_sections() {
+        let candidate = Candidate {
+            source_demo: "C:/TF2/demos/marker.dem".into(),
+            bookmark_comment: "watch this setup".into(),
+            ..Candidate::default()
+        };
+        let details = candidate_detail_text(&candidate);
+        assert!(details.has_demo);
+        assert!(!details.has_player);
+        assert!(!details.has_kills);
+        assert!(!details.has_score_breakdown);
+        assert!(!details.has_tags);
+        assert!(details.summary.contains("watch this setup"));
+    }
 }

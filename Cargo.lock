@@ -5106,9 +5106,21 @@ dependencies = [
  "slint-build",
  "smol_str 0.3.2",
  "sysinfo",
+ "tf2-mirv-director",
  "typed-index-collections",
  "walkdir",
  "zip",
+]
+
+[[package]]
+name = "tf2-mirv-director"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
 ]
 
 [[package]]

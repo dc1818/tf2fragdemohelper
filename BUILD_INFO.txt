@@ -77,6 +77,14 @@ Preserved behavior:
 - Vote, server, plugin, and chat-message suppression during capture.
 - Previously recorded candidates can be skipped or explicitly re-recorded.
 
+Candidate organization behavior:
+- Frag tags are retained and displayed per distinct kill tick, while tags that
+  describe the whole sequence are listed separately.
+- The original combined tag list remains available for filters and older tools.
+- Final videos are placed under Videos/<Primary Tag>/ and manual sessions under
+  Manual HLAE/<Primary Tag>/. The primary tag comes from the strongest positive
+  score evidence, with deterministic fallback support for future tag types.
+
 Validation performed in this environment:
 - Automatic-camera removal, manual hotkey, candidate seek, multi-kill tick-cycle,
   HLAE launch, and recording-profile restoration cross-reference checks were run.

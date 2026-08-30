@@ -88,6 +88,7 @@ export component DirectorStripWindow inherits Window {
     in property <float> current-position;
     in property <int> next-frag-tick;
     in property <bool> telemetry-active;
+    in property <string> telemetry-status: "WAIT";
     in property <bool> panel-visible: true;
     in property <string> panel-toggle-key;
     in property <[CueRow]> cues;
@@ -123,12 +124,12 @@ export component DirectorStripWindow inherits Window {
                     Text { text: "TOPMOST"; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
                 }
                 Rectangle {
-                    width: 48px;
+                    width: 66px;
                     height: 25px;
                     border-width: 1px;
                     border-color: root.telemetry-active ? Colors.green : Colors.border;
                     background: root.telemetry-active ? #243421 : Colors.panel-alt;
-                    Text { text: root.telemetry-active ? "LIVE" : "WAIT"; color: root.telemetry-active ? Colors.green : Colors.muted; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+                    Text { text: root.telemetry-status; color: root.telemetry-active ? Colors.green : Colors.muted; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
                 }
             }
 

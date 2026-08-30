@@ -6,8 +6,8 @@ use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::{
     cell::Cell,
     env,
-    fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     rc::Rc,
     time::Duration,
@@ -20,7 +20,18 @@ fn main() -> Result<()> {
     let path = env::args_os()
         .nth(1)
         .context("usage: tf2-mirv-director <director_session.json>")?;
-    let session = Rc::new(load_session(Path::new(&path))?);
+    let session_path = PathBuf::from(path);
+    let session = Rc::new(load_session(&session_path)?);
+    let telemetry_diagnostic = session_path.with_file_name("director_telemetry.log");
+    let _ = fs::write(
+        &telemetry_diagnostic,
+        format!(
+            "TF2 MIRV Director telemetry diagnostic\nsession={}\nconsole_log={}\nmarker={}\nstatus=WAITING_FOR_TF2_LOG\n",
+            session_path.display(),
+            session.telemetry_log.display(),
+            session.telemetry_marker_prefix,
+        ),
+    );
     let strip = DirectorStripWindow::new()?;
     let card = DirectorCardWindow::new()?;
 
@@ -77,6 +88,7 @@ fn main() -> Result<()> {
     card.set_shortcuts(ModelRc::new(VecModel::from(shortcut_rows)));
 
     update_playback_state(&strip, &card, &session, session.start_tick, false);
+    strip.set_telemetry_status("WAIT".into());
 
     let panel_visible = Rc::new(Cell::new(true));
     {
@@ -143,14 +155,71 @@ fn main() -> Result<()> {
         let weak_card = card.as_weak();
         let session = session.clone();
         let mut tail = TickLogTail::new(session.telemetry_log.clone());
+        let telemetry_diagnostic = telemetry_diagnostic.clone();
+        let mut polls = 0_u32;
+        let mut reported_log_open = false;
+        let mut reported_missing_log = false;
+        let mut reported_no_tick = false;
+        let mut reported_first_tick = false;
+        let mut reported_error = false;
         telemetry_timer.start(TimerMode::Repeated, Duration::from_millis(15), move || {
-            let Ok(Some(tick)) = tail.poll(&session.telemetry_marker_prefix) else {
-                return;
-            };
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
-            update_playback_state(&strip, &card, &session, tick, true);
+            polls = polls.saturating_add(1);
+            match tail.poll(&session.telemetry_marker_prefix) {
+                Ok(tick) => {
+                    if tail.is_open() && !reported_log_open {
+                        reported_log_open = true;
+                        reported_missing_log = false;
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            "status=TF2_CONSOLE_LOG_OPENED",
+                        );
+                    }
+                    if let Some(tick) = tick {
+                        if !reported_first_tick {
+                            reported_first_tick = true;
+                            append_telemetry_diagnostic(
+                                &telemetry_diagnostic,
+                                &format!("status=FIRST_TICK_RECEIVED tick={tick}"),
+                            );
+                        }
+                        strip.set_telemetry_status("LIVE".into());
+                        update_playback_state(&strip, &card, &session, tick, true);
+                    } else if polls >= 200 && !reported_first_tick {
+                        if tail.is_open() {
+                            strip.set_telemetry_status("NO TICK".into());
+                            if !reported_no_tick {
+                                reported_no_tick = true;
+                                append_telemetry_diagnostic(
+                                    &telemetry_diagnostic,
+                                    "status=LOG_OPEN_BUT_NO_TICK_MARKER",
+                                );
+                            }
+                        } else {
+                            strip.set_telemetry_status("NO LOG".into());
+                            if !reported_missing_log {
+                                reported_missing_log = true;
+                                append_telemetry_diagnostic(
+                                    &telemetry_diagnostic,
+                                    "status=TF2_CONSOLE_LOG_NOT_FOUND",
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    strip.set_telemetry_status("ERROR".into());
+                    if !reported_error {
+                        reported_error = true;
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            &format!("status=READ_ERROR error={error}"),
+                        );
+                    }
+                }
+            }
         });
     }
 
@@ -158,6 +227,12 @@ fn main() -> Result<()> {
     let _timer_lifetime = (&topmost_timer, &hotkey_timer, &telemetry_timer);
     strip.run()?;
     Ok(())
+}
+
+fn append_telemetry_diagnostic(path: &Path, message: &str) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{message}");
+    }
 }
 
 fn update_playback_state(
@@ -361,6 +436,10 @@ impl TickLogTail {
             offset: 0,
             carry: String::new(),
         }
+    }
+
+    fn is_open(&self) -> bool {
+        self.file.is_some()
     }
 
     fn poll(&mut self, prefix: &str) -> std::io::Result<Option<i64>> {

@@ -1342,7 +1342,7 @@ pub fn launch_manual_hlae_candidate(
     let (target_tick, end_tick) = clip_window(candidate, settings);
     fs::write(
         staged_path.with_extension("vdm"),
-        manual_hlae_vdm_text(candidate, target_tick, end_tick),
+        manual_hlae_vdm_text(candidate, target_tick),
     )?;
     let staged_relative = format!(
         "demos/tf2fragdemohelper_manual/{session_name}/{staged_name}"
@@ -1382,7 +1382,13 @@ pub fn launch_manual_hlae_candidate(
     let cfg_result = (|| -> Result<()> {
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual.cfg"),
-            manual_hotkey_cfg(candidate, target_tick, &staged_relative, settings),
+            manual_hotkey_cfg(
+                candidate,
+                target_tick,
+                end_tick,
+                &staged_relative,
+                settings,
+            ),
         )?;
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual_start.cfg"),
@@ -3049,10 +3055,8 @@ fn manual_seek_targets(target_tick: i64) -> Vec<i64> {
     targets
 }
 
-fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64, end_tick: i64) -> String {
+fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
     let target_tick = target_tick.max(0);
-    let end_tick = end_tick.max(target_tick + 1);
-    let first_live_tick = target_tick + 1;
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
     let seek_targets = manual_seek_targets(target_tick);
@@ -3093,7 +3097,7 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64, end_tick: i64) 
         target_tick + 1,
         None,
         &format!(
-            "{focus}thirdperson; r_drawviewmodel 0; mirv_cmd clear; mirv_cmd enabled 1; mirv_cmd addCurves tick {first_live_tick} {end_tick} - interp=linear space=abs {first_live_tick} {first_live_tick} {end_tick} {end_tick} -- \"echo {DIRECTOR_TICK_MARKER_PREFIX} {{0}}\"; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; echo {DIRECTOR_TICK_MARKER_PREFIX} {first_live_tick}"
+            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0"
         ),
     );
     lines.push("}".into());
@@ -3103,9 +3107,12 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64, end_tick: i64) 
 fn manual_hotkey_cfg(
     candidate: &Candidate,
     target_tick: i64,
+    end_tick: i64,
     staged_demo: &str,
     settings: &AppSettings,
 ) -> String {
+    let first_live_tick = target_tick.max(0) + 1;
+    let end_tick = end_tick.max(first_live_tick + 1);
     let mut shortcuts = settings.mirv_shortcuts.clone();
     shortcuts.normalize();
     let mut kill_ticks = candidate.point_of_kill_ticks.clone();
@@ -3121,6 +3128,11 @@ fn manual_hotkey_cfg(
         "mirv_campath enabled 0".into(),
         "mirv_campath clear".into(),
         "mirv_input end".into(),
+        "mirv_cmd clear".into(),
+        "mirv_cmd enabled 1".into(),
+        format!(
+            "mirv_cmd addCurves tick {first_live_tick} {end_tick} - interp=linear space=abs {first_live_tick} {first_live_tick} {end_tick} {end_tick} -- \"echo {DIRECTOR_TICK_MARKER_PREFIX} {{0}}\""
+        ),
         "alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"".into(),
         "alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"".into(),
         "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
@@ -5548,6 +5560,7 @@ mod recording_tests {
         let cfg = manual_hotkey_cfg(
             &candidate,
             500,
+            1_000,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &AppSettings::default(),
         );
@@ -5574,6 +5587,11 @@ mod recording_tests {
         assert!(cfg.contains("bind \"0\" \"tf2frag_manual_stop\""));
         assert!(cfg.contains("bind \"=\" \"tf2frag_manual_save\""));
         assert!(!cfg.contains("bind \"F"));
+        assert!(cfg.contains("mirv_cmd clear"));
+        assert!(cfg.contains("mirv_cmd enabled 1"));
+        assert!(cfg.contains(
+            "mirv_cmd addCurves tick 501 1000 - interp=linear space=abs 501 501 1000 1000 -- \"echo TF2FRAG_DIRECTOR_TICK {0}\""
+        ));
     }
 
     #[test]
@@ -5585,6 +5603,7 @@ mod recording_tests {
         let cfg = manual_hotkey_cfg(
             &Candidate::default(),
             500,
+            1_000,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &settings,
         );
@@ -5599,17 +5618,14 @@ mod recording_tests {
 
     #[test]
     fn manual_hlae_vdm_pauses_after_seeking_to_selected_start() {
-        let vdm = manual_hlae_vdm_text(&Candidate::default(), 500, 530);
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 500);
         assert!(vdm.contains("skiptotick \"500\""));
         assert!(vdm.contains("starttick \"501\""));
-        assert!(vdm.contains("thirdperson; r_drawviewmodel 0; mirv_cmd clear"));
-        assert!(vdm.contains("mirv_cmd enabled 1"));
         assert!(vdm.contains(
-            "mirv_cmd addCurves tick 501 530 - interp=linear space=abs 501 501 530 530"
+            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0\""
         ));
-        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK {0}"));
-        assert!(vdm.contains("demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"));
-        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 501"));
+        assert!(!vdm.contains("mirv_cmd"));
+        assert!(!vdm.contains("TF2FRAG_DIRECTOR_TICK"));
         assert_eq!(vdm.matches("TF2 MIRV Director live tick").count(), 0);
         assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
         let pause = vdm.find("demo_pause").expect("pause command");
@@ -5626,7 +5642,7 @@ mod recording_tests {
         assert_eq!(manual_seek_targets(15_000), vec![15_000]);
         assert!(manual_seek_targets(0).is_empty());
 
-        let vdm = manual_hlae_vdm_text(&Candidate::default(), 46_001, 46_101);
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 46_001);
         for tick in [15_000, 30_000, 45_000, 46_001] {
             assert!(vdm.contains(&format!("skiptotick \"{tick}\"")));
         }

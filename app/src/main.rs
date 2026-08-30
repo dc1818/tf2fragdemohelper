@@ -220,6 +220,61 @@ fn friendly_tag(value: &str) -> String {
     }
 }
 
+fn candidate_tag_text(candidate: &Candidate, multiline: bool, include_primary: bool) -> String {
+    if candidate.tags.is_empty() {
+        return "No frag tags were assigned.".into();
+    }
+    let mut groups = Vec::new();
+    if include_primary {
+        groups.push(format!(
+            "Primary output category: {}",
+            friendly_tag(&candidate.inferred_primary_tag())
+        ));
+    }
+    for group in &candidate.tick_tags {
+        if group.tags.is_empty() {
+            continue;
+        }
+        groups.push(format!(
+            "Tick {}: {}",
+            group.demo_tick,
+            group
+                .tags
+                .iter()
+                .map(|tag| friendly_tag(tag))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !candidate.sequence_tags.is_empty() {
+        groups.push(format!(
+            "Whole candidate: {}",
+            candidate
+                .sequence_tags
+                .iter()
+                .map(|tag| friendly_tag(tag))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if candidate.tick_tags.is_empty() && candidate.sequence_tags.is_empty() {
+        let tags = candidate
+            .tags
+            .iter()
+            .map(|tag| friendly_tag(tag))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if candidate.point_of_kill_ticks.len() == 1 {
+            groups.push(format!("Tick {}: {tags}", candidate.point_of_kill_ticks[0]));
+        } else {
+            groups.push(format!(
+                "Legacy candidate (reparse for per-tick tags): {tags}"
+            ));
+        }
+    }
+    groups.join(if multiline { "\n" } else { " | " })
+}
+
 fn friendly_score_reason(value: &str) -> String {
     match value {
         "candidate_base" => "Base candidate value".into(),
@@ -600,16 +655,7 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
             kill_lines.join("\n")
         },
         score_breakdown,
-        tags: if candidate.tags.is_empty() {
-            "No frag tags were assigned.".into()
-        } else {
-            candidate
-                .tags
-                .iter()
-                .map(|tag| friendly_tag(tag))
-                .collect::<Vec<_>>()
-                .join("  •  ")
-        },
+        tags: candidate_tag_text(candidate, true, true),
     }
 }
 
@@ -2266,7 +2312,7 @@ fn build_candidate_rows(
                 .collect::<Vec<_>>()
                 .join(", ")
                 .into(),
-            tags: candidate.tags.join(", ").into(),
+            tags: candidate_tag_text(candidate, false, false).into(),
             selected: selected.get(index).copied().unwrap_or(false),
         });
     }

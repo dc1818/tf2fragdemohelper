@@ -300,6 +300,7 @@ pub struct MirvShortcuts {
     pub stop_recording: String,
     pub print_keyframes: String,
     pub save_campath: String,
+    pub overlay_panel_toggle: String,
 }
 
 impl Default for MirvShortcuts {
@@ -319,6 +320,7 @@ impl Default for MirvShortcuts {
             stop_recording: "0".into(),
             print_keyframes: "-".into(),
             save_campath: "=".into(),
+            overlay_panel_toggle: "HOME".into(),
         }
     }
 }
@@ -371,6 +373,10 @@ impl MirvShortcuts {
         self.stop_recording = Self::normalized_key(&self.stop_recording, &defaults.stop_recording);
         self.print_keyframes = Self::normalized_key(&self.print_keyframes, &defaults.print_keyframes);
         self.save_campath = Self::normalized_key(&self.save_campath, &defaults.save_campath);
+        self.overlay_panel_toggle = Self::normalized_key(
+            &self.overlay_panel_toggle,
+            &defaults.overlay_panel_toggle,
+        );
 
         let mut seen = BTreeSet::new();
         let keys = [
@@ -378,6 +384,7 @@ impl MirvShortcuts {
             &self.safe_restart, &self.next_kill_tick, &self.pause_resume, &self.enter_camera,
             &self.add_keyframe, &self.play_campath, &self.start_recording, &self.stop_recording,
             &self.print_keyframes, &self.save_campath,
+            &self.overlay_panel_toggle,
         ];
         if keys.iter().any(|key| !seen.insert(key.to_ascii_lowercase())) {
             *self = defaults;
@@ -577,6 +584,7 @@ mod settings_tests {
         assert_eq!(shortcuts.toggle_hud, "]");
         assert_eq!(shortcuts.show_help, "1");
         assert_eq!(shortcuts.save_campath, "=");
+        assert_eq!(shortcuts.overlay_panel_toggle, "HOME");
     }
 
     #[test]

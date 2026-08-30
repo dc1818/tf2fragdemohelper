@@ -33,7 +33,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 1. Select one candidate and set the before/after window in TF2 Frag Demo Helper.
 2. Launch the manual MIRV session.
 3. The helper stages the demo, writes `director_session.json`, starts HLAE, safely seeks in steps no larger than 15,000 ticks, pauses, and opens Director.
-4. Director opens as an always-on-top, click-through overlay in the upper-right of the active display. It shows the opening, every exact frag cue, victims when present, per-tick tags, the outro boundary, the whole-candidate story, and the user's saved MIRV shortcut keys.
+4. Director opens in Option C: a click-through live timeline strip at the top plus an interactive cue card on the right. Temporary VDM tick markers drive the current-tick playhead. The saved `HOME` shortcut hides or restores only the right card.
 5. In TF2, enter the MIRV camera and compose an establishing frame. Add the first key.
 6. Advance time in small increments or move to the next cue. Reframe and add a key for each intentional camera beat. Simultaneous victims remain one cue and can be framed together.
 7. Use safe restart, enable campath playback, and preview the complete move. Director remains visible beside a smaller TF2 window as the shot checklist.
@@ -47,8 +47,11 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 - Versioned JSON session contract shared by the helper and Director.
 - Candidate-aware cue timeline with per-tick tags and optional victims.
 - Whole-candidate tags and exact campath/output locations.
-- Compact 470×740 TF2-themed overlay designed to remain beside or over the smaller TF2 frame.
-- Always-on-top, borderless, click-through native window so MIRV keeps mouse and keyboard focus.
+- Option C split overlay: a full-width top timeline strip and a separate right cue card.
+- Real current-tick progress from namespaced VDM tick beacons in the existing TF2 console log.
+- Reasserted Windows `HWND_TOPMOST` state so clicking TF2 does not bury the overlay.
+- Click-through strip plus an interactive card, preserving TF2 input outside the card.
+- Configurable hide/show-card shortcut in Recording Settings (`HOME` by default), available while TF2 has focus.
 - Saved shortcut grid, arrow-key reservation notice, keyframe checklist, and custom-key recording order.
 - Automatic launch and lifecycle tied to the manual TF2 session.
 - Typed, allowlisted bridge messages for demo state, small skips, camera pose, keyframe add/replace/remove, campath enable/draw, and save/load.
@@ -56,7 +59,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 
 ## Live bridge milestone
 
-Stock TF2 does not offer the same reliable remote console path used by the CS2 HOT setup. Live buttons must not be implemented through blind global key injection because focus loss, custom binds, and keyboard layouts would make recording unsafe.
+The VDM/log telemetry is sufficient for the live clip timeline and does not require another hook. It updates every five demo ticks under normal clip sizes. Stock TF2 still does not offer the richer remote-control path used by the CS2 HOT setup, so camera-pose and keyframe editing remain a separate milestone.
 
 The robust implementation is a small MIT-compatible extension in a separate `advancedfx` fork:
 

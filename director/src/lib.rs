@@ -2,7 +2,8 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DIRECTOR_SESSION_SCHEMA: u32 = 2;
+pub const DIRECTOR_SESSION_SCHEMA: u32 = 3;
+pub const DIRECTOR_TICK_MARKER_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK";
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct DirectorSession {
@@ -17,6 +18,9 @@ pub struct DirectorSession {
     pub shortcuts: Vec<DirectorShortcut>,
     pub campath_file: PathBuf,
     pub output_directory: PathBuf,
+    /// TF2's temporary console log. The Director tails only its own tick markers.
+    pub telemetry_log: PathBuf,
+    pub telemetry_marker_prefix: String,
     pub control: DirectorControl,
 }
 
@@ -31,6 +35,9 @@ impl DirectorSession {
         }
         if self.end_tick <= self.start_tick {
             bail!("Director session end tick must be after its start tick");
+        }
+        if self.telemetry_marker_prefix.trim().is_empty() {
+            bail!("Director telemetry marker prefix cannot be empty");
         }
         if self
             .cues
@@ -145,6 +152,8 @@ mod tests {
                 key: "7".into(),
                 label: "Add keyframe".into(),
             }],
+            telemetry_log: PathBuf::from("tf/tf2fragdemohelper_recording.log"),
+            telemetry_marker_prefix: DIRECTOR_TICK_MARKER_PREFIX.into(),
             ..DirectorSession::default()
         }
     }
@@ -178,5 +187,9 @@ mod tests {
         let restored: DirectorSession = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.shortcuts[0].key, "7");
         assert_eq!(restored.shortcuts[0].label, "Add keyframe");
+        assert_eq!(
+            restored.telemetry_marker_prefix,
+            DIRECTOR_TICK_MARKER_PREFIX
+        );
     }
 }

@@ -20,6 +20,7 @@ use std::{
 };
 use tf2_mirv_director::{
     DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_SESSION_SCHEMA,
+    DIRECTOR_TICK_MARKER_PREFIX,
 };
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -30,6 +31,8 @@ const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
 const RECORDING_FLUSH_TICKS: i64 = 133;
 const VDM_ACTION_GAP_TICKS: i64 = 2;
 const MANUAL_SEEK_STEP_TICKS: i64 = 15_000;
+const DIRECTOR_TICK_BEACON_INTERVAL: i64 = 5;
+const MAX_DIRECTOR_TICK_BEACONS: i64 = 4_000;
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -1087,6 +1090,7 @@ fn build_director_session(
     target_tick: i64,
     end_tick: i64,
     output_path: &Path,
+    telemetry_log: &Path,
     settings: &AppSettings,
 ) -> DirectorSession {
     let mut victims_by_tick = BTreeMap::<i64, BTreeSet<String>>::new();
@@ -1154,6 +1158,11 @@ fn build_director_session(
         ("stop_recording", &shortcuts.stop_recording, "Stop recording"),
         ("print_keyframes", &shortcuts.print_keyframes, "Print keyframes"),
         ("save_campath", &shortcuts.save_campath, "Save campath XML"),
+        (
+            "overlay_panel_toggle",
+            &shortcuts.overlay_panel_toggle,
+            "Hide / show cue panel",
+        ),
     ]
     .into_iter()
     .map(|(id, key, label)| DirectorShortcut {
@@ -1183,6 +1192,8 @@ fn build_director_session(
         shortcuts,
         campath_file: output_path.join("camera_path.xml"),
         output_directory: output_path.to_owned(),
+        telemetry_log: telemetry_log.to_owned(),
+        telemetry_marker_prefix: DIRECTOR_TICK_MARKER_PREFIX.into(),
         control: DirectorControl::HotkeysOnly,
     }
 }
@@ -1192,9 +1203,17 @@ fn write_director_session(
     target_tick: i64,
     end_tick: i64,
     output_path: &Path,
+    telemetry_log: &Path,
     settings: &AppSettings,
 ) -> Result<PathBuf> {
-    let session = build_director_session(candidate, target_tick, end_tick, output_path, settings);
+    let session = build_director_session(
+        candidate,
+        target_tick,
+        end_tick,
+        output_path,
+        telemetry_log,
+        settings,
+    );
     session.validate()?;
     let path = output_path.join("director_session.json");
     fs::write(&path, serde_json::to_vec_pretty(&session)?)
@@ -1325,7 +1344,7 @@ pub fn launch_manual_hlae_candidate(
     let (target_tick, end_tick) = clip_window(candidate, settings);
     fs::write(
         staged_path.with_extension("vdm"),
-        manual_hlae_vdm_text(candidate, target_tick),
+        manual_hlae_vdm_text(candidate, target_tick, end_tick),
     )?;
     let staged_relative = format!(
         "demos/tf2fragdemohelper_manual/{session_name}/{staged_name}"
@@ -1340,11 +1359,14 @@ pub fn launch_manual_hlae_candidate(
             Utc::now().format("%Y%m%d_%H%M%S")
         ));
     fs::create_dir_all(&output_path)?;
+    let telemetry_log = game.join("tf2fragdemohelper_recording.log");
+    let _ = fs::remove_file(&telemetry_log);
     let director_session = write_director_session(
         candidate,
         target_tick,
         end_tick,
         &output_path,
+        &telemetry_log,
         settings,
     )?;
     let launch_log = session.join("hlae_launch.log");
@@ -3029,8 +3051,9 @@ fn manual_seek_targets(target_tick: i64) -> Vec<i64> {
     targets
 }
 
-fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
+fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64, end_tick: i64) -> String {
     let target_tick = target_tick.max(0);
+    let end_tick = end_tick.max(target_tick + 1);
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
     let seek_targets = manual_seek_targets(target_tick);
@@ -3071,9 +3094,26 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         target_tick + 1,
         None,
         &format!(
-            "{focus}thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+            "{focus}thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; echo {DIRECTOR_TICK_MARKER_PREFIX} {target_tick}"
         ),
     );
+    let span = end_tick - target_tick;
+    let interval = DIRECTOR_TICK_BEACON_INTERVAL.max(
+        (span + MAX_DIRECTOR_TICK_BEACONS - 1) / MAX_DIRECTOR_TICK_BEACONS,
+    );
+    let mut beacon_tick = target_tick + interval;
+    while beacon_tick <= end_tick {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "PlayCommands",
+            "TF2 MIRV Director live tick",
+            beacon_tick,
+            None,
+            &format!("echo {DIRECTOR_TICK_MARKER_PREFIX} {beacon_tick}"),
+        );
+        beacon_tick += interval;
+    }
     lines.push("}".into());
     lines.join("\n")
 }
@@ -5402,6 +5442,7 @@ mod recording_tests {
             11_000,
             13_000,
             output,
+            Path::new(r"C:\Team Fortress 2\tf\tf2fragdemohelper_recording.log"),
             &AppSettings::default(),
         );
 
@@ -5411,10 +5452,12 @@ mod recording_tests {
         assert_eq!(session.cues[0].victims, vec!["Alice"]);
         assert!(session.cues[1].victims.is_empty());
         assert_eq!(session.whole_candidate_tags, vec!["multi kill"]);
-        assert_eq!(session.shortcuts.len(), 14);
+        assert_eq!(session.shortcuts.len(), 15);
         assert_eq!(session.shortcuts[0].key, "[");
         assert_eq!(session.shortcuts[7].label, "MIRV camera");
         assert_eq!(session.campath_file, output.join("camera_path.xml"));
+        assert_eq!(session.shortcuts[14].key, "HOME");
+        assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
     }
 
     #[test]
@@ -5574,12 +5617,15 @@ mod recording_tests {
 
     #[test]
     fn manual_hlae_vdm_pauses_after_seeking_to_selected_start() {
-        let vdm = manual_hlae_vdm_text(&Candidate::default(), 500);
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 500, 530);
         assert!(vdm.contains("skiptotick \"500\""));
         assert!(vdm.contains("starttick \"501\""));
         assert!(vdm.contains(
             "thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
         ));
+        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 500"));
+        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 505"));
+        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 530"));
         assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
         let pause = vdm.find("demo_pause").expect("pause command");
         let seek = vdm.find("skiptotick \"500\"").expect("safe seek command");
@@ -5595,7 +5641,7 @@ mod recording_tests {
         assert_eq!(manual_seek_targets(15_000), vec![15_000]);
         assert!(manual_seek_targets(0).is_empty());
 
-        let vdm = manual_hlae_vdm_text(&Candidate::default(), 46_001);
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 46_001, 46_101);
         for tick in [15_000, 30_000, 45_000, 46_001] {
             assert!(vdm.contains(&format!("skiptotick \"{tick}\"")));
         }

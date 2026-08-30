@@ -11,13 +11,17 @@ Manual HLAE camera behavior:
   reaches it from tick 0 using jumps of no more than 15,000 ticks, pauses there,
   and uses the After last tick selector as the end-of-clip reference.
 - Key 3 safely reloads the staged demo from tick 0 and repeats the capped forward
-  seek instead of making one large backward demo_gototick jump.
-- Right Arrow advances demo time by 0.25 seconds for precise keyframe placement.
-- Up Arrow toggles the entire HUD off or on.
+  seek instead of making one large backward demo_gototick jump, then reapplies
+  third-person/no-viewmodel state before pausing at the lead-in.
+- [ advances demo time by 0.25 seconds for precise keyframe placement.
+- ] toggles the entire HUD off or on; arrow keys remain free for MIRV camera control.
 - 4 cycles through every distinct kill tick for multi-tick candidates.
-- 6 enables mirv_input camera, 7 adds a campath keyframe, and 8 exits manual
-  input and enables campath playback.
+- 6 establishes third-person/no-viewmodel state and enables mirv_input camera.
+  7 adds a campath keyframe. 8 ends manual input, requests third-person/no-viewmodel
+  state, and enables campath playback; the guide retains the tested explicit
+  thirdperson console check after 8.
 - 9/0 start and stop capture using the selected output format, FPS, and encoder.
+- The documented recording order is 5 to resume playback, 9 to start, then 0 to stop.
 - = saves camera_path.xml beside the manual capture.
 - The automatic cinematic selector, planner, victim tracking, and camera-change
   controls are removed. Automatic HLAE recording continues with original camera.

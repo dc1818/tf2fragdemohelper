@@ -33,7 +33,7 @@ fn main() -> Result<()> {
             .unwrap_or(fallback)
             .to_owned()
     };
-    let panel_toggle_key = shortcut_key("overlay_panel_toggle", "Y");
+    let panel_toggle_key = shortcut_key("overlay_panel_toggle", "S");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
@@ -399,11 +399,12 @@ impl TickLogTail {
 
 fn parse_tick_marker(line: &str, prefix: &str) -> Option<i64> {
     let marker = line.rfind(prefix)?;
-    line[marker + prefix.len()..]
+    let tick = line[marker + prefix.len()..]
         .split_whitespace()
         .next()?
-        .parse()
-        .ok()
+        .parse::<f64>()
+        .ok()?;
+    tick.is_finite().then(|| tick.round() as i64)
 }
 
 fn to_ui_tick(tick: i64) -> i32 {
@@ -495,12 +496,19 @@ mod tests {
             ),
             Some(88_476)
         );
+        assert_eq!(
+            parse_tick_marker(
+                "08/30 12:30:22 TF2FRAG_DIRECTOR_TICK 88476.000000",
+                "TF2FRAG_DIRECTOR_TICK"
+            ),
+            Some(88_476)
+        );
         assert_eq!(parse_tick_marker("unrelated", "TF2FRAG_DIRECTOR_TICK"), None);
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn maps_default_overlay_hotkey() {
-        assert_eq!(virtual_key_code("Y"), Some(0x59));
+        assert_eq!(virtual_key_code("S"), Some(0x53));
     }
 }

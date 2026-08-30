@@ -33,7 +33,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 1. Select one candidate and set the before/after window in TF2 Frag Demo Helper.
 2. Launch the manual MIRV session.
 3. The helper stages the demo, writes `director_session.json`, starts HLAE, safely seeks in steps no larger than 15,000 ticks, pauses, and opens Director.
-4. Director opens in Option C: a click-through live timeline strip docked across the monitor's top edge plus an interactive cue card docked beneath it at the right edge. Temporary per-tick VDM markers drive the current-tick playhead. The saved `Y` shortcut hides or restores only the right card.
+4. Director opens in Option C: a click-through live timeline strip docked across the monitor's top edge plus an interactive cue card docked beneath it at the right edge. One HLAE `mirv_cmd` curve follows the engine's real demo-playback tick and drives the current-tick playhead. The saved `S` shortcut hides or restores only the right card.
 5. In TF2, enter the MIRV camera and compose an establishing frame. Add the first key.
 6. Advance time in small increments or move to the next cue. Reframe and add a key for each intentional camera beat. Simultaneous victims remain one cue and can be framed together.
 7. Use safe restart, enable campath playback, and preview the complete move. Director remains visible beside a smaller TF2 window as the shot checklist.
@@ -51,7 +51,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 - Real current-tick progress from an engine-scheduled VDM marker on every playback tick in the existing TF2 console log.
 - Reasserted Windows `HWND_TOPMOST` state so clicking TF2 does not bury the overlay.
 - Click-through strip plus an interactive card, preserving TF2 input outside the card.
-- Configurable hide/show-card shortcut in Recording Settings (`Y` by default), available while TF2 has focus.
+- Configurable hide/show-card shortcut in Recording Settings (`S` by default), available while TF2 has focus.
 - Saved shortcut grid, arrow-key reservation notice, keyframe checklist, and custom-key recording order.
 - Automatic launch and lifecycle tied to the manual TF2 session.
 - Typed, allowlisted bridge messages for demo state, small skips, camera pose, keyframe add/replace/remove, campath enable/draw, and save/load.
@@ -59,7 +59,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 
 ## Live bridge milestone
 
-The VDM/log telemetry is sufficient for the live clip timeline and does not require another hook. It emits one engine-scheduled marker per demo tick inside the selected clip. Stock TF2 still does not offer the richer remote-control path used by the CS2 HOT setup, so camera-pose and keyframe editing remain a separate milestone.
+The staged VDM installs one HLAE `mirv_cmd addCurves tick` command for the selected clip. HLAE evaluates the curve from its Source 1 demo-playback clock whenever the engine tick changes, and the curve writes that real tick to the temporary console log for Director. This avoids the unreliable and oversized approach of putting a separate PlayCommands action at every tick. Stock TF2 still does not offer the richer remote-control path used by the CS2 HOT setup, so camera-pose and keyframe editing remain a separate milestone.
 
 The robust implementation is a small MIT-compatible extension in a separate `advancedfx` fork:
 

@@ -322,8 +322,8 @@ impl Default for MirvShortcuts {
             stop_recording: "0".into(),
             print_keyframes: "-".into(),
             save_campath: "=".into(),
-            overlay_panel_toggle: "Y".into(),
-            overlay_panel_toggle_default_version: 1,
+            overlay_panel_toggle: "S".into(),
+            overlay_panel_toggle_default_version: 2,
         }
     }
 }
@@ -361,14 +361,19 @@ impl MirvShortcuts {
     }
 
     pub fn normalize(&mut self) {
-        // HOME was the short-lived default in the first overlay build. Migrate
-        // only settings written before the default-version marker existed, so
-        // users can still deliberately bind HOME after this one-time change.
+        // HOME and then Y were short-lived overlay defaults. Migrate only the
+        // matching default at each version so a deliberately customized key is
+        // preserved, and never re-migrate after the S default is recorded.
         if self.overlay_panel_toggle_default_version == 0 {
             if self.overlay_panel_toggle.eq_ignore_ascii_case("HOME") {
-                self.overlay_panel_toggle = "Y".into();
+                self.overlay_panel_toggle = "S".into();
             }
-            self.overlay_panel_toggle_default_version = 1;
+            self.overlay_panel_toggle_default_version = 2;
+        } else if self.overlay_panel_toggle_default_version == 1 {
+            if self.overlay_panel_toggle.eq_ignore_ascii_case("Y") {
+                self.overlay_panel_toggle = "S".into();
+            }
+            self.overlay_panel_toggle_default_version = 2;
         }
         let defaults = Self::default();
         self.advance_time = Self::normalized_key(&self.advance_time, &defaults.advance_time);
@@ -596,23 +601,39 @@ mod settings_tests {
         assert_eq!(shortcuts.toggle_hud, "]");
         assert_eq!(shortcuts.show_help, "1");
         assert_eq!(shortcuts.save_campath, "=");
-        assert_eq!(shortcuts.overlay_panel_toggle, "Y");
-        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 1);
+        assert_eq!(shortcuts.overlay_panel_toggle, "S");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 2);
     }
 
     #[test]
-    fn legacy_home_overlay_default_migrates_once_to_y() {
+    fn legacy_overlay_defaults_migrate_once_to_s() {
         let mut shortcuts: MirvShortcuts = serde_json::from_str(
             r#"{"overlay_panel_toggle":"HOME"}"#,
         )
         .unwrap();
         shortcuts.normalize();
-        assert_eq!(shortcuts.overlay_panel_toggle, "Y");
-        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 1);
+        assert_eq!(shortcuts.overlay_panel_toggle, "S");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 2);
 
         shortcuts.overlay_panel_toggle = "HOME".into();
         shortcuts.normalize();
         assert_eq!(shortcuts.overlay_panel_toggle, "HOME");
+
+        let mut y_default: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"Y","overlay_panel_toggle_default_version":1}"#,
+        )
+        .unwrap();
+        y_default.normalize();
+        assert_eq!(y_default.overlay_panel_toggle, "S");
+        assert_eq!(y_default.overlay_panel_toggle_default_version, 2);
+
+        let mut custom: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"Q","overlay_panel_toggle_default_version":1}"#,
+        )
+        .unwrap();
+        custom.normalize();
+        assert_eq!(custom.overlay_panel_toggle, "Q");
+        assert_eq!(custom.overlay_panel_toggle_default_version, 2);
     }
 
     #[test]

@@ -1,10 +1,17 @@
 import { ComboBox, ListView, ScrollView, SpinBox } from "std-widgets.slint";
 import { Tf2Colors, Tf2Panel, Tf2Heading, Tf2Label, Tf2Body, Tf2Button, Tf2Tab, Tf2LineEdit, Tf2CheckBox, Tf2Progress } from "tf2-theme.slint";
 
+// A complete tick (or whole-candidate) group. Keeping groups structured lets
+// the table distinguish their origin without turning every individual tag into
+// a separate visual chip.
+export struct CandidateTagGroup {
+    label: string, tags: string, width: int, highlighted: bool, has-separator: bool,
+}
+
 export struct CandidateRow {
     rank: int, score: string, kills: string, attacker: string, class-name: string, team: string,
     demo: string, map-name: string, mode: string, demo-type: string, recorded: string, ticks: string,
-    tags: string, selected: bool,
+    tags: string, tag-width: int, tag-groups: [CandidateTagGroup], selected: bool,
 }
 
 export struct FilterOption {
@@ -17,9 +24,11 @@ component AutoScrollLog inherits ScrollView {
     vertical-scrollbar-policy: always-on;
     horizontal-scrollbar-policy: always-off;
     viewport-width: self.width;
-    viewport-height: Math.max(root.height, log-content.height + 12px);
-    // Keep parser output pinned to the newest line whenever the log grows.
-    viewport-y: root.height - self.viewport-height;
+    viewport-height: Math.max(self.visible-height, log-content.height + 12px);
+    // `viewport-y` is the viewport's position relative to the visible area.
+    // Binding it to the exact lower bound, rather than the outer component's
+    // height, keeps a growing parser/analyzer log pinned to its newest line.
+    viewport-y: self.visible-height - self.viewport-height;
     log-content := Text {
         x: 9px; y: 7px;
         width: root.width - 28px;
@@ -183,7 +192,34 @@ component CandidateTable inherits Rectangle {
                     Tf2Body { text: row.ticks; width: 160px; overflow: elide; }
                     Tf2Body { text: row.mode; width: 220px; overflow: elide; }
                     if !root.compact : Tf2Body { text: row.team; width: 90px; overflow: elide; }
-                    Tf2Body { text: row.tags; width: root.tags-width-px * 1px; }
+                    Rectangle {
+                        width: root.tags-width-px * 1px; height: parent.height; clip: true;
+                        HorizontalLayout {
+                            padding-top: 4px; padding-bottom: 4px; spacing: 4px;
+                            for group in row.tag-groups : HorizontalLayout {
+                                width: (group.width + (group.has-separator ? 18 : 0)) * 1px;
+                                spacing: 4px;
+                                Rectangle {
+                                    width: group.width * 1px;
+                                    background: group.highlighted ? #202a31 : #1b1c1b;
+                                    border-width: 1px;
+                                    border-color: group.highlighted ? #385061 : #343633;
+                                    clip: true;
+                                    HorizontalLayout {
+                                        padding-left: 5px; padding-right: 5px; spacing: 3px;
+                                        Text { text: group.label; color: #8ab3cd; font-family: "Roboto Condensed"; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                                        Text { text: group.tags; color: Tf2Colors.cream; font-family: "Roboto Condensed"; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                                    }
+                                }
+                                if group.has-separator : Rectangle {
+                                    width: 14px; height: parent.height;
+                                    background: #191a19;
+                                    border-width: 1px; border-color: #3c4140;
+                                    Text { width: parent.width; height: parent.height; text: "|"; color: Tf2Colors.muted; font-family: "Roboto Condensed"; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
                 }
                 drag-area := TouchArea {
                     property <bool> drag-selecting; property <bool> dragging; property <bool> drag-additive;
@@ -360,6 +396,152 @@ component MinimumScoreControl inherits Rectangle {
     }
 }
 
+component ShortcutCapture inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <string> binding;
+    in property <length> label-width: 112px;
+    private property <bool> capturing: false;
+    private property <string> capture-message: "";
+    height: 28px;
+    spacing: 5px;
+    Tf2Label { width: root.label-width; text: root.label; font-size: 12px; overflow: elide; }
+    key-button := Rectangle {
+        width: 104px; height: 28px;
+        background: key-touch.pressed ? Tf2Colors.border : key-touch.has-hover ? #333735 : Tf2Colors.neutral;
+        border-width: 1px;
+        border-color: root.capturing ? #8ab3cd : Tf2Colors.border-bright;
+        Text {
+            x: 4px; width: parent.width - 8px; height: parent.height;
+            text: root.capturing ? (root.capture-message == "" ? "PRESS A KEY..." : root.capture-message) : root.binding;
+            color: root.capturing ? #8ab3cd : Tf2Colors.cream;
+            font-family: "TF2 Build";
+            font-size: root.capturing ? 9px : 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        key-focus := FocusScope {
+            width: parent.width; height: parent.height;
+            focus-on-click: false;
+            focus-on-tab-navigation: false;
+            key-pressed(event) => {
+                if (event.repeat) {
+                    return accept;
+                }
+                if (event.text == Key.Escape) {
+                    root.capturing = false;
+                    root.capture-message = "";
+                    key-focus.clear-focus();
+                    return accept;
+                }
+                if (event.text == Key.UpArrow || event.text == Key.DownArrow || event.text == Key.LeftArrow || event.text == Key.RightArrow) {
+                    root.capture-message = "ARROWS RESERVED";
+                    return accept;
+                }
+                if (event.text == Key.Shift || event.text == Key.ShiftR || event.text == Key.Control || event.text == Key.ControlR || event.text == Key.Alt || event.text == Key.AltGr || event.text == Key.Meta || event.text == Key.MetaR || event.text == Key.CapsLock) {
+                    root.capture-message = "PRESS ONE KEY";
+                    return accept;
+                }
+                let captured = event.text == Key.Space ? "SPACE"
+                    : event.text == Key.Tab || event.text == Key.Backtab ? "TAB"
+                    : event.text == Key.Return ? "ENTER"
+                    : event.text == Key.Backspace ? "BACKSPACE"
+                    : event.text == Key.Delete ? "DEL"
+                    : event.text == Key.Insert ? "INS"
+                    : event.text == Key.Home ? "HOME"
+                    : event.text == Key.End ? "END"
+                    : event.text == Key.PageUp ? "PGUP"
+                    : event.text == Key.PageDown ? "PGDN"
+                    : event.text == Key.ScrollLock ? "SCROLLLOCK"
+                    : event.text == Key.Pause ? "PAUSE"
+                    : event.text == Key.F1 ? "F1" : event.text == Key.F2 ? "F2"
+                    : event.text == Key.F3 ? "F3" : event.text == Key.F4 ? "F4"
+                    : event.text == Key.F5 ? "F5" : event.text == Key.F6 ? "F6"
+                    : event.text == Key.F7 ? "F7" : event.text == Key.F8 ? "F8"
+                    : event.text == Key.F9 ? "F9" : event.text == Key.F10 ? "F10"
+                    : event.text == Key.F11 ? "F11" : event.text == Key.F12 ? "F12"
+                    : event.text;
+                root.binding = captured;
+                root.capturing = false;
+                root.capture-message = "";
+                key-focus.clear-focus();
+                return accept;
+            }
+            focus-lost(reason) => {
+                root.capturing = false;
+                root.capture-message = "";
+            }
+        }
+        key-touch := TouchArea {
+            clicked => {
+                root.capture-message = "";
+                root.capturing = true;
+                key-focus.focus();
+            }
+        }
+    }
+}
+
+component MirvShortcutPanel inherits Rectangle {
+    in property <bool> compact;
+    in-out property <string> advance-time;
+    in-out property <string> toggle-hud;
+    in-out property <string> show-help;
+    in-out property <string> back-one-second;
+    in-out property <string> safe-restart;
+    in-out property <string> next-kill-tick;
+    in-out property <string> pause-resume;
+    in-out property <string> enter-camera;
+    in-out property <string> add-keyframe;
+    in-out property <string> play-campath;
+    in-out property <string> start-recording;
+    in-out property <string> stop-recording;
+    in-out property <string> print-keyframes;
+    in-out property <string> save-campath;
+
+    height: root.compact ? 274px : 190px;
+    background: Tf2Colors.panel-dark;
+    border-width: 1px;
+    border-color: Tf2Colors.border;
+    clip: true;
+    VerticalLayout {
+        padding: root.compact ? 7px : 10px; spacing: 5px;
+        HorizontalLayout {
+            height: 27px;
+            Tf2Heading { text: "MIRV RECORDING SHORTCUTS"; font-size: root.compact ? 15px : 18px; }
+            Rectangle { horizontal-stretch: 1; }
+            Tf2Button {
+                width: root.compact ? 118px : 150px; height: 27px; label-font-size: 11px; text: "RESTORE DEFAULTS";
+                clicked => {
+                    root.advance-time = "["; root.toggle-hud = "]"; root.show-help = "1"; root.back-one-second = "2";
+                    root.safe-restart = "3"; root.next-kill-tick = "4"; root.pause-resume = "5"; root.enter-camera = "6";
+                    root.add-keyframe = "7"; root.play-campath = "8"; root.start-recording = "9"; root.stop-recording = "0";
+                    root.print-keyframes = "-"; root.save-campath = "=";
+                }
+            }
+        }
+        Tf2Body {
+            height: 18px;
+            text: "Click a bind, then press one keyboard key. Arrow keys are reserved for MIRV camera control.";
+            color: Tf2Colors.muted;
+            font-size: 11px;
+            overflow: elide;
+        }
+        if !root.compact : HorizontalLayout {
+            spacing: 16px;
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } }
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next kill tick"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } }
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } }
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } }
+        }
+        if root.compact : HorizontalLayout {
+            spacing: 12px;
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next kill tick"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } }
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } }
+        }
+    }
+}
+
 component CandidateDetailCard inherits Rectangle {
     in property <string> heading;
     in property <string> value;
@@ -409,7 +591,7 @@ export component AppWindow inherits Window {
     in-out property <int> selected-page: 0;
     in-out property <bool> has-export: false;
     // Updated from the native resize event so the 900x520 frame always enters
-    // the five-section Recording Settings layout.
+    // the six-section Recording Settings layout.
     in-out property <bool> minimal-recording-settings: false;
     in-out property <string> frame-debug: "FRAME: waiting for native size";
     in-out property <[string]> imported-demos;
@@ -419,6 +601,7 @@ export component AppWindow inherits Window {
     in-out property <string> item-schema;
     in-out property <string> status-text: "Ready";
     in-out property <string> recording-save-status;
+    in-out property <int> recording-save-generation: 0;
     in-out property <string> background-process-status: "READY";
     in-out property <bool> background-process-active: true;
     in-out property <bool> recording-ready: false;
@@ -478,14 +661,23 @@ export component AppWindow inherits Window {
     in-out property <string> recording-output-description;
     in-out property <string> candidate-detail-player;
     in-out property <string> candidate-detail-player-meta;
+    in-out property <bool> candidate-detail-has-player;
     in-out property <string> candidate-detail-map;
     in-out property <string> candidate-detail-map-meta;
+    in-out property <bool> candidate-detail-has-map;
+    in-out property <string> candidate-detail-demo;
+    in-out property <string> candidate-detail-demo-meta;
+    in-out property <bool> candidate-detail-has-demo;
     in-out property <string> candidate-detail-score;
     in-out property <string> candidate-detail-score-meta;
     in-out property <string> candidate-detail-summary;
+    in-out property <bool> candidate-detail-has-summary;
     in-out property <string> candidate-detail-kills;
+    in-out property <bool> candidate-detail-has-kills;
     in-out property <string> candidate-detail-score-breakdown;
+    in-out property <bool> candidate-detail-has-score-breakdown;
     in-out property <string> candidate-detail-tags;
+    in-out property <bool> candidate-detail-has-tags;
     in-out property <string> tf2-path;
     in-out property <string> hlae-path;
     in-out property <string> ffmpeg-path;
@@ -509,6 +701,20 @@ export component AppWindow inherits Window {
     in-out property <bool> disable-announcer: true;
     in-out property <bool> disable-applause: true;
     in-out property <bool> disable-domination: true;
+    in-out property <string> mirv-advance-time: "[";
+    in-out property <string> mirv-toggle-hud: "]";
+    in-out property <string> mirv-show-help: "1";
+    in-out property <string> mirv-back-one-second: "2";
+    in-out property <string> mirv-safe-restart: "3";
+    in-out property <string> mirv-next-kill-tick: "4";
+    in-out property <string> mirv-pause-resume: "5";
+    in-out property <string> mirv-enter-camera: "6";
+    in-out property <string> mirv-add-keyframe: "7";
+    in-out property <string> mirv-play-campath: "8";
+    in-out property <string> mirv-start-recording: "9";
+    in-out property <string> mirv-stop-recording: "0";
+    in-out property <string> mirv-print-keyframes: "-";
+    in-out property <string> mirv-save-campath: "=";
     in-out property <string> custom-resources;
 
     callback choose-demos(); callback choose-export-directory(); callback choose-item-schema();
@@ -516,7 +722,7 @@ export component AppWindow inherits Window {
     callback refresh-filter(string, int); callback drag-select-candidates(int, float, bool, bool); callback selection-changed(); callback select-all-visible();
     callback set-tag-filter(string); callback toggle-class-filter(string); callback toggle-map-filter(string); callback search-map-filters(string);
     callback toggle-server-type-filter(string); callback search-server-type-filters(string); callback set-recorded-filter(string);
-    callback preview-selected(); callback record-selected(); callback choose-setting-path(string); callback recording-settings-changed();
+    callback preview-selected(); callback launch-manual-hlae(); callback record-selected(); callback choose-setting-path(string); callback recording-settings-changed();
     callback view-selected-details(); callback view-recording-logs(); callback update-recording-estimate(); callback choose-custom-resources(string);
 
     changed tf2-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
@@ -556,6 +762,20 @@ export component AppWindow inherits Window {
     changed disable-announcer => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed disable-applause => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed disable-domination => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-advance-time => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-toggle-hud => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-show-help => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-back-one-second => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-safe-restart => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-next-kill-tick => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-pause-resume => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-enter-camera => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-add-keyframe => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-play-campath => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-start-recording => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-stop-recording => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-print-keyframes => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-save-campath => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed custom-resources => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
 
     private property <bool> compact: self.width <= 1220px || self.height <= 700px;
@@ -737,6 +957,7 @@ export component AppWindow inherits Window {
                 height: 34px; spacing: 5px;
                 Tf2LineEdit { text <=> root.tag-filter; placeholder: "FILTER TAGS"; centered: true; edited(value) => { root.set-tag-filter(value); } focus-lost => { root.tag-filter = ""; root.set-tag-filter(""); } }
                 Tf2Button { width: 98px; height: 32px; text: root.candidate-filters-open ? "CLOSE" : "FILTERS"; clicked => { root.candidate-filters-open = !root.candidate-filters-open; } }
+                Tf2Button { width: 165px; height: 32px; text: "OPEN HLAE"; enabled: root.selected-count == 1 && root.recording-ready; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.launch-manual-hlae(); } }
                 Tf2Button { width: 120px; height: 32px; text: "PREVIEW"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
                 Tf2Button { width: 120px; height: 32px; text: "RECORD"; enabled: root.selected-count > 0 && root.recording-ready; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
             }
@@ -756,6 +977,7 @@ export component AppWindow inherits Window {
                 height: 40px; spacing: 7px;
                 Tf2Button { width: 170px; text: root.all-visible-selected ? "DESELECT ALL" : "SELECT ALL"; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.select-all-visible(); } }
                 Tf2Button { width: 190px; text: "PREVIEW IN TF2"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
+                Tf2Button { width: 250px; text: "LAUNCH MANUAL MIRV SESSION"; enabled: root.selected-count == 1 && root.recording-ready; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.launch-manual-hlae(); } }
                 Tf2Button { width: 205px; text: "RECORD WITH HLAE"; enabled: root.selected-count > 0 && root.recording-ready; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
                 Tf2Button { width: 145px; text: "VIEW DETAILS"; enabled: root.selected-count == 1; clicked => { root.view-selected-details(); } }
                 Rectangle { horizontal-stretch: 1; } Tf2Body { text: root.selected-count + " SELECTED"; color: Tf2Colors.muted; }
@@ -779,7 +1001,7 @@ export component AppWindow inherits Window {
             width: recording-settings-scroll.width - (root.compact ? 30px : 42px);
             height: Math.max(
                 recording-settings-scroll.height - (root.compact ? 18px : 28px),
-                root.compact ? (540px + root.recording-advanced-panel-height) : (680px + root.recording-advanced-panel-height)
+                root.compact ? (822px + root.recording-advanced-panel-height) : (880px + root.recording-advanced-panel-height)
             );
             spacing: root.compact ? 7px : 10px;
             if !root.compact : HorizontalLayout { height: 26px; Tf2Heading { font-size: 21px; text: "HLAE RECORDING SETTINGS"; } Rectangle { horizontal-stretch: 1; } }
@@ -885,6 +1107,16 @@ export component AppWindow inherits Window {
                         if !root.compact : VerticalLayout { spacing: 0px; Tf2CheckBox { height: 28px; label-font-size: 14px; text: "Disable domination/revenge"; checked <=> root.disable-domination; } }
                     }
                 }
+            }
+            MirvShortcutPanel {
+                compact: root.compact;
+                advance-time <=> root.mirv-advance-time; toggle-hud <=> root.mirv-toggle-hud;
+                show-help <=> root.mirv-show-help; back-one-second <=> root.mirv-back-one-second;
+                safe-restart <=> root.mirv-safe-restart; next-kill-tick <=> root.mirv-next-kill-tick;
+                pause-resume <=> root.mirv-pause-resume; enter-camera <=> root.mirv-enter-camera;
+                add-keyframe <=> root.mirv-add-keyframe; play-campath <=> root.mirv-play-campath;
+                start-recording <=> root.mirv-start-recording; stop-recording <=> root.mirv-stop-recording;
+                print-keyframes <=> root.mirv-print-keyframes; save-campath <=> root.mirv-save-campath;
             }
             VerticalLayout {
                 vertical-stretch: 1;
@@ -1012,13 +1244,32 @@ export component AppWindow inherits Window {
 
                 Tf2Button {
                     height: 34px; label-font-size: 13px;
-                    text: (root.recording-settings-section == 4 ? "-  " : "+  ") + "CUSTOM RESOURCES";
+                    text: (root.recording-settings-section == 4 ? "-  " : "+  ") + "MIRV RECORDING SHORTCUTS";
                     tone: root.recording-settings-section == 4 ? Tf2Colors.gold : Tf2Colors.neutral;
                     hover-tone: root.recording-settings-section == 4 ? Tf2Colors.gold-hover : Tf2Colors.border-bright;
                     pressed-tone: root.recording-settings-section == 4 ? Tf2Colors.gold-pressed : Tf2Colors.border;
                     clicked => { root.recording-settings-section = root.recording-settings-section == 4 ? -1 : 4; }
                 }
-                if root.recording-settings-section == 4 : Tf2Panel {
+                if root.recording-settings-section == 4 : MirvShortcutPanel {
+                    compact: true;
+                    advance-time <=> root.mirv-advance-time; toggle-hud <=> root.mirv-toggle-hud;
+                    show-help <=> root.mirv-show-help; back-one-second <=> root.mirv-back-one-second;
+                    safe-restart <=> root.mirv-safe-restart; next-kill-tick <=> root.mirv-next-kill-tick;
+                    pause-resume <=> root.mirv-pause-resume; enter-camera <=> root.mirv-enter-camera;
+                    add-keyframe <=> root.mirv-add-keyframe; play-campath <=> root.mirv-play-campath;
+                    start-recording <=> root.mirv-start-recording; stop-recording <=> root.mirv-stop-recording;
+                    print-keyframes <=> root.mirv-print-keyframes; save-campath <=> root.mirv-save-campath;
+                }
+
+                Tf2Button {
+                    height: 34px; label-font-size: 13px;
+                    text: (root.recording-settings-section == 5 ? "-  " : "+  ") + "CUSTOM RESOURCES";
+                    tone: root.recording-settings-section == 5 ? Tf2Colors.gold : Tf2Colors.neutral;
+                    hover-tone: root.recording-settings-section == 5 ? Tf2Colors.gold-hover : Tf2Colors.border-bright;
+                    pressed-tone: root.recording-settings-section == 5 ? Tf2Colors.gold-pressed : Tf2Colors.border;
+                    clicked => { root.recording-settings-section = root.recording-settings-section == 5 ? -1 : 5; }
+                }
+                if root.recording-settings-section == 5 : Tf2Panel {
                     height: 44px;
                     HorizontalLayout {
                         padding: 5px; spacing: 6px;
@@ -1072,20 +1323,22 @@ export component AppWindow inherits Window {
                         x: 8px; y: 8px; width: parent.width - 28px; height: self.preferred-height; spacing: 8px;
                         if !root.compact : HorizontalLayout {
                             height: 100px; spacing: 8px;
-                            CandidateDetailCard { heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
-                            CandidateDetailCard { heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            if root.candidate-detail-has-player : CandidateDetailCard { heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
+                            if root.candidate-detail-has-map : CandidateDetailCard { heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            if root.candidate-detail-has-demo : CandidateDetailCard { heading: "SOURCE DEMO"; value: root.candidate-detail-demo; supporting-text: root.candidate-detail-demo-meta; }
                             CandidateDetailCard { heading: "CANDIDATE SCORE"; value: root.candidate-detail-score; supporting-text: root.candidate-detail-score-meta; }
                         }
                         if root.compact : VerticalLayout {
-                            height: 264px; spacing: 6px;
-                            CandidateDetailCard { height: 84px; heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
-                            CandidateDetailCard { height: 84px; heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            height: self.preferred-height; spacing: 6px;
+                            if root.candidate-detail-has-player : CandidateDetailCard { height: 84px; heading: "PLAYER"; value: root.candidate-detail-player; supporting-text: root.candidate-detail-player-meta; }
+                            if root.candidate-detail-has-map : CandidateDetailCard { height: 84px; heading: "MAP"; value: root.candidate-detail-map; supporting-text: root.candidate-detail-map-meta; }
+                            if root.candidate-detail-has-demo : CandidateDetailCard { height: 84px; heading: "SOURCE DEMO"; value: root.candidate-detail-demo; supporting-text: root.candidate-detail-demo-meta; }
                             CandidateDetailCard { height: 84px; heading: "CANDIDATE SCORE"; value: root.candidate-detail-score; supporting-text: root.candidate-detail-score-meta; }
                         }
-                        CandidateDetailSection { heading: "WHAT HAPPENS IN THIS CLIP"; body: root.candidate-detail-summary; section-floor-height: 92px; }
-                        CandidateDetailSection { heading: "KILL-BY-KILL"; body: root.candidate-detail-kills; section-floor-height: 92px; }
-                        CandidateDetailSection { heading: "WHY IT RECEIVED THIS SCORE"; body: root.candidate-detail-score-breakdown; section-floor-height: 110px; }
-                        CandidateDetailSection { heading: "FRAG TAGS"; body: root.candidate-detail-tags; section-floor-height: 72px; }
+                        if root.candidate-detail-has-summary : CandidateDetailSection { heading: "WHAT HAPPENS IN THIS CLIP"; body: root.candidate-detail-summary; section-floor-height: 92px; }
+                        if root.candidate-detail-has-kills : CandidateDetailSection { heading: "KILL-BY-KILL"; body: root.candidate-detail-kills; section-floor-height: 92px; }
+                        if root.candidate-detail-has-score-breakdown : CandidateDetailSection { heading: "WHY IT RECEIVED THIS SCORE"; body: root.candidate-detail-score-breakdown; section-floor-height: 110px; }
+                        if root.candidate-detail-has-tags : CandidateDetailSection { heading: "TAG BREAKDOWN BY TICK"; body: root.candidate-detail-tags; section-floor-height: 72px; }
                     }
                 }
             }

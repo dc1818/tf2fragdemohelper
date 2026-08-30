@@ -26,6 +26,7 @@ const PROFILE_CFG: &str = "tf2fragdemohelper_recording_profile.cfg";
 const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
 const RECORDING_FLUSH_TICKS: i64 = 133;
 const VDM_ACTION_GAP_TICKS: i64 = 2;
+const MANUAL_SEEK_STEP_TICKS: i64 = 15_000;
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -66,9 +67,20 @@ pub enum RecordingProgress {
         failed: usize,
         session: Option<PathBuf>,
     },
+    ManualFinished {
+        output_path: PathBuf,
+        session: Option<PathBuf>,
+    },
 }
 
 pub type RecordingProgressSink = Arc<dyn Fn(RecordingProgress) + Send + Sync>;
+
+#[derive(Clone, Debug)]
+pub struct ManualHlaeLaunch {
+    pub target_tick: i64,
+    pub output_path: PathBuf,
+    pub session: PathBuf,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct RecordingRecoveryReport {
@@ -1062,6 +1074,280 @@ pub fn preview_candidate(candidate: &Candidate, settings: &AppSettings) -> Resul
     Ok(target_tick)
 }
 
+pub fn launch_manual_hlae_candidate(
+    candidate: &Candidate,
+    settings: &AppSettings,
+    progress: Option<RecordingProgressSink>,
+) -> Result<ManualHlaeLaunch> {
+    if !cfg!(target_os = "windows") {
+        bail!("manual HLAE camera playback is Windows-only");
+    }
+    recover_interrupted_profile()?;
+    if !settings.tf2_executable.is_file() {
+        bail!("select tf_win64.exe in Settings");
+    }
+    if !settings.hlae_executable.is_file() {
+        bail!("select hlae.exe in Settings");
+    }
+    validate_tf2_executable(&settings.tf2_executable)?;
+    validate_named_executable(&settings.hlae_executable, &["hlae.exe"], "HLAE")?;
+    if !settings.recording_format.contains("Image") {
+        if !settings.ffmpeg_executable.is_file() {
+            bail!("select ffmpeg.exe before using the manual recording hotkey with an encoded format");
+        }
+        validate_named_executable(&settings.ffmpeg_executable, &["ffmpeg.exe"], "FFmpeg")?;
+    }
+    validate_selected_encoder(settings)?;
+    let source = Path::new(&candidate.source_demo);
+    if !source.is_file() {
+        bail!("the selected candidate's original demo is missing: {}", source.display());
+    }
+
+    let game = tf2_game_directory(&settings.tf2_executable)?;
+    let hlae_root = settings
+        .hlae_executable
+        .parent()
+        .context("could not find the HLAE directory")?;
+    let x64 = settings
+        .tf2_executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("tf_win64.exe"));
+    let hook = if x64 {
+        hlae_root.join("x64/AfxHookSource.dll")
+    } else {
+        hlae_root.join("AfxHookSource.dll")
+    };
+    if !hook.is_file() {
+        bail!("required HLAE hook is missing: {}", hook.display());
+    }
+    let tf_process_name = settings
+        .tf2_executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tf_win64.exe")
+        .to_owned();
+    if windows_process_is_running(&tf_process_name)
+        || windows_process_is_running("tf.exe")
+        || windows_process_is_running("tf_win64.exe")
+    {
+        bail!("close TF2 before launching the isolated manual HLAE session");
+    }
+
+    fs::create_dir_all(&settings.recording_output_directory)?;
+    let session = recording_sessions_root().join(format!(
+        "tf2fragdemohelper_manual_{}",
+        Utc::now().format("%Y%m%d_%H%M%S_%3f")
+    ));
+    fs::create_dir_all(&session)?;
+    let session_name = session
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tf2fragdemohelper_manual")
+        .to_owned();
+    let diagnostic_log = session.join("manual_hlae_diagnostics.log");
+    let staged_root = game
+        .join("demos/tf2fragdemohelper_manual")
+        .join(&session_name);
+    fs::create_dir_all(&staged_root)?;
+    let mut staging_guard =
+        TemporaryPathGuard::new(vec![staged_root.clone(), session.clone()]);
+
+    let demo_stem = sanitize(
+        source
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("candidate_demo"),
+    );
+    let candidate_name = sanitize(if candidate.candidate_id.trim().is_empty() {
+        "candidate"
+    } else {
+        &candidate.candidate_id
+    });
+    let staged_name = format!("{demo_stem}__{candidate_name}.dem");
+    let staged_path = staged_root.join(&staged_name);
+    if fs::hard_link(source, &staged_path).is_err() {
+        fs::copy(source, &staged_path)
+            .with_context(|| format!("could not stage {}", source.display()))?;
+    }
+    let (target_tick, end_tick) = clip_window(candidate, settings);
+    fs::write(
+        staged_path.with_extension("vdm"),
+        manual_hlae_vdm_text(candidate, target_tick),
+    )?;
+    let staged_relative = format!(
+        "demos/tf2fragdemohelper_manual/{session_name}/{staged_name}"
+    );
+
+    let output_path = settings
+        .recording_output_directory
+        .join("Manual HLAE")
+        .join(candidate_output_category(candidate))
+        .join(format!(
+            "{demo_stem}__{candidate_name}__t{target_tick}-{end_tick}__{}",
+            Utc::now().format("%Y%m%d_%H%M%S")
+        ));
+    fs::create_dir_all(&output_path)?;
+    let launch_log = session.join("hlae_launch.log");
+    let launch_log_file = File::create(&launch_log)?;
+    let profile = stage_recording_profile(
+        &game,
+        &session_name,
+        &tf_process_name,
+        settings,
+        vec![staged_root.clone(), session.clone()],
+    )
+    .context("could not stage the temporary TF2/HLAE profile")?;
+
+    let cfg_root = game.join("cfg");
+    let cfg_result = (|| -> Result<()> {
+        fs::write(
+            cfg_root.join("tf2fragdemohelper_manual.cfg"),
+            manual_hotkey_cfg(candidate, target_tick, &staged_relative, settings),
+        )?;
+        fs::write(
+            cfg_root.join("tf2fragdemohelper_manual_start.cfg"),
+            manual_recording_start_cfg(settings, &output_path),
+        )?;
+        fs::write(
+            cfg_root.join("tf2fragdemohelper_manual_stop.cfg"),
+            manual_recording_stop_cfg(settings),
+        )?;
+        fs::write(
+            cfg_root.join("tf2fragdemohelper_manual_save.cfg"),
+            format!(
+                "mirv_campath save \"{}\"\necho TF2FRAG_MANUAL_CAMPATH_SAVED\n",
+                output_path.join("camera_path.xml").display().to_string().replace('\\', "/")
+            ),
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = cfg_result {
+        let _ = restore_recording_profile(&profile);
+        return Err(error).context("could not install the temporary manual HLAE hotkeys");
+    }
+
+    let (width, height) = parse_resolution(&settings.resolution);
+    let dx_argument = if settings
+        .dx_level
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("default")
+    {
+        String::new()
+    } else {
+        format!(
+            "-dxlevel {} ",
+            settings.dx_level.split_whitespace().next().unwrap_or("98")
+        )
+    };
+    let game_arguments = format!(
+        "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf -w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_relative}"
+    );
+    log_recording_diagnostic(
+        &diagnostic_log,
+        format!(
+            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; command line: {game_arguments}",
+            output_path.display()
+        ),
+    );
+    let launch_log_stdout = match launch_log_file.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = restore_recording_profile(&profile);
+            return Err(error).context("could not prepare the HLAE launch log");
+        }
+    };
+    let mut launch = Command::new(&settings.hlae_executable);
+    launch
+        .current_dir(hlae_root)
+        .args(["-customLoader", "-autoStart", "-noGui", "-programPath"])
+        .arg(&settings.tf2_executable)
+        .arg("-cmdLine")
+        .arg(game_arguments)
+        .arg("-hookDllPath")
+        .arg(hook)
+        .stdout(Stdio::from(launch_log_stdout))
+        .stderr(Stdio::from(launch_log_file));
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        launch.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = match launch.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = restore_recording_profile(&profile);
+            return Err(error).context("could not launch TF2 through HLAE");
+        }
+    };
+
+    let monitor_log = diagnostic_log.clone();
+    let monitor_output = output_path.clone();
+    let monitor_session = session.clone();
+    let monitor_progress = progress.clone();
+    staging_guard.disarm();
+    thread::spawn(move || {
+        if let Some(sink) = &monitor_progress {
+            sink(RecordingProgress::Status(format!(
+                "Manual HLAE paused at tick {target_tick} — 6 camera, 7 keyframe, 9/0 record"
+            )));
+        }
+        let startup_deadline = Instant::now() + Duration::from_secs(90);
+        let mut tf2_seen = false;
+        while Instant::now() < startup_deadline {
+            if windows_process_state(&profile.tf_process_name) == Some(true) {
+                tf2_seen = true;
+                break;
+            }
+            if child.try_wait().ok().flatten().is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        if tf2_seen {
+            let mut absent_confirmations = 0u8;
+            while absent_confirmations < TF2_ABSENT_CONFIRMATIONS {
+                match windows_process_state(&profile.tf_process_name) {
+                    Some(true) | None => absent_confirmations = 0,
+                    Some(false) => absent_confirmations += 1,
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
+        } else {
+            log_recording_diagnostic(
+                &monitor_log,
+                "WARNING: TF2 was not observed after the HLAE launch",
+            );
+        }
+        wait_for_hlae_shutdown(&mut child, &monitor_log);
+        log_recording_diagnostic(&monitor_log, "TF2 closed; restoring the original TF2 profile");
+        let session_for_logs = if let Err(error) = restore_recording_profile(&profile) {
+            log_recording_diagnostic(&monitor_log, format!("ERROR: restore failed: {error}"));
+            let _ = fs::write(
+                profile.backup_directory.join("RESTORE_REQUIRED.txt"),
+                error.to_string(),
+            );
+            Some(monitor_session)
+        } else {
+            None
+        };
+        if let Some(sink) = &monitor_progress {
+            sink(RecordingProgress::ManualFinished {
+                output_path: monitor_output,
+                session: session_for_logs,
+            });
+        }
+    });
+
+    Ok(ManualHlaeLaunch {
+        target_tick,
+        output_path,
+        session,
+    })
+}
+
 pub fn prepare_hlae_batch(candidates: &[Candidate], settings: &AppSettings) -> Result<PathBuf> {
     if !cfg!(target_os = "windows") {
         bail!("HLAE recording is Windows-only; parsing, analysis, filtering, and export viewing remain cross-platform");
@@ -1858,16 +2144,27 @@ fn hidden_command(program: &str, arguments: &[&str]) -> Result<std::process::Out
 
 fn cleanup_temporary_paths(session: &RecordingProfileSession) {
     for path in &session.temporary_paths {
-        let Ok(relative) = path.strip_prefix(&session.game_directory) else {
-            continue;
-        };
-        let normalized = relative
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
-        if !(normalized.starts_with("demos/tf2fragdemohelper_batch/")
-            || normalized.starts_with("cfg/tf2fragdemohelper_batch/"))
-        {
+        let allowed_game_path = path
+            .strip_prefix(&session.game_directory)
+            .ok()
+            .map(|relative| {
+                relative
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase()
+            })
+            .is_some_and(|normalized| {
+                normalized.starts_with("demos/tf2fragdemohelper_batch/")
+                    || normalized.starts_with("cfg/tf2fragdemohelper_batch/")
+                    || normalized.starts_with("demos/tf2fragdemohelper_manual/")
+            });
+        let sessions_root = recording_sessions_root();
+        let allowed_manual_session = path.parent().is_some_and(|parent| parent == sessions_root)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("tf2fragdemohelper_manual_"));
+        if !allowed_game_path && !allowed_manual_session {
             continue;
         }
         if path.is_dir() {
@@ -2542,7 +2839,142 @@ fn preview_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
     lines.join("\n")
 }
 
-fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<&str>, settings: &AppSettings) -> Result<String> {
+fn manual_seek_targets(target_tick: i64) -> Vec<i64> {
+    let target_tick = target_tick.max(0);
+    let mut targets = Vec::new();
+    let mut tick = MANUAL_SEEK_STEP_TICKS;
+    while tick < target_tick {
+        targets.push(tick);
+        tick += MANUAL_SEEK_STEP_TICKS;
+    }
+    if target_tick > 0 {
+        targets.push(target_tick);
+    }
+    targets
+}
+
+fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
+    let target_tick = target_tick.max(0);
+    let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
+    let mut action = 1;
+    let seek_targets = manual_seek_targets(target_tick);
+    let mut previous_target = 0;
+    for (index, seek_target) in seek_targets.iter().enumerate() {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "SkipAhead",
+            &format!(
+                "TF2 Frag Demo Helper safe seek {}/{}",
+                index + 1,
+                seek_targets.len()
+            ),
+            if previous_target == 0 {
+                1
+            } else {
+                previous_target + 1
+            },
+            Some(*seek_target),
+            "",
+        );
+        previous_target = *seek_target;
+    }
+    let focus = if candidate_needs_spectator_focus(candidate) {
+        format!(
+            "spec_autodirector 0; spec_player #{}; spec_mode 4; ",
+            candidate.attacker_user_id
+        )
+    } else {
+        String::new()
+    };
+    add_vdm_action(
+        &mut lines,
+        &mut action,
+        "PlayCommands",
+        "Focus candidate and pause after safe seek",
+        target_tick + 1,
+        None,
+        &format!(
+            "{focus}thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+        ),
+    );
+    lines.push("}".into());
+    lines.join("\n")
+}
+
+fn manual_hotkey_cfg(
+    candidate: &Candidate,
+    target_tick: i64,
+    staged_demo: &str,
+    settings: &AppSettings,
+) -> String {
+    let mut shortcuts = settings.mirv_shortcuts.clone();
+    shortcuts.normalize();
+    let mut kill_ticks = candidate.point_of_kill_ticks.clone();
+    kill_ticks.sort_unstable();
+    kill_ticks.dedup();
+    if kill_ticks.is_empty() {
+        kill_ticks.push(target_tick);
+    }
+    let mut lines = vec![
+        "// Temporary manual HLAE controls generated by TF2 Frag Demo Helper.".into(),
+        "sv_cheats 1".into(),
+        "con_enable 1".into(),
+        "mirv_campath enabled 0".into(),
+        "mirv_campath clear".into(),
+        "mirv_input end".into(),
+        "alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"".into(),
+        "alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"".into(),
+        "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
+        format!(
+            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE\"",
+            shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
+            shortcuts.back_one_second, shortcuts.safe_restart, shortcuts.next_kill_tick,
+            shortcuts.pause_resume, shortcuts.enter_camera, shortcuts.add_keyframe,
+            shortcuts.play_campath, shortcuts.start_recording, shortcuts.stop_recording,
+            shortcuts.print_keyframes, shortcuts.save_campath,
+        ),
+        format!("alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\""),
+    ];
+    for (index, tick) in kill_ticks.iter().enumerate() {
+        let current = index + 1;
+        let next = if current == kill_ticks.len() { 1 } else { current + 1 };
+        lines.push(format!(
+            "alias tf2frag_manual_kill_{current} \"demo_gototick {tick}; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo TF2FRAG_MANUAL_KILL {current}/{} TICK {tick}\"",
+            kill_ticks.len()
+        ));
+    }
+    lines.extend([
+        "alias tf2frag_manual_hud_off \"cl_drawhud 0; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_on; echo TF2FRAG_MANUAL_HUD_HIDDEN\"".into(),
+        "alias tf2frag_manual_hud_on \"cl_drawhud 1; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off; echo TF2FRAG_MANUAL_HUD_VISIBLE\"".into(),
+        "alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off".into(),
+        "alias tf2frag_manual_next_kill tf2frag_manual_kill_1".into(),
+        format!("bind \"{}\" \"mirv_skip time 0.25\"", shortcuts.advance_time),
+        format!("bind \"{}\" \"tf2frag_manual_toggle_hud\"", shortcuts.toggle_hud),
+        format!("bind \"{}\" \"tf2frag_manual_help\"", shortcuts.show_help),
+        format!("bind \"{}\" \"mirv_skip time -1\"", shortcuts.back_one_second),
+        format!("bind \"{}\" \"tf2frag_manual_clip_start\"", shortcuts.safe_restart),
+        format!("bind \"{}\" \"tf2frag_manual_next_kill\"", shortcuts.next_kill_tick),
+        format!("bind \"{}\" \"demo_togglepause\"", shortcuts.pause_resume),
+        format!("bind \"{}\" \"sv_cheats 1; thirdperson; r_drawviewmodel 0; spec_autodirector 0; mirv_input camera\"", shortcuts.enter_camera),
+        format!("bind \"{}\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED\"", shortcuts.add_keyframe),
+        format!("bind \"{}\" \"mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED_THIRDPERSON\"", shortcuts.play_campath),
+        format!("bind \"{}\" \"tf2frag_manual_start\"", shortcuts.start_recording),
+        format!("bind \"{}\" \"tf2frag_manual_stop\"", shortcuts.stop_recording),
+        format!("bind \"{}\" \"mirv_campath print\"", shortcuts.print_keyframes),
+        format!("bind \"{}\" \"tf2frag_manual_save\"", shortcuts.save_campath),
+        "echo TF2FRAG_MANUAL_READY".into(),
+        "tf2frag_manual_help".into(),
+    ]);
+    format!("{}\n", lines.join("\n"))
+}
+
+fn vdm_text(
+    clips: &[(usize, Candidate)],
+    session_name: &str,
+    next_demo: Option<&str>,
+    settings: &AppSettings,
+) -> Result<String> {
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
     add_vdm_action(
@@ -2552,7 +2984,7 @@ fn vdm_text(clips: &[(usize, Candidate)], session_name: &str, next_demo: Option<
         "Apply movie profile",
         1,
         None,
-        &format!("exec tf2fragdemohelper_recording_profile; {}", clean_capture_screen_commands()),
+        &format!("mirv_campath enabled 0; mirv_campath clear; mirv_input end; exec tf2fragdemohelper_recording_profile; {}", clean_capture_screen_commands()),
     );
     let mut previous_finalize_tick = -1;
     for (order, candidate) in clips {
@@ -2660,8 +3092,10 @@ fn prepare_recording_clips(
             "{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__k{}",
             recording_key_token(&recording_key)
         );
+        let output_category = candidate_output_category(candidate);
         let recording_identifier = unique_recording_identifier(
             &settings.recording_output_directory,
+            &output_category,
             &base_identifier,
             encoded,
             extension,
@@ -2680,6 +3114,7 @@ fn prepare_recording_clips(
             let final_path = settings
                 .recording_output_directory
                 .join("Videos")
+                .join(&output_category)
                 .join(format!("{recording_identifier}.{extension}"));
             fs::create_dir_all(&working)?;
             (Some(working), final_path, None, None)
@@ -2714,6 +3149,7 @@ fn prepare_recording_clips(
 
 fn unique_recording_identifier(
     root: &Path,
+    output_category: &str,
     base: &str,
     encoded: bool,
     extension: &str,
@@ -2726,7 +3162,9 @@ fn unique_recording_identifier(
             format!("{base}_{suffix}")
         };
         let final_path = if encoded {
-            root.join("Videos").join(format!("{candidate}.{extension}"))
+            root.join("Videos")
+                .join(output_category)
+                .join(format!("{candidate}.{extension}"))
         } else {
             root.join("Image Sequences").join(&candidate)
         };
@@ -2775,7 +3213,7 @@ fn write_recording_manifest(
         .collect::<Vec<_>>();
     let manifest = json!({
         "format": "tf2-hlae-recording-queue",
-                "version": 8,
+        "version": 9,
         "batch_status": batch_status,
         "batch_error": error,
         "offline_only": true,
@@ -3357,10 +3795,21 @@ fn remove_replaced_recording_output(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
+    let parent = path.parent().map(Path::to_path_buf);
     if path.is_dir() {
         fs::remove_dir_all(path)?;
     } else {
         fs::remove_file(path)?;
+    }
+    if let Some(parent) = parent.filter(|parent| {
+        !parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "Videos" | "Image Sequences"))
+    }) {
+        if parent.is_dir() && fs::read_dir(&parent)?.next().is_none() {
+            fs::remove_dir(parent)?;
+        }
     }
     Ok(true)
 }
@@ -3598,31 +4047,67 @@ fn recording_start_cfg(clip: &PreparedClip, settings: &AppSettings) -> String {
             .display()
             .to_string()
             .replace('\\', "/");
-        let preset = if settings.recording_format.contains("Lossless") {
-            "afxFfmpegLosslessBest"
-        } else if settings.recording_format.contains("AVI") {
-            if effective_avi_encoding(settings)
-                .ok()
-                .flatten()
-                .is_some_and(|encoding| encoding.custom_hlae_preset)
-            {
-                "tf2FragAvi"
-            } else {
-                "afxFfmpegRaw"
-            }
-        } else if settings.recording_format == "MOV - DNxHR" {
-            "tf2FragDnxhr"
-        } else if effective_mp4_encoding(settings)
+        let preset = recording_stream_preset(settings);
+        format!("echo TF2FRAG_RECORD_START {}; {}; host_framerate {fps}; mirv_streams record fps {fps}; mirv_streams record screen enabled 1; mirv_streams record screen settings {preset}; mirv_streams record name \"{output}\"; mirv_streams record start; hideconsole\n", clip.config_base, clean_capture_screen_commands())
+    }
+}
+
+fn recording_stream_preset(settings: &AppSettings) -> &'static str {
+    if settings.recording_format.contains("Lossless") {
+        "afxFfmpegLosslessBest"
+    } else if settings.recording_format.contains("AVI") {
+        if effective_avi_encoding(settings)
             .ok()
             .flatten()
             .is_some_and(|encoding| encoding.custom_hlae_preset)
         {
-            "tf2FragMp4"
+            "tf2FragAvi"
         } else {
-            "afxFfmpeg"
-        };
-        format!("echo TF2FRAG_RECORD_START {}; {}; host_framerate {fps}; mirv_streams record fps {fps}; mirv_streams record screen enabled 1; mirv_streams record screen settings {preset}; mirv_streams record name \"{output}\"; mirv_streams record start; hideconsole\n", clip.config_base, clean_capture_screen_commands())
+            "afxFfmpegRaw"
+        }
+    } else if settings.recording_format == "MOV - DNxHR" {
+        "tf2FragDnxhr"
+    } else if effective_mp4_encoding(settings)
+        .ok()
+        .flatten()
+        .is_some_and(|encoding| encoding.custom_hlae_preset)
+    {
+        "tf2FragMp4"
+    } else {
+        "afxFfmpeg"
     }
+}
+
+fn manual_recording_start_cfg(settings: &AppSettings, output_path: &Path) -> String {
+    let fps = settings.capture_fps;
+    let output = output_path.display().to_string().replace('\\', "/");
+    if settings.recording_format.starts_with("TGA") {
+        format!(
+            "echo TF2FRAG_MANUAL_RECORD_START; {}; host_framerate {fps}; startmovie \"{output}/capture\" raw; hideconsole\n",
+            clean_capture_screen_commands()
+        )
+    } else if settings.recording_format.starts_with("JPG") {
+        format!(
+            "echo TF2FRAG_MANUAL_RECORD_START; {}; jpeg_quality {}; host_framerate {fps}; startmovie \"{output}/capture\" jpeg; hideconsole\n",
+            clean_capture_screen_commands(),
+            settings.jpg_quality
+        )
+    } else {
+        let preset = recording_stream_preset(settings);
+        format!(
+            "echo TF2FRAG_MANUAL_RECORD_START; {}; host_framerate {fps}; mirv_streams record fps {fps}; mirv_streams record screen enabled 1; mirv_streams record screen settings {preset}; mirv_streams record name \"{output}\"; mirv_streams record start; hideconsole\n",
+            clean_capture_screen_commands()
+        )
+    }
+}
+
+fn manual_recording_stop_cfg(settings: &AppSettings) -> String {
+    let stop = if settings.recording_format.contains("Image") {
+        "endmovie"
+    } else {
+        "mirv_streams record end"
+    };
+    format!("echo TF2FRAG_MANUAL_RECORD_END; {stop}; host_framerate 0\n")
 }
 
 fn recording_stop_cfg(settings: &AppSettings, config_base: &str) -> String {
@@ -3676,6 +4161,42 @@ fn sanitize(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn candidate_output_category(candidate: &Candidate) -> String {
+    let tag = candidate.inferred_primary_tag();
+    let words = tag
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut characters = word.chars();
+            match characters.next() {
+                Some(first) => format!(
+                    "{}{}",
+                    first.to_ascii_uppercase(),
+                    characters.as_str().to_ascii_lowercase()
+                ),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let safe = words
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let safe = safe.trim().trim_end_matches(['.', ' ']);
+    if safe.is_empty() {
+        "Other".into()
+    } else {
+        safe.into()
+    }
 }
 
 fn recording_profile_cfg(settings: &AppSettings) -> String {
@@ -4133,11 +4654,15 @@ fn recording_output_name(path: &Path) -> String {
 fn final_recording_outputs(root: &Path) -> Vec<PathBuf> {
     let mut outputs = Vec::new();
     let videos = root.join("Videos");
-    if let Ok(entries) = fs::read_dir(videos) {
+    if videos.is_dir() {
         outputs.extend(
-            entries
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|path| output_still_exists(path)),
+            WalkDir::new(&videos)
+                .min_depth(1)
+                .max_depth(2)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.into_path())
+                .filter(|path| path.is_file() && output_still_exists(path)),
         );
     }
     let sequences = root.join("Image Sequences");
@@ -4660,6 +5185,30 @@ mod recording_tests {
     }
 
     #[test]
+    fn primary_tag_creates_a_readable_output_category() {
+        let candidate = Candidate {
+            tags: vec!["confirmed_airshot".into()],
+            primary_tag: "confirmed_airshot".into(),
+            ..Candidate::default()
+        };
+        assert_eq!(candidate_output_category(&candidate), "Confirmed Airshot");
+    }
+
+    #[test]
+    fn categorized_videos_are_found_during_recording_reconciliation() {
+        let root = recovery_test_root("categorized-output");
+        let video = root
+            .join("Videos")
+            .join("Confirmed Airshot")
+            .join("clip.mp4");
+        fs::create_dir_all(video.parent().unwrap()).expect("create category folder");
+        fs::write(&video, b"video").expect("write categorized video");
+
+        assert_eq!(final_recording_outputs(&root), vec![video]);
+        fs::remove_dir_all(root).expect("remove categorized output root");
+    }
+
+    #[test]
     fn recovery_discovery_is_bounded_and_skips_disabled_sessions() {
         let root = recovery_test_root("discovery");
         for index in 0..5 {
@@ -4742,6 +5291,108 @@ mod recording_tests {
         fs::remove_dir_all(root).expect("remove recovery test root");
     }
 
+    #[test]
+    fn manual_hotkeys_cycle_every_distinct_kill_tick() {
+        let candidate = Candidate {
+            point_of_kill_ticks: vec![900, 900, 925, 970],
+            ..Candidate::default()
+        };
+        let cfg = manual_hotkey_cfg(
+            &candidate,
+            500,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+            &AppSettings::default(),
+        );
+        assert!(cfg.contains(
+            "playdemo demos/tf2fragdemohelper_manual/session/candidate.dem"
+        ));
+        assert!(!cfg.contains("demo_gototick 500"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 TICK 900"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 TICK 925"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 TICK 970"));
+        assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
+        assert!(cfg.contains("bind \"[\" \"mirv_skip time 0.25\""));
+        assert!(cfg.contains("bind \"]\" \"tf2frag_manual_toggle_hud\""));
+        assert!(!cfg.contains("RIGHTARROW"));
+        assert!(!cfg.contains("UPARROW"));
+        assert!(cfg.contains("cl_drawhud 0"));
+        assert!(cfg.contains("cl_drawhud 1"));
+        assert!(cfg.contains("bind \"6\""));
+        assert!(cfg.contains("mirv_input camera"));
+        assert!(cfg.contains(
+            "mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1"
+        ));
+        assert!(cfg.contains("bind \"9\" \"tf2frag_manual_start\""));
+        assert!(cfg.contains("bind \"0\" \"tf2frag_manual_stop\""));
+        assert!(cfg.contains("bind \"=\" \"tf2frag_manual_save\""));
+        assert!(!cfg.contains("bind \"F"));
+    }
+
+    #[test]
+    fn manual_hotkeys_use_saved_custom_keys_and_never_bind_arrows() {
+        let mut settings = AppSettings::default();
+        settings.mirv_shortcuts.advance_time = "q".into();
+        settings.mirv_shortcuts.toggle_hud = "F12".into();
+        settings.mirv_shortcuts.safe_restart = "LEFTARROW".into();
+        let cfg = manual_hotkey_cfg(
+            &Candidate::default(),
+            500,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+            &settings,
+        );
+        assert!(cfg.contains("bind \"q\" \"mirv_skip time 0.25\""));
+        assert!(cfg.contains("bind \"F12\" \"tf2frag_manual_toggle_hud\""));
+        assert!(cfg.contains("bind \"3\" \"tf2frag_manual_clip_start\""));
+        assert!(!cfg.contains("bind \"LEFTARROW\""));
+        assert!(!cfg.contains("bind \"RIGHTARROW\""));
+        assert!(!cfg.contains("bind \"UPARROW\""));
+        assert!(!cfg.contains("bind \"DOWNARROW\""));
+    }
+
+    #[test]
+    fn manual_hlae_vdm_pauses_after_seeking_to_selected_start() {
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 500);
+        assert!(vdm.contains("skiptotick \"500\""));
+        assert!(vdm.contains("starttick \"501\""));
+        assert!(vdm.contains(
+            "thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+        ));
+        assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
+        let pause = vdm.find("demo_pause").expect("pause command");
+        let seek = vdm.find("skiptotick \"500\"").expect("safe seek command");
+        assert!(pause > seek);
+    }
+
+    #[test]
+    fn manual_hlae_seek_is_split_into_at_most_fifteen_thousand_tick_steps() {
+        assert_eq!(
+            manual_seek_targets(46_001),
+            vec![15_000, 30_000, 45_000, 46_001]
+        );
+        assert_eq!(manual_seek_targets(15_000), vec![15_000]);
+        assert!(manual_seek_targets(0).is_empty());
+
+        let vdm = manual_hlae_vdm_text(&Candidate::default(), 46_001);
+        for tick in [15_000, 30_000, 45_000, 46_001] {
+            assert!(vdm.contains(&format!("skiptotick \"{tick}\"")));
+        }
+        assert!(vdm.contains("starttick \"46002\""));
+    }
+
+    #[test]
+    fn manual_encoded_recording_sets_both_frame_rates_and_selected_preset() {
+        let settings = AppSettings {
+            capture_fps: 240,
+            recording_format: "MP4 - Standard".into(),
+            ..AppSettings::default()
+        };
+        let cfg = manual_recording_start_cfg(&settings, Path::new("C:/manual/capture"));
+        assert!(cfg.contains("host_framerate 240"));
+        assert!(cfg.contains("mirv_streams record fps 240"));
+        assert!(cfg.contains("mirv_streams record screen settings tf2FragMp4"));
+        assert!(cfg.contains("mirv_streams record name \"C:/manual/capture\""));
+    }
+
     fn recording_profile_suppresses_recorded_vote_and_server_message_panels() {
         let root = recovery_test_root("message-suppression");
         install_recording_message_suppression(&root).expect("install vote HUD suppression");
@@ -4768,12 +5419,12 @@ mod recording_tests {
         let base = "demo__candidate__t900-1200__k1234567890abcdef";
         let mut reserved = HashSet::new();
 
-        let first = unique_recording_identifier(&root, base, true, "mp4", &reserved);
+        let first = unique_recording_identifier(&root, "Confirmed Airshot", base, true, "mp4", &reserved);
         assert_eq!(first, base);
         assert!(!first.contains("__cam"));
 
         reserved.insert(first);
-        let second = unique_recording_identifier(&root, base, true, "mp4", &reserved);
+        let second = unique_recording_identifier(&root, "Confirmed Airshot", base, true, "mp4", &reserved);
         assert_eq!(second, format!("{base}_2"));
     }
 

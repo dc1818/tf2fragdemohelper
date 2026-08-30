@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DemoContext {
@@ -31,6 +31,16 @@ pub struct DemoContext {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TickTagGroup {
+    #[serde(default)]
+    pub demo_tick: i64,
+    #[serde(default)]
+    pub server_ticks: Vec<i64>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Candidate {
     #[serde(default)]
     pub candidate_id: String,
@@ -56,6 +66,20 @@ pub struct Candidate {
     pub point_of_kill_ticks: Vec<i64>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Tags assigned to the kill event(s) at each distinct demo tick.
+    /// Same-tick kills share one group so the UI does not pretend the demo
+    /// timeline can distinguish events that occurred in the same frame.
+    #[serde(default)]
+    pub tick_tags: Vec<TickTagGroup>,
+    /// Candidate-wide tags such as multi-kill, rapid sequence, objective
+    /// conversion, or round clinch. `tags` remains the flattened union for
+    /// backwards-compatible filtering and imported-export support.
+    #[serde(default)]
+    pub sequence_tags: Vec<String>,
+    /// The strongest positive tag according to the score evidence. Recording
+    /// output uses this stable value as its category folder.
+    #[serde(default)]
+    pub primary_tag: String,
     #[serde(default)]
     pub metrics: Value,
     #[serde(default)]
@@ -80,6 +104,125 @@ impl Candidate {
             .map(|value| value as usize)
             .unwrap_or(self.kills.len())
     }
+
+    pub fn inferred_primary_tag(&self) -> String {
+        // A candidate's output category follows its story chronologically: the
+        // first tag on the earliest kill tick wins. This makes Details and the
+        // recording folders agree, even if a later tick earns more points.
+        if let Some(tag) = self
+            .tick_tags
+            .iter()
+            .filter(|group| !group.tags.is_empty())
+            .min_by_key(|group| group.demo_tick)
+            .and_then(|group| group.tags.iter().find(|tag| !tag.trim().is_empty()))
+        {
+            return tag.clone();
+        }
+        if !self.primary_tag.trim().is_empty()
+            && self.tags.iter().any(|tag| tag == &self.primary_tag)
+        {
+            return self.primary_tag.clone();
+        }
+        infer_primary_tag(&self.tags, &self.tick_tags, &self.sequence_tags, &self.score_breakdown)
+            .unwrap_or_else(|| "other".into())
+    }
+}
+
+fn infer_primary_tag(
+    tags: &[String],
+    tick_tags: &[TickTagGroup],
+    sequence_tags: &[String],
+    score_breakdown: &[Value],
+) -> Option<String> {
+    let unique = tags.iter().filter(|tag| !tag.trim().is_empty()).collect::<BTreeSet<_>>();
+    unique
+        .into_iter()
+        .map(|tag| {
+            let occurrence_count = tick_tags
+                .iter()
+                .filter(|group| group.tags.iter().any(|candidate| candidate == tag))
+                .count();
+            let sequence_wide = sequence_tags.iter().any(|candidate| candidate == tag);
+            let evidence = score_breakdown
+                .iter()
+                .filter_map(|item| {
+                    let points = item.get("points").and_then(Value::as_f64)?;
+                    if points <= 0.0 {
+                        return None;
+                    }
+                    let reason = item.get("reason").and_then(Value::as_str).unwrap_or_default();
+                    let strength = tag_reason_match_strength(tag, reason);
+                    (strength > 0.0).then_some(points * strength)
+                })
+                .fold(0.0_f64, f64::max);
+            let specificity = normalized_words(tag).len();
+            (tag, evidence, occurrence_count, sequence_wide, specificity)
+        })
+        .max_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then(left.2.cmp(&right.2))
+                .then(left.3.cmp(&right.3))
+                .then(left.4.cmp(&right.4))
+                // Prefer the alphabetically earlier identifier for a stable tie.
+                .then_with(|| right.0.cmp(left.0))
+        })
+        .map(|entry| entry.0.clone())
+}
+
+fn tag_reason_match_strength(tag: &str, reason: &str) -> f64 {
+    let tag_words = normalized_words(tag);
+    let reason_words = normalized_words(reason);
+    if tag_words.is_empty() || reason_words.is_empty() {
+        return 0.0;
+    }
+    if tag_words.iter().all(|word| reason_words.contains(word)) {
+        return 1.0;
+    }
+
+    // Current sequence tags whose score-reason wording is intentionally more
+    // descriptive. New tags normally need no entry here because identifier
+    // words are matched generically above and below.
+    let explicit = matches!(
+        (tag, reason),
+        ("multi_kill", "additional_kills")
+            | ("double_airshot_sequence", "multiple_confirmed_airshots")
+            | ("team_wipe", "sequence_finished_enemy_team")
+            | ("medic_force", "enemy_medic_forced_uber_after_sequence")
+            | ("player_count_swing", "sequence_created_player_count_window")
+            | ("round_clinch", "team_won_immediately_after_sequence")
+            | ("building_to_kill_sequence", "building_destruction_led_to_kills")
+            | ("capture_denial_followup", "kill_sequence_blocked_capture")
+            | ("payload_progress_followup", "kill_sequence_led_to_payload_progress")
+    );
+    if explicit {
+        return 1.0;
+    }
+
+    let overlap = tag_words
+        .iter()
+        .filter(|word| reason_words.contains(*word))
+        .count();
+    if overlap == 0 {
+        0.0
+    } else {
+        (overlap as f64 / tag_words.len() as f64) * 0.65
+    }
+}
+
+fn normalized_words(value: &str) -> BTreeSet<String> {
+    value
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            if word.len() > 4 {
+                word.strip_suffix('s').unwrap_or(word).to_owned()
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -136,7 +279,110 @@ pub struct AppSettings {
     pub disable_announcer_voices: bool,
     pub disable_applause_sounds: bool,
     pub disable_domination_sounds: bool,
+    pub mirv_shortcuts: MirvShortcuts,
     pub custom_resources: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MirvShortcuts {
+    pub advance_time: String,
+    pub toggle_hud: String,
+    pub show_help: String,
+    pub back_one_second: String,
+    pub safe_restart: String,
+    pub next_kill_tick: String,
+    pub pause_resume: String,
+    pub enter_camera: String,
+    pub add_keyframe: String,
+    pub play_campath: String,
+    pub start_recording: String,
+    pub stop_recording: String,
+    pub print_keyframes: String,
+    pub save_campath: String,
+}
+
+impl Default for MirvShortcuts {
+    fn default() -> Self {
+        Self {
+            advance_time: "[".into(),
+            toggle_hud: "]".into(),
+            show_help: "1".into(),
+            back_one_second: "2".into(),
+            safe_restart: "3".into(),
+            next_kill_tick: "4".into(),
+            pause_resume: "5".into(),
+            enter_camera: "6".into(),
+            add_keyframe: "7".into(),
+            play_campath: "8".into(),
+            start_recording: "9".into(),
+            stop_recording: "0".into(),
+            print_keyframes: "-".into(),
+            save_campath: "=".into(),
+        }
+    }
+}
+
+impl MirvShortcuts {
+    pub fn is_reserved_arrow_key(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_uppercase().as_str(),
+            "UPARROW" | "DOWNARROW" | "LEFTARROW" | "RIGHTARROW"
+        )
+    }
+
+    fn normalized_key(value: &str, fallback: &str) -> String {
+        let value = value.trim();
+        let upper = value.to_ascii_uppercase();
+        let safe_named_key = matches!(
+            upper.as_str(),
+            "SPACE" | "TAB" | "ENTER" | "BACKSPACE" | "DEL" | "INS" | "HOME" | "END"
+                | "PGUP" | "PGDN" | "SCROLLLOCK" | "PAUSE"
+                | "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8"
+                | "F9" | "F10" | "F11" | "F12"
+        );
+        let safe_printable_key = value.chars().count() == 1
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '[' | ']' | '-' | '=' | ',' | '.' | '/' | '\'')
+            });
+        if !Self::is_reserved_arrow_key(value) && safe_named_key {
+            upper
+        } else if !Self::is_reserved_arrow_key(value) && safe_printable_key {
+            value.into()
+        } else {
+            fallback.into()
+        }
+    }
+
+    pub fn normalize(&mut self) {
+        let defaults = Self::default();
+        self.advance_time = Self::normalized_key(&self.advance_time, &defaults.advance_time);
+        self.toggle_hud = Self::normalized_key(&self.toggle_hud, &defaults.toggle_hud);
+        self.show_help = Self::normalized_key(&self.show_help, &defaults.show_help);
+        self.back_one_second = Self::normalized_key(&self.back_one_second, &defaults.back_one_second);
+        self.safe_restart = Self::normalized_key(&self.safe_restart, &defaults.safe_restart);
+        self.next_kill_tick = Self::normalized_key(&self.next_kill_tick, &defaults.next_kill_tick);
+        self.pause_resume = Self::normalized_key(&self.pause_resume, &defaults.pause_resume);
+        self.enter_camera = Self::normalized_key(&self.enter_camera, &defaults.enter_camera);
+        self.add_keyframe = Self::normalized_key(&self.add_keyframe, &defaults.add_keyframe);
+        self.play_campath = Self::normalized_key(&self.play_campath, &defaults.play_campath);
+        self.start_recording = Self::normalized_key(&self.start_recording, &defaults.start_recording);
+        self.stop_recording = Self::normalized_key(&self.stop_recording, &defaults.stop_recording);
+        self.print_keyframes = Self::normalized_key(&self.print_keyframes, &defaults.print_keyframes);
+        self.save_campath = Self::normalized_key(&self.save_campath, &defaults.save_campath);
+
+        let mut seen = BTreeSet::new();
+        let keys = [
+            &self.advance_time, &self.toggle_hud, &self.show_help, &self.back_one_second,
+            &self.safe_restart, &self.next_kill_tick, &self.pause_resume, &self.enter_camera,
+            &self.add_keyframe, &self.play_campath, &self.start_recording, &self.stop_recording,
+            &self.print_keyframes, &self.save_campath,
+        ];
+        if keys.iter().any(|key| !seen.insert(key.to_ascii_lowercase())) {
+            *self = defaults;
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -155,7 +401,7 @@ impl Default for AppSettings {
             disable_hit_sounds: true, disable_voice_chat: true, minimal_hud: true, disable_combat_text: true,
             disable_crosshair: true, disable_crosshair_switching: true, hud_player_model: false,
             isolate_custom_resources: true, disable_announcer_voices: true, disable_applause_sounds: true,
-            disable_domination_sounds: true, custom_resources: Vec::new(),
+            disable_domination_sounds: true, mirv_shortcuts: MirvShortcuts::default(), custom_resources: Vec::new(),
         }
     }
 }
@@ -245,6 +491,7 @@ impl AppSettings {
             .into();
 
         self.viewmodels = if self.viewmodels.eq_ignore_ascii_case("Off") { "Off" } else { "On" }.into();
+        self.mirv_shortcuts.normalize();
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -321,5 +568,76 @@ mod settings_tests {
         assert_eq!(settings.skybox, "Default");
         assert_eq!(settings.hud, "Kill notices only");
         assert_eq!(settings.viewmodels, "On");
+    }
+
+    #[test]
+    fn mirv_shortcuts_keep_the_pdf_defaults() {
+        let shortcuts = MirvShortcuts::default();
+        assert_eq!(shortcuts.advance_time, "[");
+        assert_eq!(shortcuts.toggle_hud, "]");
+        assert_eq!(shortcuts.show_help, "1");
+        assert_eq!(shortcuts.save_campath, "=");
+    }
+
+    #[test]
+    fn mirv_shortcuts_reject_every_arrow_key_name() {
+        for arrow in ["UPARROW", "downarrow", "LeftArrow", "RIGHTARROW"] {
+            let mut shortcuts = MirvShortcuts::default();
+            shortcuts.advance_time = arrow.into();
+            shortcuts.normalize();
+            assert_eq!(shortcuts.advance_time, "[");
+            assert!(!shortcuts.advance_time.eq_ignore_ascii_case(arrow));
+        }
+    }
+
+    #[test]
+    fn mirv_shortcuts_accept_captured_printable_and_named_keys() {
+        let mut shortcuts = MirvShortcuts::default();
+        shortcuts.advance_time = "q".into();
+        shortcuts.toggle_hud = "f12".into();
+        shortcuts.normalize();
+        assert_eq!(shortcuts.advance_time, "q");
+        assert_eq!(shortcuts.toggle_hud, "F12");
+    }
+
+}
+
+#[cfg(test)]
+mod candidate_tag_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn primary_tag_uses_the_first_tag_on_the_earliest_tick() {
+        let candidate = Candidate {
+            tags: vec!["projectile_kill".into(), "confirmed_airshot".into(), "late_round".into()],
+            tick_tags: vec![TickTagGroup {
+                demo_tick: 1_000,
+                server_ticks: vec![9_000],
+                tags: vec!["projectile_kill".into(), "confirmed_airshot".into()],
+            }],
+            sequence_tags: vec!["late_round".into()],
+            score_breakdown: vec![
+                json!({"reason":"state_confirmed_airshot","points":20.0}),
+                json!({"reason":"projectile_sequence","points":8.0}),
+                json!({"reason":"late_round","points":8.0}),
+            ],
+            ..Candidate::default()
+        };
+        assert_eq!(candidate.inferred_primary_tag(), "projectile_kill");
+    }
+
+    #[test]
+    fn future_matching_tag_identifiers_are_automatically_eligible() {
+        let candidate = Candidate {
+            tags: vec!["future_combo".into(), "projectile_kill".into()],
+            sequence_tags: vec!["future_combo".into()],
+            score_breakdown: vec![
+                json!({"reason":"future_combo","points":40.0}),
+                json!({"reason":"projectile_sequence","points":8.0}),
+            ],
+            ..Candidate::default()
+        };
+        assert_eq!(candidate.inferred_primary_tag(), "future_combo");
     }
 }

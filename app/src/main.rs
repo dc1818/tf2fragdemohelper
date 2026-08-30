@@ -12,7 +12,8 @@ use crate::{
     batch::{BatchController, ProgressEvent},
     models::{AppSettings, Candidate},
     recording::{
-        estimate_recording_space, latest_recording_session, launch_hlae_batch, preview_candidate,
+        estimate_recording_space, latest_recording_session, launch_hlae_batch,
+        launch_manual_hlae_candidate, preview_candidate,
         recover_interrupted_profile, recover_recording_sessions, shutdown_active_recording,
         RecordingIndex, RecordingProgress, RecordingProgressSink,
     },
@@ -125,14 +126,23 @@ fn candidate_server_type(candidate: &Candidate) -> &str {
 struct CandidateDetailText {
     player: String,
     player_meta: String,
+    has_player: bool,
     map: String,
     map_meta: String,
+    has_map: bool,
+    demo: String,
+    demo_meta: String,
+    has_demo: bool,
     score: String,
     score_meta: String,
     summary: String,
+    has_summary: bool,
     kills: String,
+    has_kills: bool,
     score_breakdown: String,
+    has_score_breakdown: bool,
     tags: String,
+    has_tags: bool,
 }
 
 fn nonempty_json_string(value: &serde_json::Value) -> Option<&str> {
@@ -219,6 +229,61 @@ fn friendly_tag(value: &str) -> String {
     }
 }
 
+fn candidate_tag_text(candidate: &Candidate, multiline: bool, include_primary: bool) -> String {
+    if candidate.tags.is_empty() {
+        return "No frag tags were assigned.".into();
+    }
+    let mut groups = Vec::new();
+    if include_primary {
+        groups.push(format!(
+            "Primary output category: {}",
+            friendly_tag(&candidate.inferred_primary_tag())
+        ));
+    }
+    for group in &candidate.tick_tags {
+        if group.tags.is_empty() {
+            continue;
+        }
+        groups.push(format!(
+            "Tick {}: {}",
+            group.demo_tick,
+            group
+                .tags
+                .iter()
+                .map(|tag| friendly_tag(tag))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !candidate.sequence_tags.is_empty() {
+        groups.push(format!(
+            "Whole candidate: {}",
+            candidate
+                .sequence_tags
+                .iter()
+                .map(|tag| friendly_tag(tag))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if candidate.tick_tags.is_empty() && candidate.sequence_tags.is_empty() {
+        let tags = candidate
+            .tags
+            .iter()
+            .map(|tag| friendly_tag(tag))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if candidate.point_of_kill_ticks.len() == 1 {
+            groups.push(format!("Tick {}: {tags}", candidate.point_of_kill_ticks[0]));
+        } else {
+            groups.push(format!(
+                "Legacy candidate (reparse for per-tick tags): {tags}"
+            ));
+        }
+    }
+    groups.join(if multiline { "\n" } else { " | " })
+}
+
 fn friendly_score_reason(value: &str) -> String {
     match value {
         "candidate_base" => "Base candidate value".into(),
@@ -281,7 +346,7 @@ fn human_join(values: &[String]) -> String {
     }
 }
 
-fn candidate_player_name(candidate: &Candidate) -> String {
+fn known_candidate_player_name(candidate: &Candidate) -> Option<String> {
     candidate
         .extra
         .get("attacker_name")
@@ -308,7 +373,10 @@ fn candidate_player_name(candidate: &Candidate) -> String {
                 .flatten()
         })
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("Player #{}", candidate.attacker_user_id))
+}
+
+fn candidate_player_name(candidate: &Candidate) -> String {
+    known_candidate_player_name(candidate).unwrap_or_else(|| format!("Player #{}", candidate.attacker_user_id))
 }
 
 fn kill_notes(kill: &serde_json::Value) -> Vec<String> {
@@ -367,7 +435,12 @@ fn kill_notes(kill: &serde_json::Value) -> Vec<String> {
 }
 
 fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
-    let player = candidate_player_name(candidate);
+    let known_player = known_candidate_player_name(candidate);
+    let has_player = known_player.is_some()
+        || (candidate.attacker_user_id != 0
+            && !candidate.attacker_class.eq_ignore_ascii_case("bookmark"));
+    let player = known_player
+        .unwrap_or_else(|| format!("Player #{}", candidate.attacker_user_id));
     let class = if candidate.attacker_class.is_empty() {
         "Unknown class".into()
     } else {
@@ -378,11 +451,8 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     } else {
         candidate.attacker_team.to_ascii_uppercase()
     };
-    let map = if candidate.map_name.is_empty() {
-        "Unknown map".into()
-    } else {
-        candidate.map_name.clone()
-    };
+    let has_map = !candidate.map_name.trim().is_empty();
+    let map = candidate.map_name.clone();
     let demo_name = Path::new(&candidate.source_demo)
         .file_name()
         .and_then(|name| name.to_str())
@@ -392,16 +462,17 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     } else {
         String::new()
     };
-    let map_meta = if demo_name.is_empty() {
-        format!("{}{}", candidate_server_type(candidate), round)
-    } else {
-        format!(
-            "{}{} • {}",
-            candidate_server_type(candidate),
-            round,
-            demo_name
-        )
-    };
+    let mut map_meta_parts = Vec::new();
+    if candidate_server_type(candidate) != "Unknown / Mixed" {
+        map_meta_parts.push(candidate_server_type(candidate).to_owned());
+    }
+    if !round.is_empty() {
+        map_meta_parts.push(round.trim_start_matches(" • ").to_owned());
+    }
+    let map_meta = map_meta_parts.join(" • ");
+    let has_demo = !demo_name.trim().is_empty();
+    let demo = demo_name.to_owned();
+    let demo_meta = "Source demo file".to_owned();
     let kill_count = candidate.kill_count();
     let kill_word = if kill_count == 1 { "kill" } else { "kills" };
 
@@ -487,12 +558,16 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
         });
     let mut summary = if kill_count == 0 {
         if candidate.bookmark_comment.trim().is_empty() {
-            format!("{player} has a bookmarked moment on {map}.")
+            candidate
+                .extra
+                .get("description")
+                .or_else(|| candidate.extra.get("summary"))
+                .and_then(nonempty_json_string)
+                .map(str::to_owned)
+                .unwrap_or_else(|| "A non-kill candidate was identified.".into())
         } else {
-            format!(
-                "{player} has a bookmarked moment on {map}: {}",
-                candidate.bookmark_comment.trim()
-            )
+            let location = has_map.then_some(map.as_str()).unwrap_or("this demo");
+            format!("A bookmarked moment was identified on {location}: {}", candidate.bookmark_comment.trim())
         }
     } else if kill_count == 1 {
         format!("{player}, playing {class} for {team}, gets a kill on {map}")
@@ -548,7 +623,7 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
     }
 
     let score_breakdown = if candidate.score_breakdown.is_empty() {
-        "No itemized score evidence is available for this imported candidate.".into()
+        String::new()
     } else {
         candidate
             .score_breakdown
@@ -582,33 +657,56 @@ fn candidate_detail_text(candidate: &Candidate) -> CandidateDetailText {
             .join("\n")
     };
 
-    CandidateDetailText {
-        player,
-        player_meta: format!("{class} • {team} • User ID #{}", candidate.attacker_user_id),
-        map,
-        map_meta,
-        score: format!("{:.1} POINTS", candidate.overall_score),
-        score_meta: format!(
+    let mut player_meta_parts = Vec::new();
+    if class != "Unknown class" && !class.eq_ignore_ascii_case("bookmark") {
+        player_meta_parts.push(class.clone());
+    }
+    if team != "Unknown team" {
+        player_meta_parts.push(team.clone());
+    }
+    if candidate.attacker_user_id != 0 {
+        player_meta_parts.push(format!("User ID #{}", candidate.attacker_user_id));
+    }
+    let player_meta = player_meta_parts.join(" • ");
+    let score_meta = if kill_count > 0 {
+        format!(
             "{kill_count} {kill_word} • Clip ticks {}–{}",
             candidate.clip_start_tick, candidate.clip_end_tick
-        ),
+        )
+    } else if candidate.clip_start_tick != 0 || candidate.clip_end_tick != 0 {
+        format!(
+            "Clip ticks {}–{}",
+            candidate.clip_start_tick, candidate.clip_end_tick
+        )
+    } else {
+        "Candidate score".into()
+    };
+    let tags = if candidate.tags.is_empty() {
+        String::new()
+    } else {
+        candidate_tag_text(candidate, true, true)
+    };
+
+    CandidateDetailText {
+        player,
+        player_meta,
+        has_player,
+        map,
+        map_meta,
+        has_map,
+        demo,
+        demo_meta,
+        has_demo,
+        score: format!("{:.1} POINTS", candidate.overall_score),
+        score_meta,
         summary,
-        kills: if kill_lines.is_empty() {
-            "No parsed kill events are attached to this bookmarked candidate.".into()
-        } else {
-            kill_lines.join("\n")
-        },
+        has_summary: true,
+        kills: kill_lines.join("\n"),
+        has_kills: !kill_lines.is_empty(),
+        has_score_breakdown: !score_breakdown.is_empty(),
         score_breakdown,
-        tags: if candidate.tags.is_empty() {
-            "No frag tags were assigned.".into()
-        } else {
-            candidate
-                .tags
-                .iter()
-                .map(|tag| friendly_tag(tag))
-                .collect::<Vec<_>>()
-                .join("  •  ")
-        },
+        has_tags: !tags.is_empty(),
+        tags,
     }
 }
 
@@ -634,11 +732,57 @@ fn filter_dropdown_width(values: &BTreeSet<String>, minimum: i32, supporting_tex
 fn candidate_tags_width(rows: &[CandidateRow]) -> i32 {
     let longest = rows
         .iter()
-        .map(|row| row.tags.as_str().chars().count())
+        .map(|row| row.tag_width)
         .max()
         .unwrap_or_default();
-    let estimated = longest.saturating_mul(8).saturating_add(24);
-    160.max(estimated.min(i32::MAX as usize) as i32)
+    160.max(longest)
+}
+
+fn candidate_tag_groups(candidate: &Candidate) -> Vec<CandidateTagGroup> {
+    let mut groups: Vec<(String, String)> = candidate
+        .tick_tags
+        .iter()
+        .filter(|group| !group.tags.is_empty())
+        .map(|group| {
+            (
+                format!("TICK {}:", group.demo_tick),
+                group.tags.iter().map(|tag| friendly_tag(tag)).collect::<Vec<_>>().join(", "),
+            )
+        })
+        .collect();
+
+    if !candidate.sequence_tags.is_empty() {
+        groups.push((
+            "WHOLE CANDIDATE:".into(),
+            candidate.sequence_tags.iter().map(|tag| friendly_tag(tag)).collect::<Vec<_>>().join(", "),
+        ));
+    }
+
+    // Older exports do not contain per-tick associations. Keep them readable
+    // as one neutral group instead of inventing associations that do not exist.
+    if groups.is_empty() && !candidate.tags.is_empty() {
+        let label = if candidate.point_of_kill_ticks.len() == 1 {
+            format!("TICK {}:", candidate.point_of_kill_ticks[0])
+        } else {
+            "LEGACY CANDIDATE:".into()
+        };
+        groups.push((label, candidate.tags.iter().map(|tag| friendly_tag(tag)).collect::<Vec<_>>().join(", ")));
+    }
+
+    let group_count = groups.len();
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, tags))| CandidateTagGroup {
+            // A conservative pixel estimate preserves the one-line horizontal
+            // scrolling behaviour used by the rest of the candidate table.
+            width: ((label.chars().count() + tags.chars().count()) * 7 + 16).min(i32::MAX as usize) as i32,
+            label: label.into(),
+            tags: tags.into(),
+            highlighted: index % 2 == 0,
+            has_separator: index + 1 < group_count,
+        })
+        .collect()
 }
 
 fn selectable_options(
@@ -862,6 +1006,20 @@ fn main() -> Result<()> {
     ui.set_disable_announcer(settings.disable_announcer_voices);
     ui.set_disable_applause(settings.disable_applause_sounds);
     ui.set_disable_domination(settings.disable_domination_sounds);
+    ui.set_mirv_advance_time(settings.mirv_shortcuts.advance_time.clone().into());
+    ui.set_mirv_toggle_hud(settings.mirv_shortcuts.toggle_hud.clone().into());
+    ui.set_mirv_show_help(settings.mirv_shortcuts.show_help.clone().into());
+    ui.set_mirv_back_one_second(settings.mirv_shortcuts.back_one_second.clone().into());
+    ui.set_mirv_safe_restart(settings.mirv_shortcuts.safe_restart.clone().into());
+    ui.set_mirv_next_kill_tick(settings.mirv_shortcuts.next_kill_tick.clone().into());
+    ui.set_mirv_pause_resume(settings.mirv_shortcuts.pause_resume.clone().into());
+    ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
+    ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
+    ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
+    ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
+    ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
+    ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
     ui.set_custom_resources(
         settings
             .custom_resources
@@ -1308,11 +1466,10 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                         let mut state = state_for_thread.lock();
                         let recorded = candidates.iter().map(|candidate| state.recording_index.is_recorded_indexed(candidate)).collect::<Vec<_>>();
                         let filters = CandidateUiFilters::default();
-                        let (visible, rows) = build_candidate_rows(&candidates, &recorded, &selected, &filters, 0);
                         state.export_root = Some(root.clone());
                         state.selected = selected;
                         state.recorded = recorded;
-                        state.visible = visible;
+                        state.visible.clear();
                         state.candidates = candidates;
                         state.candidate_filters = filters;
                         drop(state);
@@ -1320,17 +1477,15 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                         let weak = weak_for_thread.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
-                                let count = rows.len();
-                                ui.set_candidate_summary(format!("{count} of {count} ranked candidates").into());
-                                ui.set_candidate_tags_width(candidate_tags_width(&rows));
-                                ui.set_candidate_rows(ModelRc::new(VecModel::from(rows)));
-                                ui.set_selected_count(0);
-                                ui.set_all_visible_selected(false);
+                                // CandidateRow contains a nested Slint model for
+                                // the styled tag groups, so rows must be created
+                                // on the UI thread rather than moved through the
+                                // Send-only event-loop closure.
+                                refresh_candidates(&ui, &state, "", 0);
                                 {
                                     let current = state.lock();
                                     sync_candidate_filter_controls(&ui, &current);
                                 }
-                                update_recording_estimate(&ui, &state);
                                 ui.set_has_export(true);
                                 ui.set_selected_page(1);
                             }
@@ -1383,33 +1538,27 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 let recorded = candidates.iter().map(|candidate| index.is_recorded_indexed(candidate)).collect::<Vec<_>>();
                 let selected = vec![false; candidates.len()];
                 let filters = CandidateUiFilters::default();
-                let (visible, rows) = build_candidate_rows(&candidates, &recorded, &selected, &filters, 0);
-                (candidates, recorded, selected, visible, rows, filters)
+                (candidates, recorded, selected, filters)
             });
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak_for_thread.upgrade() else { return };
                 match result {
-                    Ok((candidates, recorded, selected, visible, rows, filters)) => {
+                    Ok((candidates, recorded, selected, filters)) => {
                         let count = candidates.len();
                         {
                             let mut state = state_for_thread.lock();
                             state.export_root = Some(root.clone());
                             state.selected = selected;
                             state.recorded = recorded;
-                            state.visible = visible;
+                            state.visible.clear();
                             state.candidates = candidates;
                             state.candidate_filters = filters;
                         }
-                        ui.set_candidate_summary(format!("{count} of {count} ranked candidates").into());
-                        ui.set_candidate_tags_width(candidate_tags_width(&rows));
-                        ui.set_candidate_rows(ModelRc::new(VecModel::from(rows)));
-                        ui.set_selected_count(0);
-                        ui.set_all_visible_selected(false);
+                        refresh_candidates(&ui, &state_for_thread, "", 0);
                         {
                             let current = state_for_thread.lock();
                             sync_candidate_filter_controls(&ui, &current);
                         }
-                        update_recording_estimate(&ui, &state_for_thread);
                         ui.set_has_export(true);
                         ui.set_selected_page(1);
                         ui.set_busy(false);
@@ -1676,6 +1825,144 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 .into(),
         );
     });
+
+    let weak = ui.as_weak();
+    let state_for_manual_hlae = state.clone();
+    ui.on_launch_manual_hlae(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let (candidate, mut settings) = {
+            let state = state_for_manual_hlae.lock();
+            if state.recording_active || state.recovery_active {
+                ui.set_status_text("Wait for the active recording or recovery process to finish".into());
+                return;
+            }
+            let selected = selected_candidates(&state)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            if selected.len() != 1 {
+                ui.set_status_text("Select exactly one candidate for manual HLAE playback".into());
+                return;
+            }
+            (selected[0].clone(), state.settings.clone())
+        };
+        sync_settings_from_ui(&ui, &mut settings);
+        if !settings.tf2_executable.is_file() {
+            settings.tf2_executable =
+                discover_tf2_executable(&[PathBuf::from(&candidate.source_demo)])
+                    .unwrap_or_default();
+        }
+        if !settings.hlae_executable.is_file() {
+            settings.hlae_executable = discover_named_executable("HLAE.exe").unwrap_or_default();
+        }
+        if !settings.ffmpeg_executable.is_file() {
+            settings.ffmpeg_executable = discover_named_executable(if cfg!(target_os = "windows") {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            })
+            .unwrap_or_default();
+        }
+        for (kind, title, required) in [
+            ("tf2", "Select the Team Fortress 2 Executable", true),
+            ("hlae", "Select the HLAE Executable", true),
+            (
+                "ffmpeg",
+                "Select the FFmpeg Executable",
+                !settings.recording_format.contains("Image"),
+            ),
+        ] {
+            let current = match kind {
+                "tf2" => &settings.tf2_executable,
+                "hlae" => &settings.hlae_executable,
+                _ => &settings.ffmpeg_executable,
+            };
+            if !required || current.is_file() {
+                continue;
+            }
+            let Some(path) = rfd::FileDialog::new().set_title(title).pick_file() else {
+                ui.set_status_text(format!("Manual HLAE launch cancelled; {title} was not selected").into());
+                return;
+            };
+            match kind {
+                "tf2" => {
+                    settings.tf2_executable = path.clone();
+                    ui.set_tf2_path(path.display().to_string().into());
+                }
+                "hlae" => {
+                    settings.hlae_executable = path.clone();
+                    ui.set_hlae_path(path.display().to_string().into());
+                }
+                _ => {
+                    settings.ffmpeg_executable = path.clone();
+                    ui.set_ffmpeg_path(path.display().to_string().into());
+                }
+            }
+        }
+        {
+            let mut state = state_for_manual_hlae.lock();
+            state.settings = settings.clone();
+            state.recording_active = true;
+            let _ = state.settings.save();
+        }
+        set_background_process(&ui, "PREPARING MANUAL HLAE", true);
+        let progress_weak = weak.clone();
+        let progress_state = state_for_manual_hlae.clone();
+        let progress: RecordingProgressSink = Arc::new(move |event| {
+            let weak = progress_weak.clone();
+            let state = progress_state.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                match event {
+                    RecordingProgress::Status(message) => {
+                        set_background_process(&ui, "MANUAL HLAE ACTIVE", true);
+                        ui.set_status_text(message.into());
+                    }
+                    RecordingProgress::ManualFinished { output_path, session } => {
+                        {
+                            let mut current = state.lock();
+                            current.recording_active = false;
+                            current.last_recording_session = session.clone();
+                        }
+                        let status = match session {
+                            Some(session) => format!("Manual HLAE closed, but restoration needs attention. Logs: {}", session.display()),
+                            None => format!("Manual HLAE closed; TF2 settings restored. Capture folder: {}", output_path.display()),
+                        };
+                        ui.set_status_text(status.into());
+                        set_background_process(&ui, "READY", false);
+                    }
+                    RecordingProgress::ClipStarted { .. }
+                    | RecordingProgress::ClipCompleted { .. }
+                    | RecordingProgress::Finished { .. } => {}
+                }
+            });
+        });
+        match launch_manual_hlae_candidate(&candidate, &settings, Some(progress)) {
+            Ok(launch) => {
+                state_for_manual_hlae.lock().last_recording_session = Some(launch.session.clone());
+                ui.set_status_text(
+                    format!(
+                        "Manual HLAE launched and paused at tick {}. 3 start, 4 kills, 6 camera, 7 keyframe, 9/0 record. Output: {}",
+                        launch.target_tick,
+                        launch.output_path.display()
+                    )
+                    .into(),
+                );
+            }
+            Err(error) => {
+                state_for_manual_hlae.lock().recording_active = false;
+                set_background_process(&ui, "READY", false);
+                let message = format!("Manual HLAE could not start:\n\n{error:#}");
+                rfd::MessageDialog::new()
+                    .set_title("Manual HLAE Launch Failed")
+                    .set_description(&message)
+                    .set_level(rfd::MessageLevel::Error)
+                    .show();
+                ui.set_status_text(message.into());
+            }
+        }
+    });
+
     let weak = ui.as_weak();
     let state_for_record = state.clone();
     ui.on_record_selected(move || {
@@ -1823,6 +2110,19 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                         ui.set_status_text(status.into());
                         set_background_process(&ui, "READY", false);
                     }
+                    RecordingProgress::ManualFinished { output_path, session } => {
+                        {
+                            let mut current = state.lock();
+                            current.recording_active = false;
+                            current.last_recording_session = session.clone();
+                        }
+                        let status = match session {
+                            Some(session) => format!("Manual HLAE session closed, but TF2 settings restoration needs attention. Logs: {}", session.display()),
+                            None => format!("Manual HLAE session closed and TF2 settings were restored. Capture folder: {}", output_path.display()),
+                        };
+                        ui.set_status_text(status.into());
+                        set_background_process(&ui, "READY", false);
+                    }
                 }
             });
         });
@@ -1834,7 +2134,7 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
             Err(error) => {
                 state_for_record.lock().recording_active = false;
                 set_background_process(&ui, "READY", false);
-                let message = format!("HLAE recording could not start:\n\n{error}");
+                let message = format!("HLAE recording could not start:\n\n{error:#}");
                 rfd::MessageDialog::new()
                     .set_title("HLAE Launch Failed")
                     .set_description(&message)
@@ -1858,14 +2158,23 @@ fn bind_candidate_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
         let details = candidate_detail_text(selected[0]);
         ui.set_candidate_detail_player(details.player.into());
         ui.set_candidate_detail_player_meta(details.player_meta.into());
+        ui.set_candidate_detail_has_player(details.has_player);
         ui.set_candidate_detail_map(details.map.into());
         ui.set_candidate_detail_map_meta(details.map_meta.into());
+        ui.set_candidate_detail_has_map(details.has_map);
+        ui.set_candidate_detail_demo(details.demo.into());
+        ui.set_candidate_detail_demo_meta(details.demo_meta.into());
+        ui.set_candidate_detail_has_demo(details.has_demo);
         ui.set_candidate_detail_score(details.score.into());
         ui.set_candidate_detail_score_meta(details.score_meta.into());
         ui.set_candidate_detail_summary(details.summary.into());
+        ui.set_candidate_detail_has_summary(details.has_summary);
         ui.set_candidate_detail_kills(details.kills.into());
+        ui.set_candidate_detail_has_kills(details.has_kills);
         ui.set_candidate_detail_score_breakdown(details.score_breakdown.into());
+        ui.set_candidate_detail_has_score_breakdown(details.has_score_breakdown);
         ui.set_candidate_detail_tags(details.tags.into());
+        ui.set_candidate_detail_has_tags(details.has_tags);
         ui.set_selected_page(4);
     });
 
@@ -2091,6 +2400,8 @@ fn build_candidate_rows(
             continue;
         }
         visible.push(index);
+        let tag_groups = candidate_tag_groups(candidate);
+        let tag_width = tag_groups.iter().map(|group| group.width + if group.has_separator { 18 } else { 0 }).sum();
         rows.push(CandidateRow {
             rank: (index + 1) as i32,
             score: format!("{:.1}", candidate.overall_score).into(),
@@ -2114,7 +2425,9 @@ fn build_candidate_rows(
                 .collect::<Vec<_>>()
                 .join(", ")
                 .into(),
-            tags: candidate.tags.join(", ").into(),
+            tags: candidate_tag_text(candidate, false, false).into(),
+            tag_width,
+            tag_groups: ModelRc::new(VecModel::from(tag_groups)),
             selected: selected.get(index).copied().unwrap_or(false),
         });
     }
@@ -2254,6 +2567,20 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.disable_announcer_voices = ui.get_disable_announcer();
     settings.disable_applause_sounds = ui.get_disable_applause();
     settings.disable_domination_sounds = ui.get_disable_domination();
+    settings.mirv_shortcuts.advance_time = ui.get_mirv_advance_time().to_string();
+    settings.mirv_shortcuts.toggle_hud = ui.get_mirv_toggle_hud().to_string();
+    settings.mirv_shortcuts.show_help = ui.get_mirv_show_help().to_string();
+    settings.mirv_shortcuts.back_one_second = ui.get_mirv_back_one_second().to_string();
+    settings.mirv_shortcuts.safe_restart = ui.get_mirv_safe_restart().to_string();
+    settings.mirv_shortcuts.next_kill_tick = ui.get_mirv_next_kill_tick().to_string();
+    settings.mirv_shortcuts.pause_resume = ui.get_mirv_pause_resume().to_string();
+    settings.mirv_shortcuts.enter_camera = ui.get_mirv_enter_camera().to_string();
+    settings.mirv_shortcuts.add_keyframe = ui.get_mirv_add_keyframe().to_string();
+    settings.mirv_shortcuts.play_campath = ui.get_mirv_play_campath().to_string();
+    settings.mirv_shortcuts.start_recording = ui.get_mirv_start_recording().to_string();
+    settings.mirv_shortcuts.stop_recording = ui.get_mirv_stop_recording().to_string();
+    settings.mirv_shortcuts.print_keyframes = ui.get_mirv_print_keyframes().to_string();
+    settings.mirv_shortcuts.save_campath = ui.get_mirv_save_campath().to_string();
     settings.custom_resources = split_paths(&ui.get_custom_resources().to_string());
     settings.normalize_encoding_options();
     settings.normalize_recording_options();
@@ -2270,6 +2597,20 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_skybox(settings.skybox.clone().into());
     ui.set_hud(settings.hud.clone().into());
     ui.set_viewmodels(settings.viewmodels.clone().into());
+    ui.set_mirv_advance_time(settings.mirv_shortcuts.advance_time.clone().into());
+    ui.set_mirv_toggle_hud(settings.mirv_shortcuts.toggle_hud.clone().into());
+    ui.set_mirv_show_help(settings.mirv_shortcuts.show_help.clone().into());
+    ui.set_mirv_back_one_second(settings.mirv_shortcuts.back_one_second.clone().into());
+    ui.set_mirv_safe_restart(settings.mirv_shortcuts.safe_restart.clone().into());
+    ui.set_mirv_next_kill_tick(settings.mirv_shortcuts.next_kill_tick.clone().into());
+    ui.set_mirv_pause_resume(settings.mirv_shortcuts.pause_resume.clone().into());
+    ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
+    ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
+    ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
+    ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
+    ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
+    ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
     ui.set_recording_settings_syncing(false);
 }
 
@@ -2283,9 +2624,25 @@ fn persist_recording_settings(ui: &AppWindow, state: &Arc<Mutex<State>>, report_
     };
 
     apply_normalized_recording_settings(ui, &normalized);
+    let save_generation = if ui.get_recording_save_generation() == i32::MAX {
+        1
+    } else {
+        ui.get_recording_save_generation() + 1
+    };
+    ui.set_recording_save_generation(save_generation);
     match save_result {
         Ok(()) => {
             ui.set_recording_save_status("SETTINGS SAVED".into());
+            let weak = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_secs(2), move || {
+                if let Some(ui) = weak.upgrade() {
+                    if ui.get_recording_save_generation() == save_generation
+                        && ui.get_recording_save_status().to_string() == "SETTINGS SAVED"
+                    {
+                        ui.set_recording_save_status("".into());
+                    }
+                }
+            });
             if report_manual_save {
                 ui.set_status_text("Settings saved".into());
             }
@@ -2462,4 +2819,61 @@ fn open_path(path: &Path) -> Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     Command::new("xdg-open").arg(path).spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn kill_details_name_the_source_demo_victims_and_tick_tag_groups() {
+        let candidate = Candidate {
+            source_demo: "C:/TF2/demos/example_match.dem".into(),
+            map_name: "koth_product_final".into(),
+            attacker_user_id: 42,
+            attacker_class: "demoman".into(),
+            attacker_team: "blu".into(),
+            tags: vec!["confirmed_airshot".into(), "multi_kill".into()],
+            tick_tags: vec![crate::models::TickTagGroup {
+                demo_tick: 4_200,
+                server_ticks: vec![8_400],
+                tags: vec!["confirmed_airshot".into()],
+            }],
+            sequence_tags: vec!["multi_kill".into()],
+            kills: vec![json!({
+                "demo_tick": 4200,
+                "victim_user_id": 9,
+                "victim_name": "Victim",
+                "victim_class": "soldier",
+                "weapon": "grenadelauncher"
+            })],
+            metrics: json!({"kills":1}),
+            ..Candidate::default()
+        };
+
+        let details = candidate_detail_text(&candidate);
+        assert!(details.has_demo);
+        assert_eq!(details.demo, "example_match.dem");
+        assert!(details.has_kills);
+        assert!(details.kills.contains("Victim (Soldier)"));
+        assert!(details.tags.contains("Tick 4200"));
+        assert!(details.tags.contains("Whole candidate"));
+    }
+
+    #[test]
+    fn non_kill_details_do_not_render_empty_kill_or_player_sections() {
+        let candidate = Candidate {
+            source_demo: "C:/TF2/demos/marker.dem".into(),
+            bookmark_comment: "watch this setup".into(),
+            ..Candidate::default()
+        };
+        let details = candidate_detail_text(&candidate);
+        assert!(details.has_demo);
+        assert!(!details.has_player);
+        assert!(!details.has_kills);
+        assert!(!details.has_score_breakdown);
+        assert!(!details.has_tags);
+        assert!(details.summary.contains("watch this setup"));
+    }
 }

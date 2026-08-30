@@ -1182,6 +1182,7 @@ pub fn launch_manual_hlae_candidate(
     let output_path = settings
         .recording_output_directory
         .join("Manual HLAE")
+        .join(candidate_output_category(candidate))
         .join(format!(
             "{demo_stem}__{candidate_name}__t{target_tick}-{end_tick}__{}",
             Utc::now().format("%Y%m%d_%H%M%S")
@@ -3077,8 +3078,10 @@ fn prepare_recording_clips(
             "{demo_name}__{candidate_name}__t{start_tick}-{end_tick}__k{}",
             recording_key_token(&recording_key)
         );
+        let output_category = candidate_output_category(candidate);
         let recording_identifier = unique_recording_identifier(
             &settings.recording_output_directory,
+            &output_category,
             &base_identifier,
             encoded,
             extension,
@@ -3097,6 +3100,7 @@ fn prepare_recording_clips(
             let final_path = settings
                 .recording_output_directory
                 .join("Videos")
+                .join(&output_category)
                 .join(format!("{recording_identifier}.{extension}"));
             fs::create_dir_all(&working)?;
             (Some(working), final_path, None, None)
@@ -3131,6 +3135,7 @@ fn prepare_recording_clips(
 
 fn unique_recording_identifier(
     root: &Path,
+    output_category: &str,
     base: &str,
     encoded: bool,
     extension: &str,
@@ -3143,7 +3148,9 @@ fn unique_recording_identifier(
             format!("{base}_{suffix}")
         };
         let final_path = if encoded {
-            root.join("Videos").join(format!("{candidate}.{extension}"))
+            root.join("Videos")
+                .join(output_category)
+                .join(format!("{candidate}.{extension}"))
         } else {
             root.join("Image Sequences").join(&candidate)
         };
@@ -3774,10 +3781,21 @@ fn remove_replaced_recording_output(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
+    let parent = path.parent().map(Path::to_path_buf);
     if path.is_dir() {
         fs::remove_dir_all(path)?;
     } else {
         fs::remove_file(path)?;
+    }
+    if let Some(parent) = parent.filter(|parent| {
+        !parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "Videos" | "Image Sequences"))
+    }) {
+        if parent.is_dir() && fs::read_dir(&parent)?.next().is_none() {
+            fs::remove_dir(parent)?;
+        }
     }
     Ok(true)
 }
@@ -4129,6 +4147,42 @@ fn sanitize(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn candidate_output_category(candidate: &Candidate) -> String {
+    let tag = candidate.inferred_primary_tag();
+    let words = tag
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut characters = word.chars();
+            match characters.next() {
+                Some(first) => format!(
+                    "{}{}",
+                    first.to_ascii_uppercase(),
+                    characters.as_str().to_ascii_lowercase()
+                ),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let safe = words
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let safe = safe.trim().trim_end_matches(['.', ' ']);
+    if safe.is_empty() {
+        "Other".into()
+    } else {
+        safe.into()
+    }
 }
 
 fn recording_profile_cfg(settings: &AppSettings) -> String {
@@ -4586,11 +4640,15 @@ fn recording_output_name(path: &Path) -> String {
 fn final_recording_outputs(root: &Path) -> Vec<PathBuf> {
     let mut outputs = Vec::new();
     let videos = root.join("Videos");
-    if let Ok(entries) = fs::read_dir(videos) {
+    if videos.is_dir() {
         outputs.extend(
-            entries
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|path| output_still_exists(path)),
+            WalkDir::new(&videos)
+                .min_depth(1)
+                .max_depth(2)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.into_path())
+                .filter(|path| path.is_file() && output_still_exists(path)),
         );
     }
     let sequences = root.join("Image Sequences");
@@ -5113,6 +5171,30 @@ mod recording_tests {
     }
 
     #[test]
+    fn primary_tag_creates_a_readable_output_category() {
+        let candidate = Candidate {
+            tags: vec!["confirmed_airshot".into()],
+            primary_tag: "confirmed_airshot".into(),
+            ..Candidate::default()
+        };
+        assert_eq!(candidate_output_category(&candidate), "Confirmed Airshot");
+    }
+
+    #[test]
+    fn categorized_videos_are_found_during_recording_reconciliation() {
+        let root = recovery_test_root("categorized-output");
+        let video = root
+            .join("Videos")
+            .join("Confirmed Airshot")
+            .join("clip.mp4");
+        fs::create_dir_all(video.parent().unwrap()).expect("create category folder");
+        fs::write(&video, b"video").expect("write categorized video");
+
+        assert_eq!(final_recording_outputs(&root), vec![video]);
+        fs::remove_dir_all(root).expect("remove categorized output root");
+    }
+
+    #[test]
     fn recovery_discovery_is_bounded_and_skips_disabled_sessions() {
         let root = recovery_test_root("discovery");
         for index in 0..5 {
@@ -5301,12 +5383,12 @@ mod recording_tests {
         let base = "demo__candidate__t900-1200__k1234567890abcdef";
         let mut reserved = HashSet::new();
 
-        let first = unique_recording_identifier(&root, base, true, "mp4", &reserved);
+        let first = unique_recording_identifier(&root, "Confirmed Airshot", base, true, "mp4", &reserved);
         assert_eq!(first, base);
         assert!(!first.contains("__cam"));
 
         reserved.insert(first);
-        let second = unique_recording_identifier(&root, base, true, "mp4", &reserved);
+        let second = unique_recording_identifier(&root, "Confirmed Airshot", base, true, "mp4", &reserved);
         assert_eq!(second, format!("{base}_2"));
     }
 

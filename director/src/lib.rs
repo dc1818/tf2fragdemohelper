@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 pub const DIRECTOR_SESSION_SCHEMA: u32 = 3;
 pub const DIRECTOR_TICK_MARKER_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK";
+pub const DIRECTOR_TICK_OFFSET_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK_OFFSET";
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct DirectorSession {

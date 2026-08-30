@@ -195,6 +195,7 @@ export component DirectorCardWindow inherits Window {
     in property <string> next-frag-victims;
     in property <string> next-frag-tags;
     in property <string> panel-toggle-key;
+    in property <string> draw-campath-key;
     in property <string> record-order;
     in property <[ShortcutRow]> shortcuts;
     callback hide-requested();
@@ -235,6 +236,28 @@ export component DirectorCardWindow inherits Window {
                         Text { text: root.next-frag-tick > 0 ? "TICK  " + root.next-frag-tick : "OUTRO"; color: Colors.cream; font-family: "TF2 Build"; font-size: 12px; }
                         Caption { text: root.next-frag-victims == "" ? "VICTIM: UNKNOWN" : "VICTIM: " + root.next-frag-victims; color: Colors.cream; overflow: elide; }
                         Caption { text: root.next-frag-tags == "" ? "TAGS: NONE" : "TAGS: " + root.next-frag-tags; color: Colors.cream; wrap: word-wrap; }
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 44px;
+                background: Colors.panel-alt;
+                border-width: 1px;
+                border-color: #343633;
+                HorizontalLayout {
+                    padding-left: 9px;
+                    padding-right: 9px;
+                    spacing: 9px;
+                    Rectangle {
+                        width: 42px;
+                        background: Colors.blue;
+                        Text { text: root.draw-campath-key; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: "DRAW CAMPATH"; color: Colors.cream; font-family: "TF2 Build"; font-size: 11px; }
+                        Caption { text: "mirv_campath draw enabled 1"; color: Colors.blue-text; font-size: 10px; }
                     }
                 }
             }

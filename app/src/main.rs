@@ -1016,10 +1016,14 @@ fn main() -> Result<()> {
     ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
     ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
     ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_draw_campath(settings.mirv_shortcuts.draw_campath.clone().into());
     ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
     ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
     ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
     ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
+    ui.set_mirv_overlay_panel_toggle(
+        settings.mirv_shortcuts.overlay_panel_toggle.clone().into(),
+    );
     ui.set_custom_resources(
         settings
             .custom_resources
@@ -2577,6 +2581,7 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.mirv_shortcuts.enter_camera = ui.get_mirv_enter_camera().to_string();
     settings.mirv_shortcuts.add_keyframe = ui.get_mirv_add_keyframe().to_string();
     settings.mirv_shortcuts.play_campath = ui.get_mirv_play_campath().to_string();
+    settings.mirv_shortcuts.draw_campath = ui.get_mirv_draw_campath().to_string();
     settings.mirv_shortcuts.start_recording = ui.get_mirv_start_recording().to_string();
     settings.mirv_shortcuts.stop_recording = ui.get_mirv_stop_recording().to_string();
     settings.mirv_shortcuts.print_keyframes = ui.get_mirv_print_keyframes().to_string();
@@ -2609,6 +2614,7 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
     ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
     ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_draw_campath(settings.mirv_shortcuts.draw_campath.clone().into());
     ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
     ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
     ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());

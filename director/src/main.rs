@@ -12,7 +12,9 @@ use std::{
     rc::Rc,
     time::Duration,
 };
-use tf2_mirv_director::{DirectorControl, DirectorSession};
+use tf2_mirv_director::{
+    DirectorControl, DirectorSession, DIRECTOR_TICK_OFFSET_PREFIX,
+};
 
 slint::include_modules!();
 
@@ -44,11 +46,13 @@ fn main() -> Result<()> {
             .unwrap_or(fallback)
             .to_owned()
     };
-    let panel_toggle_key = shortcut_key("overlay_panel_toggle", "S");
+    let panel_toggle_key = shortcut_key("overlay_panel_toggle", "C");
+    let draw_campath_key = shortcut_key("draw_campath", "/");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
+    card.set_draw_campath_key(draw_campath_key.into());
     card.set_record_order(
         format!(
             "{} RESUME  →  {} START  →  {} STOP",
@@ -162,13 +166,14 @@ fn main() -> Result<()> {
         let mut reported_no_tick = false;
         let mut reported_first_tick = false;
         let mut reported_error = false;
+        let mut last_tick = session.start_tick;
         telemetry_timer.start(TimerMode::Repeated, Duration::from_millis(15), move || {
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
             polls = polls.saturating_add(1);
             match tail.poll(&session.telemetry_marker_prefix) {
-                Ok(tick) => {
+                Ok(updates) => {
                     if tail.is_open() && !reported_log_open {
                         reported_log_open = true;
                         reported_missing_log = false;
@@ -177,16 +182,31 @@ fn main() -> Result<()> {
                             "status=TF2_CONSOLE_LOG_OPENED",
                         );
                     }
-                    if let Some(tick) = tick {
+                    if !updates.is_empty() {
+                        for update in updates {
+                            last_tick = match update {
+                                TickUpdate::Absolute(tick) => tick,
+                                TickUpdate::Relative(delta) => {
+                                    let tick = last_tick.saturating_add(delta).max(0);
+                                    append_telemetry_diagnostic(
+                                        &telemetry_diagnostic,
+                                        &format!(
+                                            "status=BACKWARD_SEEK_RESYNC delta={delta} tick={tick}"
+                                        ),
+                                    );
+                                    tick
+                                }
+                            };
+                        }
                         if !reported_first_tick {
                             reported_first_tick = true;
                             append_telemetry_diagnostic(
                                 &telemetry_diagnostic,
-                                &format!("status=FIRST_TICK_RECEIVED tick={tick}"),
+                                &format!("status=FIRST_TICK_RECEIVED tick={last_tick}"),
                             );
                         }
                         strip.set_telemetry_status("LIVE".into());
-                        update_playback_state(&strip, &card, &session, tick, true);
+                        update_playback_state(&strip, &card, &session, last_tick, true);
                     } else if polls >= 200 && !reported_first_tick {
                         if tail.is_open() {
                             strip.set_telemetry_status("NO TICK".into());
@@ -442,11 +462,11 @@ impl TickLogTail {
         self.file.is_some()
     }
 
-    fn poll(&mut self, prefix: &str) -> std::io::Result<Option<i64>> {
+    fn poll(&mut self, prefix: &str) -> std::io::Result<Vec<TickUpdate>> {
         if self.file.is_none() {
             match File::open(&self.path) {
                 Ok(file) => self.file = Some(file),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(error) => return Err(error),
             }
         }
@@ -461,7 +481,7 @@ impl TickLogTail {
         file.read_to_end(&mut bytes)?;
         self.offset += bytes.len() as u64;
         if bytes.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
         let mut text = std::mem::take(&mut self.carry);
@@ -471,9 +491,28 @@ impl TickLogTail {
         self.carry = remainder.to_owned();
         Ok(complete
             .lines()
-            .filter_map(|line| parse_tick_marker(line, prefix))
-            .last())
+            .filter_map(|line| parse_tick_update(line, prefix))
+            .collect())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TickUpdate {
+    Absolute(i64),
+    Relative(i64),
+}
+
+fn parse_tick_update(line: &str, prefix: &str) -> Option<TickUpdate> {
+    if let Some(tick) = parse_tick_marker(line, prefix) {
+        return Some(TickUpdate::Absolute(tick));
+    }
+    let marker = line.rfind(DIRECTOR_TICK_OFFSET_PREFIX)?;
+    let delta = line[marker + DIRECTOR_TICK_OFFSET_PREFIX.len()..]
+        .split_whitespace()
+        .next()?
+        .parse::<i64>()
+        .ok()?;
+    Some(TickUpdate::Relative(delta))
 }
 
 fn parse_tick_marker(line: &str, prefix: &str) -> Option<i64> {
@@ -583,11 +622,25 @@ mod tests {
             Some(88_476)
         );
         assert_eq!(parse_tick_marker("unrelated", "TF2FRAG_DIRECTOR_TICK"), None);
+        assert_eq!(
+            parse_tick_update(
+                "TF2FRAG_DIRECTOR_TICK_OFFSET -67",
+                "TF2FRAG_DIRECTOR_TICK"
+            ),
+            Some(TickUpdate::Relative(-67))
+        );
+        assert_eq!(
+            parse_tick_update(
+                "TF2FRAG_DIRECTOR_TICK 12000",
+                "TF2FRAG_DIRECTOR_TICK"
+            ),
+            Some(TickUpdate::Absolute(12_000))
+        );
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn maps_default_overlay_hotkey() {
-        assert_eq!(virtual_key_code("S"), Some(0x53));
+        assert_eq!(virtual_key_code("C"), Some(0x43));
     }
 }

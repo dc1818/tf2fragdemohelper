@@ -296,6 +296,7 @@ pub struct MirvShortcuts {
     pub enter_camera: String,
     pub add_keyframe: String,
     pub play_campath: String,
+    pub draw_campath: String,
     pub start_recording: String,
     pub stop_recording: String,
     pub print_keyframes: String,
@@ -318,12 +319,13 @@ impl Default for MirvShortcuts {
             enter_camera: "6".into(),
             add_keyframe: "7".into(),
             play_campath: "8".into(),
+            draw_campath: "/".into(),
             start_recording: "9".into(),
             stop_recording: "0".into(),
             print_keyframes: "-".into(),
             save_campath: "=".into(),
-            overlay_panel_toggle: "S".into(),
-            overlay_panel_toggle_default_version: 2,
+            overlay_panel_toggle: "C".into(),
+            overlay_panel_toggle_default_version: 3,
         }
     }
 }
@@ -361,19 +363,24 @@ impl MirvShortcuts {
     }
 
     pub fn normalize(&mut self) {
-        // HOME and then Y were short-lived overlay defaults. Migrate only the
+        // HOME, Y, and S were short-lived overlay defaults. Migrate only the
         // matching default at each version so a deliberately customized key is
-        // preserved, and never re-migrate after the S default is recorded.
+        // preserved, and never re-migrate after the C default is recorded.
         if self.overlay_panel_toggle_default_version == 0 {
             if self.overlay_panel_toggle.eq_ignore_ascii_case("HOME") {
-                self.overlay_panel_toggle = "S".into();
+                self.overlay_panel_toggle = "C".into();
             }
-            self.overlay_panel_toggle_default_version = 2;
+            self.overlay_panel_toggle_default_version = 3;
         } else if self.overlay_panel_toggle_default_version == 1 {
             if self.overlay_panel_toggle.eq_ignore_ascii_case("Y") {
-                self.overlay_panel_toggle = "S".into();
+                self.overlay_panel_toggle = "C".into();
             }
-            self.overlay_panel_toggle_default_version = 2;
+            self.overlay_panel_toggle_default_version = 3;
+        } else if self.overlay_panel_toggle_default_version == 2 {
+            if self.overlay_panel_toggle.eq_ignore_ascii_case("S") {
+                self.overlay_panel_toggle = "C".into();
+            }
+            self.overlay_panel_toggle_default_version = 3;
         }
         let defaults = Self::default();
         self.advance_time = Self::normalized_key(&self.advance_time, &defaults.advance_time);
@@ -386,6 +393,7 @@ impl MirvShortcuts {
         self.enter_camera = Self::normalized_key(&self.enter_camera, &defaults.enter_camera);
         self.add_keyframe = Self::normalized_key(&self.add_keyframe, &defaults.add_keyframe);
         self.play_campath = Self::normalized_key(&self.play_campath, &defaults.play_campath);
+        self.draw_campath = Self::normalized_key(&self.draw_campath, &defaults.draw_campath);
         self.start_recording = Self::normalized_key(&self.start_recording, &defaults.start_recording);
         self.stop_recording = Self::normalized_key(&self.stop_recording, &defaults.stop_recording);
         self.print_keyframes = Self::normalized_key(&self.print_keyframes, &defaults.print_keyframes);
@@ -399,7 +407,8 @@ impl MirvShortcuts {
         let keys = [
             &self.advance_time, &self.toggle_hud, &self.show_help, &self.back_one_second,
             &self.safe_restart, &self.next_kill_tick, &self.pause_resume, &self.enter_camera,
-            &self.add_keyframe, &self.play_campath, &self.start_recording, &self.stop_recording,
+            &self.add_keyframe, &self.play_campath, &self.draw_campath,
+            &self.start_recording, &self.stop_recording,
             &self.print_keyframes, &self.save_campath,
             &self.overlay_panel_toggle,
         ];
@@ -601,19 +610,20 @@ mod settings_tests {
         assert_eq!(shortcuts.toggle_hud, "]");
         assert_eq!(shortcuts.show_help, "1");
         assert_eq!(shortcuts.save_campath, "=");
-        assert_eq!(shortcuts.overlay_panel_toggle, "S");
-        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 2);
+        assert_eq!(shortcuts.draw_campath, "/");
+        assert_eq!(shortcuts.overlay_panel_toggle, "C");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 3);
     }
 
     #[test]
-    fn legacy_overlay_defaults_migrate_once_to_s() {
+    fn legacy_overlay_defaults_migrate_once_to_c() {
         let mut shortcuts: MirvShortcuts = serde_json::from_str(
             r#"{"overlay_panel_toggle":"HOME"}"#,
         )
         .unwrap();
         shortcuts.normalize();
-        assert_eq!(shortcuts.overlay_panel_toggle, "S");
-        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 2);
+        assert_eq!(shortcuts.overlay_panel_toggle, "C");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 3);
 
         shortcuts.overlay_panel_toggle = "HOME".into();
         shortcuts.normalize();
@@ -624,8 +634,16 @@ mod settings_tests {
         )
         .unwrap();
         y_default.normalize();
-        assert_eq!(y_default.overlay_panel_toggle, "S");
-        assert_eq!(y_default.overlay_panel_toggle_default_version, 2);
+        assert_eq!(y_default.overlay_panel_toggle, "C");
+        assert_eq!(y_default.overlay_panel_toggle_default_version, 3);
+
+        let mut s_default: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"S","overlay_panel_toggle_default_version":2}"#,
+        )
+        .unwrap();
+        s_default.normalize();
+        assert_eq!(s_default.overlay_panel_toggle, "C");
+        assert_eq!(s_default.overlay_panel_toggle_default_version, 3);
 
         let mut custom: MirvShortcuts = serde_json::from_str(
             r#"{"overlay_panel_toggle":"Q","overlay_panel_toggle_default_version":1}"#,
@@ -633,7 +651,14 @@ mod settings_tests {
         .unwrap();
         custom.normalize();
         assert_eq!(custom.overlay_panel_toggle, "Q");
-        assert_eq!(custom.overlay_panel_toggle_default_version, 2);
+        assert_eq!(custom.overlay_panel_toggle_default_version, 3);
+
+        let mut current_custom: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"S","overlay_panel_toggle_default_version":3}"#,
+        )
+        .unwrap();
+        current_custom.normalize();
+        assert_eq!(current_custom.overlay_panel_toggle, "S");
     }
 
     #[test]

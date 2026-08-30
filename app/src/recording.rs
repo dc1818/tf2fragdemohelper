@@ -20,7 +20,7 @@ use std::{
 };
 use tf2_mirv_director::{
     DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_SESSION_SCHEMA,
-    DIRECTOR_TICK_MARKER_PREFIX,
+    DIRECTOR_TICK_MARKER_PREFIX, DIRECTOR_TICK_OFFSET_PREFIX,
 };
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -31,6 +31,15 @@ const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
 const RECORDING_FLUSH_TICKS: i64 = 133;
 const VDM_ACTION_GAP_TICKS: i64 = 2;
 const MANUAL_SEEK_STEP_TICKS: i64 = 15_000;
+// TF2 demos normally run at 66.666... ticks per second. The one-second
+// workflow uses the nearest whole demo tick and is corrected by the next live
+// HLAE marker as soon as playback advances.
+const MANUAL_ONE_SECOND_TICKS: i64 = 67;
+// Keep the HLAE curve alive across the full practical Source demo range. A
+// clip-bounded curve cannot report ticks after a backwards seek crosses the
+// selected lead-in or after the staged demo is reloaded.
+const DIRECTOR_TELEMETRY_FIRST_TICK: i64 = 1;
+const DIRECTOR_TELEMETRY_LAST_TICK: i64 = i32::MAX as i64 - 1;
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -1147,11 +1156,12 @@ fn build_director_session(
         ("show_help", &shortcuts.show_help, "Show controls"),
         ("back_one_second", &shortcuts.back_one_second, "Back 1 sec"),
         ("safe_restart", &shortcuts.safe_restart, "Safe clip restart"),
-        ("next_kill_tick", &shortcuts.next_kill_tick, "Next frag tick"),
+        ("next_kill_tick", &shortcuts.next_kill_tick, "Next frag (1 sec early)"),
         ("pause_resume", &shortcuts.pause_resume, "Pause / resume"),
         ("enter_camera", &shortcuts.enter_camera, "MIRV camera"),
         ("add_keyframe", &shortcuts.add_keyframe, "Add keyframe"),
         ("play_campath", &shortcuts.play_campath, "Play campath"),
+        ("draw_campath", &shortcuts.draw_campath, "Show / hide campath"),
         ("start_recording", &shortcuts.start_recording, "Start recording"),
         ("stop_recording", &shortcuts.stop_recording, "Stop recording"),
         ("print_keyframes", &shortcuts.print_keyframes, "Print keyframes"),
@@ -1241,6 +1251,16 @@ fn launch_director_companion(session_path: &Path) -> Result<Option<std::process:
         .spawn()
         .with_context(|| format!("could not launch {}", executable.display()))?;
     Ok(Some(child))
+}
+
+fn close_director_companion(child: &mut Option<std::process::Child>) {
+    let Some(mut director) = child.take() else {
+        return;
+    };
+    if director.try_wait().ok().flatten().is_none() {
+        let _ = director.kill();
+        let _ = director.wait();
+    }
 }
 
 pub fn launch_manual_hlae_candidate(
@@ -1385,7 +1405,6 @@ pub fn launch_manual_hlae_candidate(
             manual_hotkey_cfg(
                 candidate,
                 target_tick,
-                end_tick,
                 &staged_relative,
                 settings,
             ),
@@ -1503,12 +1522,26 @@ pub fn launch_manual_hlae_candidate(
         }
         if tf2_seen {
             let mut absent_confirmations = 0u8;
+            let mut director_closed = false;
             while absent_confirmations < TF2_ABSENT_CONFIRMATIONS {
                 match windows_process_state(&profile.tf_process_name) {
                     Some(true) | None => absent_confirmations = 0,
-                    Some(false) => absent_confirmations += 1,
+                    Some(false) => {
+                        if !director_closed {
+                            close_director_companion(&mut director_child);
+                            director_closed = true;
+                            log_recording_diagnostic(
+                                &monitor_log,
+                                "TF2 closed; the complete Director overlay was closed",
+                            );
+                        }
+                        absent_confirmations += 1;
+                    }
                 }
                 thread::sleep(Duration::from_millis(500));
+            }
+            if !director_closed {
+                close_director_companion(&mut director_child);
             }
         } else {
             log_recording_diagnostic(
@@ -1516,13 +1549,8 @@ pub fn launch_manual_hlae_candidate(
                 "WARNING: TF2 was not observed after the HLAE launch",
             );
         }
+        close_director_companion(&mut director_child);
         wait_for_hlae_shutdown(&mut child, &monitor_log);
-        if let Some(director) = director_child.as_mut() {
-            if director.try_wait().ok().flatten().is_none() {
-                let _ = director.kill();
-                let _ = director.wait();
-            }
-        }
         log_recording_diagnostic(&monitor_log, "TF2 closed; restoring the original TF2 profile");
         let session_for_logs = if let Err(error) = restore_recording_profile(&profile) {
             log_recording_diagnostic(&monitor_log, format!("ERROR: restore failed: {error}"));
@@ -3107,12 +3135,9 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
 fn manual_hotkey_cfg(
     candidate: &Candidate,
     target_tick: i64,
-    end_tick: i64,
     staged_demo: &str,
     settings: &AppSettings,
 ) -> String {
-    let first_live_tick = target_tick.max(0) + 1;
-    let end_tick = end_tick.max(first_live_tick + 1);
     let mut shortcuts = settings.mirv_shortcuts.clone();
     shortcuts.normalize();
     let mut kill_ticks = candidate.point_of_kill_ticks.clone();
@@ -3126,22 +3151,24 @@ fn manual_hotkey_cfg(
         "sv_cheats 1".into(),
         "con_enable 1".into(),
         "mirv_campath enabled 0".into(),
+        "mirv_campath draw enabled 0".into(),
         "mirv_campath clear".into(),
         "mirv_input end".into(),
         "mirv_cmd clear".into(),
         "mirv_cmd enabled 1".into(),
         format!(
-            "mirv_cmd addCurves tick {first_live_tick} {end_tick} - interp=linear space=abs {first_live_tick} {first_live_tick} {end_tick} {end_tick} -- \"echo {DIRECTOR_TICK_MARKER_PREFIX} {{0}}\""
+            "mirv_cmd addCurves tick {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} - interp=linear space=abs {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} -- \"echo {DIRECTOR_TICK_MARKER_PREFIX} {{0}}\""
         ),
         "alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"".into(),
         "alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"".into(),
         "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
         format!(
-            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE\"",
+            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE\"",
             shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
             shortcuts.back_one_second, shortcuts.safe_restart, shortcuts.next_kill_tick,
             shortcuts.pause_resume, shortcuts.enter_camera, shortcuts.add_keyframe,
-            shortcuts.play_campath, shortcuts.start_recording, shortcuts.stop_recording,
+            shortcuts.play_campath, shortcuts.draw_campath,
+            shortcuts.start_recording, shortcuts.stop_recording,
             shortcuts.print_keyframes, shortcuts.save_campath,
         ),
         format!("alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\""),
@@ -3149,8 +3176,9 @@ fn manual_hotkey_cfg(
     for (index, tick) in kill_ticks.iter().enumerate() {
         let current = index + 1;
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
+        let cue_tick = (tick - MANUAL_ONE_SECOND_TICKS).max(target_tick).max(0);
         lines.push(format!(
-            "alias tf2frag_manual_kill_{current} \"demo_gototick {tick}; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo TF2FRAG_MANUAL_KILL {current}/{} TICK {tick}\"",
+            "alias tf2frag_manual_kill_{current} \"demo_gototick {cue_tick}; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}\"",
             kill_ticks.len()
         ));
     }
@@ -3158,17 +3186,21 @@ fn manual_hotkey_cfg(
         "alias tf2frag_manual_hud_off \"cl_drawhud 0; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_on; echo TF2FRAG_MANUAL_HUD_HIDDEN\"".into(),
         "alias tf2frag_manual_hud_on \"cl_drawhud 1; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off; echo TF2FRAG_MANUAL_HUD_VISIBLE\"".into(),
         "alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off".into(),
+        "alias tf2frag_manual_draw_on \"mirv_campath draw enabled 1; alias tf2frag_manual_toggle_draw tf2frag_manual_draw_off; echo TF2FRAG_MANUAL_CAMPATH_DRAW_ENABLED\"".into(),
+        "alias tf2frag_manual_draw_off \"mirv_campath draw enabled 0; alias tf2frag_manual_toggle_draw tf2frag_manual_draw_on; echo TF2FRAG_MANUAL_CAMPATH_DRAW_DISABLED\"".into(),
+        "alias tf2frag_manual_toggle_draw tf2frag_manual_draw_on".into(),
         "alias tf2frag_manual_next_kill tf2frag_manual_kill_1".into(),
         format!("bind \"{}\" \"mirv_skip time 0.25\"", shortcuts.advance_time),
         format!("bind \"{}\" \"tf2frag_manual_toggle_hud\"", shortcuts.toggle_hud),
         format!("bind \"{}\" \"tf2frag_manual_help\"", shortcuts.show_help),
-        format!("bind \"{}\" \"mirv_skip time -1\"", shortcuts.back_one_second),
+        format!("bind \"{}\" \"mirv_skip time -1; echo {DIRECTOR_TICK_OFFSET_PREFIX} -{MANUAL_ONE_SECOND_TICKS}\"", shortcuts.back_one_second),
         format!("bind \"{}\" \"tf2frag_manual_clip_start\"", shortcuts.safe_restart),
         format!("bind \"{}\" \"tf2frag_manual_next_kill\"", shortcuts.next_kill_tick),
         format!("bind \"{}\" \"demo_togglepause\"", shortcuts.pause_resume),
         format!("bind \"{}\" \"sv_cheats 1; thirdperson; r_drawviewmodel 0; spec_autodirector 0; mirv_input camera\"", shortcuts.enter_camera),
         format!("bind \"{}\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED\"", shortcuts.add_keyframe),
         format!("bind \"{}\" \"mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED_THIRDPERSON\"", shortcuts.play_campath),
+        format!("bind \"{}\" \"tf2frag_manual_toggle_draw\"", shortcuts.draw_campath),
         format!("bind \"{}\" \"tf2frag_manual_start\"", shortcuts.start_recording),
         format!("bind \"{}\" \"tf2frag_manual_stop\"", shortcuts.stop_recording),
         format!("bind \"{}\" \"mirv_campath print\"", shortcuts.print_keyframes),
@@ -5446,11 +5478,13 @@ mod recording_tests {
         assert_eq!(session.cues[0].victims, vec!["Alice"]);
         assert!(session.cues[1].victims.is_empty());
         assert_eq!(session.whole_candidate_tags, vec!["multi kill"]);
-        assert_eq!(session.shortcuts.len(), 15);
+        assert_eq!(session.shortcuts.len(), 16);
         assert_eq!(session.shortcuts[0].key, "[");
         assert_eq!(session.shortcuts[7].label, "MIRV camera");
         assert_eq!(session.campath_file, output.join("camera_path.xml"));
-        assert_eq!(session.shortcuts[14].key, "S");
+        assert_eq!(session.shortcuts[10].key, "/");
+        assert_eq!(session.shortcuts[10].label, "Show / hide campath");
+        assert_eq!(session.shortcuts[15].key, "C");
         assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
     }
 
@@ -5560,7 +5594,6 @@ mod recording_tests {
         let cfg = manual_hotkey_cfg(
             &candidate,
             500,
-            1_000,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &AppSettings::default(),
         );
@@ -5568,9 +5601,11 @@ mod recording_tests {
             "playdemo demos/tf2fragdemohelper_manual/session/candidate.dem"
         ));
         assert!(!cfg.contains("demo_gototick 500"));
-        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 TICK 900"));
-        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 TICK 925"));
-        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 TICK 970"));
+        assert!(cfg.contains("demo_gototick 833"));
+        assert!(cfg.contains("TF2FRAG_DIRECTOR_TICK 833"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 FRAG_TICK 900 CUE_TICK 833"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 FRAG_TICK 925 CUE_TICK 858"));
+        assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 FRAG_TICK 970 CUE_TICK 903"));
         assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
         assert!(cfg.contains("bind \"[\" \"mirv_skip time 0.25\""));
         assert!(cfg.contains("bind \"]\" \"tf2frag_manual_toggle_hud\""));
@@ -5586,11 +5621,17 @@ mod recording_tests {
         assert!(cfg.contains("bind \"9\" \"tf2frag_manual_start\""));
         assert!(cfg.contains("bind \"0\" \"tf2frag_manual_stop\""));
         assert!(cfg.contains("bind \"=\" \"tf2frag_manual_save\""));
+        assert!(cfg.contains("bind \"/\" \"tf2frag_manual_toggle_draw\""));
+        assert!(cfg.contains("mirv_campath draw enabled 1"));
+        assert!(cfg.contains("mirv_campath draw enabled 0"));
+        assert!(cfg.contains(
+            "bind \"2\" \"mirv_skip time -1; echo TF2FRAG_DIRECTOR_TICK_OFFSET -67\""
+        ));
         assert!(!cfg.contains("bind \"F"));
         assert!(cfg.contains("mirv_cmd clear"));
         assert!(cfg.contains("mirv_cmd enabled 1"));
         assert!(cfg.contains(
-            "mirv_cmd addCurves tick 501 1000 - interp=linear space=abs 501 501 1000 1000 -- \"echo TF2FRAG_DIRECTOR_TICK {0}\""
+            "mirv_cmd addCurves tick 1 2147483646 - interp=linear space=abs 1 1 2147483646 2147483646 -- \"echo TF2FRAG_DIRECTOR_TICK {0}\""
         ));
     }
 
@@ -5603,7 +5644,6 @@ mod recording_tests {
         let cfg = manual_hotkey_cfg(
             &Candidate::default(),
             500,
-            1_000,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &settings,
         );

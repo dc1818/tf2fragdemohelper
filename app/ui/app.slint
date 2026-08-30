@@ -1,10 +1,17 @@
 import { ComboBox, ListView, ScrollView, SpinBox } from "std-widgets.slint";
 import { Tf2Colors, Tf2Panel, Tf2Heading, Tf2Label, Tf2Body, Tf2Button, Tf2Tab, Tf2LineEdit, Tf2CheckBox, Tf2Progress } from "tf2-theme.slint";
 
+// A complete tick (or whole-candidate) group. Keeping groups structured lets
+// the table distinguish their origin without turning every individual tag into
+// a separate visual chip.
+export struct CandidateTagGroup {
+    label: string, tags: string, width: int, highlighted: bool, has-separator: bool,
+}
+
 export struct CandidateRow {
     rank: int, score: string, kills: string, attacker: string, class-name: string, team: string,
     demo: string, map-name: string, mode: string, demo-type: string, recorded: string, ticks: string,
-    tags: string, selected: bool,
+    tags: string, tag-width: int, tag-groups: [CandidateTagGroup], selected: bool,
 }
 
 export struct FilterOption {
@@ -185,7 +192,34 @@ component CandidateTable inherits Rectangle {
                     Tf2Body { text: row.ticks; width: 160px; overflow: elide; }
                     Tf2Body { text: row.mode; width: 220px; overflow: elide; }
                     if !root.compact : Tf2Body { text: row.team; width: 90px; overflow: elide; }
-                    Tf2Body { text: row.tags; width: root.tags-width-px * 1px; }
+                    Rectangle {
+                        width: root.tags-width-px * 1px; height: parent.height; clip: true;
+                        HorizontalLayout {
+                            padding-top: 4px; padding-bottom: 4px; spacing: 4px;
+                            for group in row.tag-groups : HorizontalLayout {
+                                width: (group.width + (group.has-separator ? 18 : 0)) * 1px;
+                                spacing: 4px;
+                                Rectangle {
+                                    width: group.width * 1px;
+                                    background: group.highlighted ? #202a31 : #1b1c1b;
+                                    border-width: 1px;
+                                    border-color: group.highlighted ? #385061 : #343633;
+                                    clip: true;
+                                    HorizontalLayout {
+                                        padding-left: 5px; padding-right: 5px; spacing: 3px;
+                                        Text { text: group.label; color: #8ab3cd; font-family: "Roboto Condensed"; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                                        Text { text: group.tags; color: Tf2Colors.cream; font-family: "Roboto Condensed"; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                                    }
+                                }
+                                if group.has-separator : Rectangle {
+                                    width: 14px; height: parent.height;
+                                    background: #191a19;
+                                    border-width: 1px; border-color: #3c4140;
+                                    Text { width: parent.width; height: parent.height; text: "|"; color: Tf2Colors.muted; font-family: "Roboto Condensed"; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
                 }
                 drag-area := TouchArea {
                     property <bool> drag-selecting; property <bool> dragging; property <bool> drag-additive;

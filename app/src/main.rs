@@ -732,11 +732,57 @@ fn filter_dropdown_width(values: &BTreeSet<String>, minimum: i32, supporting_tex
 fn candidate_tags_width(rows: &[CandidateRow]) -> i32 {
     let longest = rows
         .iter()
-        .map(|row| row.tags.as_str().chars().count())
+        .map(|row| row.tag_width)
         .max()
         .unwrap_or_default();
-    let estimated = longest.saturating_mul(8).saturating_add(24);
-    160.max(estimated.min(i32::MAX as usize) as i32)
+    160.max(longest)
+}
+
+fn candidate_tag_groups(candidate: &Candidate) -> Vec<CandidateTagGroup> {
+    let mut groups: Vec<(String, String)> = candidate
+        .tick_tags
+        .iter()
+        .filter(|group| !group.tags.is_empty())
+        .map(|group| {
+            (
+                format!("TICK {}:", group.demo_tick),
+                group.tags.iter().map(|tag| friendly_tag(tag)).collect::<Vec<_>>().join(", "),
+            )
+        })
+        .collect();
+
+    if !candidate.sequence_tags.is_empty() {
+        groups.push((
+            "WHOLE CANDIDATE:".into(),
+            candidate.sequence_tags.iter().map(|tag| friendly_tag(tag)).collect::<Vec<_>>().join(", "),
+        ));
+    }
+
+    // Older exports do not contain per-tick associations. Keep them readable
+    // as one neutral group instead of inventing associations that do not exist.
+    if groups.is_empty() && !candidate.tags.is_empty() {
+        let label = if candidate.point_of_kill_ticks.len() == 1 {
+            format!("TICK {}:", candidate.point_of_kill_ticks[0])
+        } else {
+            "LEGACY CANDIDATE:".into()
+        };
+        groups.push((label, candidate.tags.iter().map(|tag| friendly_tag(tag)).collect::<Vec<_>>().join(", ")));
+    }
+
+    let group_count = groups.len();
+    groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, tags))| CandidateTagGroup {
+            // A conservative pixel estimate preserves the one-line horizontal
+            // scrolling behaviour used by the rest of the candidate table.
+            width: ((label.chars().count() + tags.chars().count()) * 7 + 16).min(i32::MAX as usize) as i32,
+            label: label.into(),
+            tags: tags.into(),
+            highlighted: index % 2 == 0,
+            has_separator: index + 1 < group_count,
+        })
+        .collect()
 }
 
 fn selectable_options(
@@ -1406,11 +1452,10 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                         let mut state = state_for_thread.lock();
                         let recorded = candidates.iter().map(|candidate| state.recording_index.is_recorded_indexed(candidate)).collect::<Vec<_>>();
                         let filters = CandidateUiFilters::default();
-                        let (visible, rows) = build_candidate_rows(&candidates, &recorded, &selected, &filters, 0);
                         state.export_root = Some(root.clone());
                         state.selected = selected;
                         state.recorded = recorded;
-                        state.visible = visible;
+                        state.visible.clear();
                         state.candidates = candidates;
                         state.candidate_filters = filters;
                         drop(state);
@@ -1418,17 +1463,15 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                         let weak = weak_for_thread.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
-                                let count = rows.len();
-                                ui.set_candidate_summary(format!("{count} of {count} ranked candidates").into());
-                                ui.set_candidate_tags_width(candidate_tags_width(&rows));
-                                ui.set_candidate_rows(ModelRc::new(VecModel::from(rows)));
-                                ui.set_selected_count(0);
-                                ui.set_all_visible_selected(false);
+                                // CandidateRow contains a nested Slint model for
+                                // the styled tag groups, so rows must be created
+                                // on the UI thread rather than moved through the
+                                // Send-only event-loop closure.
+                                refresh_candidates(&ui, &state, "", 0);
                                 {
                                     let current = state.lock();
                                     sync_candidate_filter_controls(&ui, &current);
                                 }
-                                update_recording_estimate(&ui, &state);
                                 ui.set_has_export(true);
                                 ui.set_selected_page(1);
                             }
@@ -1481,33 +1524,27 @@ fn bind_batch_callbacks(ui: &AppWindow, state: &Arc<Mutex<State>>) {
                 let recorded = candidates.iter().map(|candidate| index.is_recorded_indexed(candidate)).collect::<Vec<_>>();
                 let selected = vec![false; candidates.len()];
                 let filters = CandidateUiFilters::default();
-                let (visible, rows) = build_candidate_rows(&candidates, &recorded, &selected, &filters, 0);
-                (candidates, recorded, selected, visible, rows, filters)
+                (candidates, recorded, selected, filters)
             });
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak_for_thread.upgrade() else { return };
                 match result {
-                    Ok((candidates, recorded, selected, visible, rows, filters)) => {
+                    Ok((candidates, recorded, selected, filters)) => {
                         let count = candidates.len();
                         {
                             let mut state = state_for_thread.lock();
                             state.export_root = Some(root.clone());
                             state.selected = selected;
                             state.recorded = recorded;
-                            state.visible = visible;
+                            state.visible.clear();
                             state.candidates = candidates;
                             state.candidate_filters = filters;
                         }
-                        ui.set_candidate_summary(format!("{count} of {count} ranked candidates").into());
-                        ui.set_candidate_tags_width(candidate_tags_width(&rows));
-                        ui.set_candidate_rows(ModelRc::new(VecModel::from(rows)));
-                        ui.set_selected_count(0);
-                        ui.set_all_visible_selected(false);
+                        refresh_candidates(&ui, &state_for_thread, "", 0);
                         {
                             let current = state_for_thread.lock();
                             sync_candidate_filter_controls(&ui, &current);
                         }
-                        update_recording_estimate(&ui, &state_for_thread);
                         ui.set_has_export(true);
                         ui.set_selected_page(1);
                         ui.set_busy(false);
@@ -2349,6 +2386,8 @@ fn build_candidate_rows(
             continue;
         }
         visible.push(index);
+        let tag_groups = candidate_tag_groups(candidate);
+        let tag_width = tag_groups.iter().map(|group| group.width + if group.has_separator { 18 } else { 0 }).sum();
         rows.push(CandidateRow {
             rank: (index + 1) as i32,
             score: format!("{:.1}", candidate.overall_score).into(),
@@ -2373,6 +2412,8 @@ fn build_candidate_rows(
                 .join(", ")
                 .into(),
             tags: candidate_tag_text(candidate, false, false).into(),
+            tag_width,
+            tag_groups: ModelRc::new(VecModel::from(tag_groups)),
             selected: selected.get(index).copied().unwrap_or(false),
         });
     }

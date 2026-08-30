@@ -782,7 +782,7 @@ export component AppWindow inherits Window {
                 height: 34px; spacing: 5px;
                 Tf2LineEdit { text <=> root.tag-filter; placeholder: "FILTER TAGS"; centered: true; edited(value) => { root.set-tag-filter(value); } focus-lost => { root.tag-filter = ""; root.set-tag-filter(""); } }
                 Tf2Button { width: 98px; height: 32px; text: root.candidate-filters-open ? "CLOSE" : "FILTERS"; clicked => { root.candidate-filters-open = !root.candidate-filters-open; } }
-                Tf2Button { width: 165px; height: 32px; text: "MIRV SESSION"; enabled: root.selected-count == 1 && root.recording-ready; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.launch-manual-hlae(); } }
+                Tf2Button { width: 165px; height: 32px; text: "OPEN HLAE"; enabled: root.selected-count == 1 && root.recording-ready; tone: Tf2Colors.gold; hover-tone: Tf2Colors.gold-hover; pressed-tone: Tf2Colors.gold-pressed; clicked => { root.launch-manual-hlae(); } }
                 Tf2Button { width: 120px; height: 32px; text: "PREVIEW"; enabled: root.selected-count == 1; tone: Tf2Colors.blu; hover-tone: Tf2Colors.blu-hover; pressed-tone: Tf2Colors.blu-pressed; clicked => { root.preview-selected(); } }
                 Tf2Button { width: 120px; height: 32px; text: "RECORD"; enabled: root.selected-count > 0 && root.recording-ready; tone: Tf2Colors.red; hover-tone: Tf2Colors.red-hover; pressed-tone: Tf2Colors.red-pressed; clicked => { root.record-selected(); } }
             }

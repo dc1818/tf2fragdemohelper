@@ -33,7 +33,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 1. Select one candidate and set the before/after window in TF2 Frag Demo Helper.
 2. Launch the manual MIRV session.
 3. The helper stages the demo, writes `director_session.json`, starts HLAE, safely seeks in steps no larger than 15,000 ticks, pauses, and opens Director.
-4. Director shows the opening, every exact frag cue, victims when present, per-tick tags, the outro boundary, and the whole-candidate story.
+4. Director opens as an always-on-top, click-through overlay in the upper-right of the active display. It shows the opening, every exact frag cue, victims when present, per-tick tags, the outro boundary, the whole-candidate story, and the user's saved MIRV shortcut keys.
 5. In TF2, enter the MIRV camera and compose an establishing frame. Add the first key.
 6. Advance time in small increments or move to the next cue. Reframe and add a key for each intentional camera beat. Simultaneous victims remain one cue and can be framed together.
 7. Use safe restart, enable campath playback, and preview the complete move. Director remains visible beside a smaller TF2 window as the shot checklist.
@@ -47,6 +47,9 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 - Versioned JSON session contract shared by the helper and Director.
 - Candidate-aware cue timeline with per-tick tags and optional victims.
 - Whole-candidate tags and exact campath/output locations.
+- Compact 470×740 TF2-themed overlay designed to remain beside or over the smaller TF2 frame.
+- Always-on-top, borderless, click-through native window so MIRV keeps mouse and keyboard focus.
+- Saved shortcut grid, arrow-key reservation notice, keyframe checklist, and custom-key recording order.
 - Automatic launch and lifecycle tied to the manual TF2 session.
 - Typed, allowlisted bridge messages for demo state, small skips, camera pose, keyframe add/replace/remove, campath enable/draw, and save/load.
 - No arrow-key capture and no replacement of the existing temporary MIRV binds.

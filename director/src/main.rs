@@ -1,8 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use anyhow::{Context, Result};
-use slint::{ModelRc, SharedString, VecModel};
-use std::{env, fs, path::Path};
+use slint::winit_030::{winit, WinitWindowAccessor};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use std::{env, fs, path::Path, time::Duration};
 use tf2_mirv_director::{DirectorControl, DirectorSession};
 
 slint::include_modules!();
@@ -24,6 +25,26 @@ fn main() -> Result<()> {
     window.set_whole_tags(session.whole_candidate_tags.join(", ").into());
     window.set_bridge_ready(matches!(session.control, DirectorControl::LocalBridge { .. }));
 
+    let shortcut_key = |id: &str, fallback: &str| {
+        session
+            .shortcuts
+            .iter()
+            .find(|shortcut| shortcut.id == id)
+            .map(|shortcut| shortcut.key.as_str())
+            .unwrap_or(fallback)
+            .to_owned()
+    };
+    window.set_next_cue_key(shortcut_key("next_kill_tick", "4").into());
+    window.set_record_order(
+        format!(
+            "{} RESUME  →  {} START  →  {} STOP",
+            shortcut_key("pause_resume", "5"),
+            shortcut_key("start_recording", "9"),
+            shortcut_key("stop_recording", "0")
+        )
+        .into(),
+    );
+
     let cue_rows = session
         .cues
         .iter()
@@ -41,8 +62,51 @@ fn main() -> Result<()> {
         })
         .collect::<Vec<_>>();
     window.set_cues(ModelRc::new(VecModel::from(cue_rows)));
+
+    let mut shortcut_rows = session
+        .shortcuts
+        .iter()
+        .map(|shortcut| ShortcutRow {
+            key: shortcut.key.clone().into(),
+            label: shortcut.label.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    let right = shortcut_rows.split_off((shortcut_rows.len() + 1) / 2);
+    window.set_shortcuts_left(ModelRc::new(VecModel::from(shortcut_rows)));
+    window.set_shortcuts_right(ModelRc::new(VecModel::from(right)));
+
+    configure_overlay_window(&window);
     window.run()?;
     Ok(())
+}
+
+/// Keep the companion visible beside the smaller TF2 window without taking
+/// mouse clicks or keyboard focus away from MIRV camera controls.
+fn configure_overlay_window(window: &DirectorWindow) {
+    let weak = window.as_weak();
+    slint::Timer::single_shot(Duration::ZERO, move || {
+        let Some(window) = weak.upgrade() else { return };
+        let _ = window.window().with_winit_window(|native| {
+            native.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+            native.set_decorations(false);
+            native.set_resizable(false);
+            let _ = native.set_cursor_hittest(false);
+
+            let Some(monitor) = native
+                .current_monitor()
+                .or_else(|| native.available_monitors().next())
+            else {
+                return;
+            };
+            let monitor_position = monitor.position();
+            let monitor_size = monitor.size();
+            let overlay_size = native.outer_size();
+            let x = monitor_position.x
+                + monitor_size.width.saturating_sub(overlay_size.width + 14) as i32;
+            let y = monitor_position.y + 14;
+            native.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        });
+    });
 }
 
 fn load_session(path: &Path) -> Result<DirectorSession> {

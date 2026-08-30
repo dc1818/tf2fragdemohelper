@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DIRECTOR_SESSION_SCHEMA: u32 = 1;
+pub const DIRECTOR_SESSION_SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct DirectorSession {
@@ -14,6 +14,7 @@ pub struct DirectorSession {
     pub end_tick: i64,
     pub cues: Vec<DirectorCue>,
     pub whole_candidate_tags: Vec<String>,
+    pub shortcuts: Vec<DirectorShortcut>,
     pub campath_file: PathBuf,
     pub output_directory: PathBuf,
     pub control: DirectorControl,
@@ -53,6 +54,16 @@ pub struct DirectorCue {
     pub label: String,
     pub tags: Vec<String>,
     pub victims: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct DirectorShortcut {
+    /// Stable identifier used for workflow summaries such as record order.
+    pub id: String,
+    /// The normalized TF2 key name written to the temporary manual-session CFG.
+    pub key: String,
+    /// Short, user-facing action label rendered in the overlay.
+    pub label: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -129,6 +140,11 @@ mod tests {
                 tags: vec!["confirmed_airshot".into()],
                 victims: vec!["Medic".into()],
             }],
+            shortcuts: vec![DirectorShortcut {
+                id: "add_keyframe".into(),
+                key: "7".into(),
+                label: "Add keyframe".into(),
+            }],
             ..DirectorSession::default()
         }
     }
@@ -153,5 +169,14 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("skip_seconds"));
         assert_eq!(serde_json::from_str::<BridgeRequest>(&json).unwrap(), request);
+    }
+
+    #[test]
+    fn shortcuts_round_trip_with_the_session() {
+        let session = session();
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: DirectorSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.shortcuts[0].key, "7");
+        assert_eq!(restored.shortcuts[0].label, "Add keyframe");
     }
 }

@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tf2_mirv_director::{
-    DirectorControl, DirectorCue, DirectorSession, DIRECTOR_SESSION_SCHEMA,
+    DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_SESSION_SCHEMA,
 };
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -1087,6 +1087,7 @@ fn build_director_session(
     target_tick: i64,
     end_tick: i64,
     output_path: &Path,
+    settings: &AppSettings,
 ) -> DirectorSession {
     let mut victims_by_tick = BTreeMap::<i64, BTreeSet<String>>::new();
     for kill in &candidate.kills {
@@ -1136,6 +1137,32 @@ fn build_director_session(
         })
         .collect();
 
+    let mut shortcuts = settings.mirv_shortcuts.clone();
+    shortcuts.normalize();
+    let shortcuts = [
+        ("advance_time", &shortcuts.advance_time, "Advance 0.25 sec"),
+        ("toggle_hud", &shortcuts.toggle_hud, "Toggle HUD"),
+        ("show_help", &shortcuts.show_help, "Show controls"),
+        ("back_one_second", &shortcuts.back_one_second, "Back 1 sec"),
+        ("safe_restart", &shortcuts.safe_restart, "Safe clip restart"),
+        ("next_kill_tick", &shortcuts.next_kill_tick, "Next frag tick"),
+        ("pause_resume", &shortcuts.pause_resume, "Pause / resume"),
+        ("enter_camera", &shortcuts.enter_camera, "MIRV camera"),
+        ("add_keyframe", &shortcuts.add_keyframe, "Add keyframe"),
+        ("play_campath", &shortcuts.play_campath, "Play campath"),
+        ("start_recording", &shortcuts.start_recording, "Start recording"),
+        ("stop_recording", &shortcuts.stop_recording, "Stop recording"),
+        ("print_keyframes", &shortcuts.print_keyframes, "Print keyframes"),
+        ("save_campath", &shortcuts.save_campath, "Save campath XML"),
+    ]
+    .into_iter()
+    .map(|(id, key, label)| DirectorShortcut {
+        id: id.into(),
+        key: key.clone(),
+        label: label.into(),
+    })
+    .collect();
+
     DirectorSession {
         schema_version: DIRECTOR_SESSION_SCHEMA,
         candidate_id: candidate.candidate_id.clone(),
@@ -1153,6 +1180,7 @@ fn build_director_session(
             .iter()
             .map(|tag| director_display_tag(tag))
             .collect(),
+        shortcuts,
         campath_file: output_path.join("camera_path.xml"),
         output_directory: output_path.to_owned(),
         control: DirectorControl::HotkeysOnly,
@@ -1164,8 +1192,9 @@ fn write_director_session(
     target_tick: i64,
     end_tick: i64,
     output_path: &Path,
+    settings: &AppSettings,
 ) -> Result<PathBuf> {
-    let session = build_director_session(candidate, target_tick, end_tick, output_path);
+    let session = build_director_session(candidate, target_tick, end_tick, output_path, settings);
     session.validate()?;
     let path = output_path.join("director_session.json");
     fs::write(&path, serde_json::to_vec_pretty(&session)?)
@@ -1316,6 +1345,7 @@ pub fn launch_manual_hlae_candidate(
         target_tick,
         end_tick,
         &output_path,
+        settings,
     )?;
     let launch_log = session.join("hlae_launch.log");
     let launch_log_file = File::create(&launch_log)?;
@@ -5367,7 +5397,13 @@ mod recording_tests {
             ..Candidate::default()
         };
         let output = Path::new(r"C:\captures\candidate");
-        let session = build_director_session(&candidate, 11_000, 13_000, output);
+        let session = build_director_session(
+            &candidate,
+            11_000,
+            13_000,
+            output,
+            &AppSettings::default(),
+        );
 
         session.validate().unwrap();
         assert_eq!(session.cues.len(), 2);
@@ -5375,6 +5411,9 @@ mod recording_tests {
         assert_eq!(session.cues[0].victims, vec!["Alice"]);
         assert!(session.cues[1].victims.is_empty());
         assert_eq!(session.whole_candidate_tags, vec!["multi kill"]);
+        assert_eq!(session.shortcuts.len(), 14);
+        assert_eq!(session.shortcuts[0].key, "[");
+        assert_eq!(session.shortcuts[7].label, "MIRV camera");
         assert_eq!(session.campath_file, output.join("camera_path.xml"));
     }
 

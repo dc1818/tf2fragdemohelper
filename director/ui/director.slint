@@ -1,4 +1,7 @@
 import { ScrollView } from "std-widgets.slint";
+import "../../app/ui/assets/fonts/TF2Build.ttf";
+import "../../app/ui/assets/fonts/RobotoCondensed-Variable.ttf";
+import "../../app/ui/assets/fonts/BebasNeue-Regular.ttf";
 
 export struct CueRow {
     tick: int,
@@ -8,17 +11,24 @@ export struct CueRow {
     victims: string,
 }
 
+export struct ShortcutRow {
+    key: string,
+    label: string,
+}
+
 global Colors {
     in property <brush> app: #181918;
     in property <brush> header: #141514;
     in property <brush> panel: #24231f;
     in property <brush> panel-alt: #1d1d1b;
     in property <brush> row: #2b2b28;
+    in property <brush> row-alt: #252522;
     in property <brush> border: #514b40;
     in property <brush> cream: #decba9;
     in property <brush> muted: #a69882;
     in property <brush> dim: #756d60;
     in property <brush> blue: #2a4558;
+    in property <brush> blue-line: #385d76;
     in property <brush> blue-text: #8ab3cd;
     in property <brush> gold: #a26614;
     in property <brush> green: #72b87a;
@@ -28,27 +38,62 @@ component Panel inherits Rectangle {
     background: Colors.panel;
     border-width: 1px;
     border-color: Colors.border;
+    clip: true;
 }
 
 component Heading inherits Text {
     color: Colors.cream;
-    font-size: 18px;
-    font-weight: 700;
+    font-family: "TF2 Build";
+    font-size: 13px;
     vertical-alignment: center;
 }
 
 component Caption inherits Text {
     color: Colors.muted;
-    font-size: 12px;
+    font-family: "Roboto Condensed";
+    font-size: 11px;
     vertical-alignment: center;
+}
+
+component ShortcutCell inherits Rectangle {
+    in property <string> key-name;
+    in property <string> action-name;
+    height: 24px;
+    background: Colors.panel-alt;
+    border-width: 1px;
+    border-color: #343633;
+
+    HorizontalLayout {
+        spacing: 6px;
+        Rectangle {
+            width: 34px;
+            background: Colors.blue;
+            Text {
+                text: root.key-name;
+                color: Colors.blue-text;
+                font-family: "TF2 Build";
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.action-name;
+            color: Colors.cream;
+            font-family: "Roboto Condensed";
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
 }
 
 export component DirectorWindow inherits Window {
     title: "TF2 MIRV Director";
-    preferred-width: 1040px;
-    preferred-height: 650px;
-    min-width: 760px;
-    min-height: 520px;
+    preferred-width: 470px;
+    preferred-height: 740px;
+    min-width: 420px;
+    min-height: 650px;
     background: Colors.app;
 
     in property <string> candidate-id;
@@ -60,134 +105,185 @@ export component DirectorWindow inherits Window {
     in property <string> campath-file;
     in property <string> whole-tags;
     in property <bool> bridge-ready;
+    in property <string> next-cue-key;
+    in property <string> record-order;
     in property <[CueRow]> cues;
+    in property <[ShortcutRow]> shortcuts-left;
+    in property <[ShortcutRow]> shortcuts-right;
 
     VerticalLayout {
-        padding: 14px;
-        spacing: 10px;
+        padding: 8px;
+        spacing: 6px;
 
         Rectangle {
-            height: 54px;
+            height: 44px;
             background: Colors.header;
             border-width: 1px;
             border-color: Colors.border;
             HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                spacing: 12px;
-                Heading { text: "TF2 MIRV DIRECTOR"; }
-                Caption { text: "/  CAMPATH SHOT PLANNER"; }
+                padding-left: 10px;
+                padding-right: 10px;
+                spacing: 7px;
+                Text { text: "TF2 MIRV"; color: Colors.cream; font-family: "Bebas Neue"; font-size: 22px; vertical-alignment: center; }
+                Text { text: "/ DIRECTOR"; color: Colors.muted; font-family: "Bebas Neue"; font-size: 18px; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; background: #00000000; }
-                Text {
-                    text: root.bridge-ready ? "LIVE BRIDGE: CONNECTED" : "CONTROL: EXISTING MIRV HOTKEYS";
-                    color: root.bridge-ready ? Colors.green : Colors.blue-text;
-                    font-size: 12px;
-                    font-weight: 700;
-                    vertical-alignment: center;
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.bridge-ready ? "LIVE" : "PLANNED";
+                        color: root.bridge-ready ? Colors.green : Colors.blue-text;
+                        font-family: "TF2 Build";
+                        font-size: 10px;
+                        horizontal-alignment: right;
+                    }
+                    Caption { text: "ALWAYS ON TOP • CLICK-THROUGH"; font-size: 9px; horizontal-alignment: right; }
                 }
             }
         }
 
         Panel {
-            height: 76px;
+            height: 52px;
             HorizontalLayout {
-                padding: 12px;
-                spacing: 24px;
-                VerticalLayout { spacing: 2px; Caption { text: "CANDIDATE"; } Text { text: root.candidate-id; color: Colors.cream; font-size: 15px; } }
-                VerticalLayout { spacing: 2px; Caption { text: "DEMO"; } Text { text: root.demo-file; color: Colors.cream; font-size: 15px; overflow: elide; } }
-                VerticalLayout { spacing: 2px; Caption { text: "MAP"; } Text { text: root.map-name; color: Colors.cream; font-size: 15px; } }
-                VerticalLayout { spacing: 2px; Caption { text: "WINDOW"; } Text { text: "TICK " + root.start-tick + "  →  " + root.end-tick; color: Colors.cream; font-size: 15px; } }
+                padding: 7px;
+                spacing: 12px;
+                VerticalLayout { Caption { text: "DEMO"; } Text { text: root.demo-file; color: Colors.cream; font-family: "Roboto Condensed"; font-size: 12px; overflow: elide; } }
+                VerticalLayout { width: 100px; Caption { text: "MAP"; } Text { text: root.map-name; color: Colors.cream; font-family: "Roboto Condensed"; font-size: 12px; overflow: elide; } }
+                VerticalLayout { width: 112px; Caption { text: "CLIP WINDOW"; } Text { text: root.start-tick + " → " + root.end-tick; color: Colors.blue-text; font-family: "Roboto Condensed"; font-size: 11px; overflow: elide; } }
             }
         }
 
         Panel {
-            height: 116px;
+            height: 88px;
             VerticalLayout {
-                padding: 12px;
-                spacing: 8px;
-                Heading { height: 22px; text: "CANDIDATE TIMELINE"; font-size: 15px; }
+                padding: 7px;
+                spacing: 4px;
+                HorizontalLayout {
+                    height: 18px;
+                    Heading { text: "PLANNED FRAG TIMELINE"; }
+                    Rectangle { horizontal-stretch: 1; background: #00000000; }
+                    Caption { text: root.next-cue-key + "  NEXT FRAG"; color: Colors.blue-text; }
+                }
                 Rectangle {
-                    height: 42px;
+                    height: 45px;
                     background: Colors.panel-alt;
                     border-width: 1px;
-                    border-color: Colors.border;
-                    Rectangle { x: 12px; y: 20px; width: parent.width - 24px; height: 2px; background: Colors.dim; }
-                    Text { x: 8px; y: 25px; text: "START"; color: Colors.muted; font-size: 10px; }
-                    Text { x: parent.width - 36px; y: 25px; text: "END"; color: Colors.muted; font-size: 10px; }
+                    border-color: #343633;
+                    Rectangle { x: 11px; y: 23px; width: parent.width - 22px; height: 2px; background: Colors.dim; }
+                    Rectangle { x: 11px; y: 18px; width: 2px; height: 12px; background: Colors.blue-text; }
+                    Rectangle { x: parent.width - 13px; y: 18px; width: 2px; height: 12px; background: Colors.blue-text; }
+                    Text { x: 4px; y: 31px; text: "IN"; color: Colors.muted; font-family: "TF2 Build"; font-size: 8px; }
+                    Text { x: parent.width - 20px; y: 31px; text: "OUT"; color: Colors.muted; font-family: "TF2 Build"; font-size: 8px; }
                     for cue in root.cues : Rectangle {
-                        x: 12px + cue.position * (parent.width - 24px);
-                        y: 8px;
+                        x: 11px + cue.position * (parent.width - 22px);
+                        y: 11px;
                         width: 3px;
-                        height: 25px;
+                        height: 21px;
                         background: Colors.gold;
-                        Text { x: -24px; y: -7px; width: 52px; text: cue.tick; color: Colors.cream; font-size: 9px; horizontal-alignment: center; }
+                        Text { x: -23px; y: -9px; width: 49px; text: cue.tick; color: Colors.cream; font-family: "Roboto Condensed"; font-size: 8px; horizontal-alignment: center; }
                     }
                 }
             }
         }
 
-        HorizontalLayout {
-            spacing: 10px;
-            vertical-stretch: 1;
-
-            Panel {
-                horizontal-stretch: 3;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 7px;
-                    Heading { height: 24px; text: "SHOT CUES"; font-size: 15px; }
-                    ScrollView {
-                        vertical-stretch: 1;
-                        VerticalLayout {
-                            spacing: 5px;
-                            for cue[index] in root.cues : Rectangle {
-                                height: cue.victims == "" ? 58px : 76px;
-                                background: Math.mod(index, 2) == 0 ? Colors.row : Colors.panel-alt;
-                                border-width: 1px;
-                                border-color: index == 0 ? Colors.blue : Colors.border;
-                                VerticalLayout {
-                                    padding: 8px;
-                                    spacing: 2px;
-                                    HorizontalLayout {
-                                        height: 20px;
-                                        Text { text: cue.label; color: Colors.blue-text; font-size: 13px; font-weight: 700; }
-                                        Rectangle { horizontal-stretch: 1; background: #00000000; }
-                                        Text { text: "TICK " + cue.tick; color: Colors.cream; font-size: 12px; }
-                                    }
-                                    Text { text: cue.tags; color: Colors.cream; font-size: 12px; overflow: elide; }
-                                    if cue.victims != "" : Text { text: "VICTIMS  " + cue.victims; color: Colors.muted; font-size: 11px; overflow: elide; }
+        Panel {
+            height: 150px;
+            VerticalLayout {
+                padding: 7px;
+                spacing: 4px;
+                HorizontalLayout {
+                    height: 18px;
+                    Heading { text: "SHOT CHECKLIST"; }
+                    Rectangle { horizontal-stretch: 1; background: #00000000; }
+                    Caption { text: root.cues.length + " CUES"; }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 3px;
+                        for cue[index] in root.cues : Rectangle {
+                            height: cue.victims == "" ? 44px : 57px;
+                            background: Math.mod(index, 2) == 0 ? Colors.row : Colors.row-alt;
+                            border-width: 1px;
+                            border-color: index == 0 ? Colors.blue-line : #343633;
+                            VerticalLayout {
+                                padding: 5px;
+                                spacing: 1px;
+                                HorizontalLayout {
+                                    height: 16px;
+                                    Text { text: cue.label; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 10px; }
+                                    Rectangle { horizontal-stretch: 1; background: #00000000; }
+                                    Text { text: "TICK " + cue.tick; color: Colors.cream; font-family: "Roboto Condensed"; font-size: 10px; }
                                 }
+                                Text { text: cue.tags == "" ? "No tick tags" : cue.tags; color: Colors.cream; font-family: "Roboto Condensed"; font-size: 10px; overflow: elide; }
+                                if cue.victims != "" : Text { text: "VICTIMS  " + cue.victims; color: Colors.muted; font-family: "Roboto Condensed"; font-size: 10px; overflow: elide; }
                             }
                         }
                     }
                 }
-            }
-
-            Panel {
-                horizontal-stretch: 2;
-                VerticalLayout {
-                    padding: 12px;
-                    spacing: 8px;
-                    Heading { height: 24px; text: "CAMPATH WORKFLOW"; font-size: 15px; }
-                    Text { height: 38px; text: "1   Use MIRV camera and compose the opening shot."; color: Colors.cream; font-size: 13px; wrap: word-wrap; }
-                    Text { height: 38px; text: "2   Add a keyframe, then advance demo time."; color: Colors.cream; font-size: 13px; wrap: word-wrap; }
-                    Text { height: 38px; text: "3   Frame each cue and add or replace its key."; color: Colors.cream; font-size: 13px; wrap: word-wrap; }
-                    Text { height: 38px; text: "4   Safe restart, preview the path, then revise."; color: Colors.cream; font-size: 13px; wrap: word-wrap; }
-                    Text { height: 38px; text: "5   Record through the helper: resume → start → stop."; color: Colors.cream; font-size: 13px; wrap: word-wrap; }
-                    Rectangle { height: 1px; background: Colors.border; }
-                    Caption { height: 18px; text: "WHOLE CANDIDATE"; }
-                    Text { height: 36px; text: root.whole-tags == "" ? "No whole-candidate tags" : root.whole-tags; color: Colors.cream; font-size: 12px; wrap: word-wrap; }
-                    Rectangle { vertical-stretch: 1; background: #00000000; }
-                    Caption { height: 18px; text: "CAMPATH FILE"; }
-                    Text { height: 34px; text: root.campath-file; color: Colors.blue-text; font-size: 11px; wrap: word-wrap; }
+                Text {
+                    height: 16px;
+                    text: "WHOLE  " + (root.whole-tags == "" ? "No whole-candidate tags" : root.whole-tags);
+                    color: Colors.muted;
+                    font-family: "Roboto Condensed";
+                    font-size: 10px;
+                    overflow: elide;
                 }
             }
         }
 
-        Caption {
-            height: 28px;
-            text: "OUTPUT  " + root.output-directory;
-            overflow: elide;
+        Panel {
+            height: 220px;
+            VerticalLayout {
+                padding: 7px;
+                spacing: 4px;
+                HorizontalLayout {
+                    height: 18px;
+                    Heading { text: "MANUAL MIRV SHORTCUTS"; }
+                    Rectangle { horizontal-stretch: 1; background: #00000000; }
+                    Caption { text: "ARROWS RESERVED FOR CAMERA"; color: Colors.blue-text; font-size: 9px; }
+                }
+                HorizontalLayout {
+                    spacing: 5px;
+                    VerticalLayout {
+                        spacing: 2px;
+                        for shortcut in root.shortcuts-left : ShortcutCell {
+                            key-name: shortcut.key;
+                            action-name: shortcut.label;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        for shortcut in root.shortcuts-right : ShortcutCell {
+                            key-name: shortcut.key;
+                            action-name: shortcut.label;
+                        }
+                    }
+                }
+            }
         }
+
+        Panel {
+            height: 72px;
+            HorizontalLayout {
+                padding: 7px;
+                spacing: 9px;
+                VerticalLayout {
+                    width: 185px;
+                    Heading { height: 18px; text: "KEYFRAME CHECK"; }
+                    Caption { text: "• Aim for 4+ keys"; color: Colors.cream; }
+                    Caption { text: "• Leave about 1–2 sec between keys"; color: Colors.cream; }
+                    Caption { text: "• Frame simultaneous victims together"; color: Colors.cream; }
+                }
+                Rectangle { width: 1px; background: Colors.border; }
+                VerticalLayout {
+                    Heading { height: 18px; text: "RECORD ORDER"; }
+                    Text { text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 12px; vertical-alignment: center; }
+                    Caption { text: "POV weapons visible? Use MIRV camera / thirdperson."; wrap: word-wrap; }
+                }
+            }
+        }
+
+        Caption { height: 18px; text: "CAMPATH  " + root.campath-file; color: Colors.blue-text; overflow: elide; }
+        Caption { height: 18px; text: "OUTPUT  " + root.output-directory; overflow: elide; }
     }
 }

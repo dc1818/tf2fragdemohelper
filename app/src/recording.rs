@@ -31,8 +31,6 @@ const RESOURCE_CACHE_VERSION: &str = "bundled_resources_v2";
 const RECORDING_FLUSH_TICKS: i64 = 133;
 const VDM_ACTION_GAP_TICKS: i64 = 2;
 const MANUAL_SEEK_STEP_TICKS: i64 = 15_000;
-const DIRECTOR_TICK_BEACON_INTERVAL: i64 = 5;
-const MAX_DIRECTOR_TICK_BEACONS: i64 = 4_000;
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -3094,15 +3092,14 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64, end_tick: i64) 
         target_tick + 1,
         None,
         &format!(
-            "{focus}thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; echo {DIRECTOR_TICK_MARKER_PREFIX} {target_tick}"
+            "{focus}thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; echo {DIRECTOR_TICK_MARKER_PREFIX} {}",
+            target_tick + 1
         ),
     );
-    let span = end_tick - target_tick;
-    let interval = DIRECTOR_TICK_BEACON_INTERVAL.max(
-        (span + MAX_DIRECTOR_TICK_BEACONS - 1) / MAX_DIRECTOR_TICK_BEACONS,
-    );
-    let mut beacon_tick = target_tick + interval;
-    while beacon_tick <= end_tick {
+    // VDM actions are evaluated by TF2's demo player at their exact starttick.
+    // Emit one marker per playback tick so the external Director follows the
+    // engine clock instead of interpolating elapsed wall time between samples.
+    for beacon_tick in (target_tick + 2)..=end_tick {
         add_vdm_action(
             &mut lines,
             &mut action,
@@ -3112,7 +3109,6 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64, end_tick: i64) 
             None,
             &format!("echo {DIRECTOR_TICK_MARKER_PREFIX} {beacon_tick}"),
         );
-        beacon_tick += interval;
     }
     lines.push("}".into());
     lines.join("\n")
@@ -5456,7 +5452,7 @@ mod recording_tests {
         assert_eq!(session.shortcuts[0].key, "[");
         assert_eq!(session.shortcuts[7].label, "MIRV camera");
         assert_eq!(session.campath_file, output.join("camera_path.xml"));
-        assert_eq!(session.shortcuts[14].key, "HOME");
+        assert_eq!(session.shortcuts[14].key, "Y");
         assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
     }
 
@@ -5623,8 +5619,9 @@ mod recording_tests {
         assert!(vdm.contains(
             "thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
         ));
-        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 500"));
-        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 505"));
+        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 501"));
+        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 502"));
+        assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 503"));
         assert!(vdm.contains("echo TF2FRAG_DIRECTOR_TICK 530"));
         assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
         let pause = vdm.find("demo_pause").expect("pause command");

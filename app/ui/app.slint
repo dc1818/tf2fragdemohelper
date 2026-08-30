@@ -518,7 +518,7 @@ component MirvShortcutPanel inherits Rectangle {
                     root.safe-restart = "3"; root.next-kill-tick = "4"; root.pause-resume = "5"; root.enter-camera = "6";
                     root.add-keyframe = "7"; root.play-campath = "8"; root.start-recording = "9"; root.stop-recording = "0";
                     root.print-keyframes = "-"; root.save-campath = "=";
-                    root.overlay-panel-toggle = "HOME";
+                    root.overlay-panel-toggle = "Y";
                 }
             }
         }
@@ -717,7 +717,7 @@ export component AppWindow inherits Window {
     in-out property <string> mirv-stop-recording: "0";
     in-out property <string> mirv-print-keyframes: "-";
     in-out property <string> mirv-save-campath: "=";
-    in-out property <string> mirv-overlay-panel-toggle: "HOME";
+    in-out property <string> mirv-overlay-panel-toggle: "Y";
     in-out property <string> custom-resources;
 
     callback choose-demos(); callback choose-export-directory(); callback choose-item-schema();

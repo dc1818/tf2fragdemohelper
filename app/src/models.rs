@@ -301,6 +301,8 @@ pub struct MirvShortcuts {
     pub print_keyframes: String,
     pub save_campath: String,
     pub overlay_panel_toggle: String,
+    #[serde(default)]
+    pub overlay_panel_toggle_default_version: u8,
 }
 
 impl Default for MirvShortcuts {
@@ -320,7 +322,8 @@ impl Default for MirvShortcuts {
             stop_recording: "0".into(),
             print_keyframes: "-".into(),
             save_campath: "=".into(),
-            overlay_panel_toggle: "HOME".into(),
+            overlay_panel_toggle: "Y".into(),
+            overlay_panel_toggle_default_version: 1,
         }
     }
 }
@@ -358,6 +361,15 @@ impl MirvShortcuts {
     }
 
     pub fn normalize(&mut self) {
+        // HOME was the short-lived default in the first overlay build. Migrate
+        // only settings written before the default-version marker existed, so
+        // users can still deliberately bind HOME after this one-time change.
+        if self.overlay_panel_toggle_default_version == 0 {
+            if self.overlay_panel_toggle.eq_ignore_ascii_case("HOME") {
+                self.overlay_panel_toggle = "Y".into();
+            }
+            self.overlay_panel_toggle_default_version = 1;
+        }
         let defaults = Self::default();
         self.advance_time = Self::normalized_key(&self.advance_time, &defaults.advance_time);
         self.toggle_hud = Self::normalized_key(&self.toggle_hud, &defaults.toggle_hud);
@@ -584,6 +596,22 @@ mod settings_tests {
         assert_eq!(shortcuts.toggle_hud, "]");
         assert_eq!(shortcuts.show_help, "1");
         assert_eq!(shortcuts.save_campath, "=");
+        assert_eq!(shortcuts.overlay_panel_toggle, "Y");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 1);
+    }
+
+    #[test]
+    fn legacy_home_overlay_default_migrates_once_to_y() {
+        let mut shortcuts: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"HOME"}"#,
+        )
+        .unwrap();
+        shortcuts.normalize();
+        assert_eq!(shortcuts.overlay_panel_toggle, "Y");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 1);
+
+        shortcuts.overlay_panel_toggle = "HOME".into();
+        shortcuts.normalize();
         assert_eq!(shortcuts.overlay_panel_toggle, "HOME");
     }
 

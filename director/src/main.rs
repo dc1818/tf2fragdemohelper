@@ -33,7 +33,7 @@ fn main() -> Result<()> {
             .unwrap_or(fallback)
             .to_owned()
     };
-    let panel_toggle_key = shortcut_key("overlay_panel_toggle", "HOME");
+    let panel_toggle_key = shortcut_key("overlay_panel_toggle", "Y");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
@@ -92,7 +92,7 @@ fn main() -> Result<()> {
     }
 
     card.show()?;
-    configure_overlay_windows(&strip, &card);
+    let docked_monitor = configure_overlay_windows(&strip, &card);
 
     // TF2 is a borderless top-level window. Reasserting HWND_TOPMOST keeps both
     // Director windows above it without activating either window.
@@ -101,14 +101,15 @@ fn main() -> Result<()> {
         let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let panel_visible = panel_visible.clone();
+        let docked_monitor = docked_monitor.clone();
         topmost_timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
-            if let Some(strip) = weak_strip.upgrade() {
-                let _ = strip.window().with_winit_window(force_topmost);
-            }
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            refresh_overlay_dock(&strip, &card, &docked_monitor, false);
+            let _ = strip.window().with_winit_window(force_topmost);
             if panel_visible.get() {
-                if let Some(card) = weak_card.upgrade() {
-                    let _ = card.window().with_winit_window(force_topmost);
-                }
+                let _ = card.window().with_winit_window(force_topmost);
             }
         });
     }
@@ -142,7 +143,7 @@ fn main() -> Result<()> {
         let weak_card = card.as_weak();
         let session = session.clone();
         let mut tail = TickLogTail::new(session.telemetry_log.clone());
-        telemetry_timer.start(TimerMode::Repeated, Duration::from_millis(50), move || {
+        telemetry_timer.start(TimerMode::Repeated, Duration::from_millis(15), move || {
             let Ok(Some(tick)) = tail.poll(&session.telemetry_marker_prefix) else {
                 return;
             };
@@ -209,38 +210,31 @@ fn set_panel_visibility(
     }
 }
 
-fn configure_overlay_windows(strip: &DirectorStripWindow, card: &DirectorCardWindow) {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MonitorGeometry {
+    position: winit::dpi::PhysicalPosition<i32>,
+    size: winit::dpi::PhysicalSize<u32>,
+    scale: f64,
+}
+
+fn configure_overlay_windows(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+) -> Rc<Cell<Option<MonitorGeometry>>> {
     let weak_strip = strip.as_weak();
     let weak_card = card.as_weak();
+    let docked_monitor = Rc::new(Cell::new(None));
+    let initial_docked_monitor = docked_monitor.clone();
     Timer::single_shot(Duration::ZERO, move || {
         let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
             return;
         };
 
-        let mut monitor_geometry = None;
         let _ = strip.window().with_winit_window(|native| {
             native.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
             native.set_decorations(false);
             native.set_resizable(false);
             let _ = native.set_cursor_hittest(false);
-
-            let Some(monitor) = native
-                .current_monitor()
-                .or_else(|| native.available_monitors().next())
-            else {
-                force_topmost(native);
-                return;
-            };
-            let scale = monitor.scale_factor();
-            let monitor_position = monitor.position();
-            let monitor_size = monitor.size();
-            let logical_width = monitor_size.width as f64 / scale - 20.0;
-            let _ = native.request_inner_size(winit::dpi::LogicalSize::new(logical_width, 108.0));
-            native.set_outer_position(winit::dpi::PhysicalPosition::new(
-                monitor_position.x + (10.0 * scale) as i32,
-                monitor_position.y + (10.0 * scale) as i32,
-            ));
-            monitor_geometry = Some((monitor_position, monitor_size, scale));
             force_topmost(native);
         });
 
@@ -249,17 +243,70 @@ fn configure_overlay_windows(strip: &DirectorStripWindow, card: &DirectorCardWin
             native.set_decorations(false);
             native.set_resizable(false);
             let _ = native.set_cursor_hittest(true);
-            let _ = native.request_inner_size(winit::dpi::LogicalSize::new(360.0, 650.0));
-            if let Some((monitor_position, monitor_size, scale)) = monitor_geometry {
-                let card_width = (360.0 * scale) as u32;
-                let x = monitor_position.x
-                    + monitor_size.width.saturating_sub(card_width + (12.0 * scale) as u32)
-                        as i32;
-                let y = monitor_position.y + (128.0 * scale) as i32;
-                native.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
-            }
             force_topmost(native);
         });
+        refresh_overlay_dock(&strip, &card, &initial_docked_monitor, true);
+    });
+    docked_monitor
+}
+
+fn refresh_overlay_dock(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    docked_monitor: &Cell<Option<MonitorGeometry>>,
+    force: bool,
+) {
+    let detected = Cell::new(None);
+    let _ = strip.window().with_winit_window(|native| {
+        let monitor = native
+            .current_monitor()
+            .or_else(|| native.available_monitors().next());
+        detected.set(monitor.map(|monitor| MonitorGeometry {
+            position: monitor.position(),
+            size: monitor.size(),
+            scale: monitor.scale_factor(),
+        }));
+    });
+    let Some(geometry) = detected.get() else {
+        return;
+    };
+    if !force && docked_monitor.get() == Some(geometry) {
+        return;
+    }
+    docked_monitor.set(Some(geometry));
+    dock_overlay_windows(strip, card, geometry);
+}
+
+fn dock_overlay_windows(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    geometry: MonitorGeometry,
+) {
+    const STRIP_HEIGHT: f64 = 108.0;
+    const CARD_WIDTH: f64 = 360.0;
+    const CARD_HEIGHT: f64 = 650.0;
+
+    let logical_width = geometry.size.width as f64 / geometry.scale;
+    let logical_height = geometry.size.height as f64 / geometry.scale;
+    let card_width = CARD_WIDTH.min(logical_width);
+    let card_height = CARD_HEIGHT.min((logical_height - STRIP_HEIGHT).max(1.0));
+
+    let _ = strip.window().with_winit_window(|native| {
+        let _ = native.request_inner_size(winit::dpi::LogicalSize::new(
+            logical_width,
+            STRIP_HEIGHT,
+        ));
+        native.set_outer_position(geometry.position);
+        force_topmost(native);
+    });
+    let _ = card.window().with_winit_window(|native| {
+        let _ = native.request_inner_size(winit::dpi::LogicalSize::new(card_width, card_height));
+        let physical_card_width = (card_width * geometry.scale).round() as u32;
+        let x = geometry.position.x
+            + geometry.size.width.saturating_sub(physical_card_width) as i32;
+        let y = geometry.position.y + (STRIP_HEIGHT * geometry.scale).round() as i32;
+        native.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        force_topmost(native);
     });
 }
 
@@ -454,6 +501,6 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn maps_default_overlay_hotkey() {
-        assert_eq!(virtual_key_code("HOME"), Some(0x24));
+        assert_eq!(virtual_key_code("Y"), Some(0x59));
     }
 }

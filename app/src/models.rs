@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DemoContext {
@@ -31,6 +31,16 @@ pub struct DemoContext {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TickTagGroup {
+    #[serde(default)]
+    pub demo_tick: i64,
+    #[serde(default)]
+    pub server_ticks: Vec<i64>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Candidate {
     #[serde(default)]
     pub candidate_id: String,
@@ -56,6 +66,20 @@ pub struct Candidate {
     pub point_of_kill_ticks: Vec<i64>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Tags assigned to the kill event(s) at each distinct demo tick.
+    /// Same-tick kills share one group so the UI does not pretend the demo
+    /// timeline can distinguish events that occurred in the same frame.
+    #[serde(default)]
+    pub tick_tags: Vec<TickTagGroup>,
+    /// Candidate-wide tags such as multi-kill, rapid sequence, objective
+    /// conversion, or round clinch. `tags` remains the flattened union for
+    /// backwards-compatible filtering and imported-export support.
+    #[serde(default)]
+    pub sequence_tags: Vec<String>,
+    /// The strongest positive tag according to the score evidence. Recording
+    /// output uses this stable value as its category folder.
+    #[serde(default)]
+    pub primary_tag: String,
     #[serde(default)]
     pub metrics: Value,
     #[serde(default)]
@@ -80,6 +104,113 @@ impl Candidate {
             .map(|value| value as usize)
             .unwrap_or(self.kills.len())
     }
+
+    pub fn inferred_primary_tag(&self) -> String {
+        if !self.primary_tag.trim().is_empty()
+            && self.tags.iter().any(|tag| tag == &self.primary_tag)
+        {
+            return self.primary_tag.clone();
+        }
+        infer_primary_tag(&self.tags, &self.tick_tags, &self.sequence_tags, &self.score_breakdown)
+            .unwrap_or_else(|| "other".into())
+    }
+}
+
+fn infer_primary_tag(
+    tags: &[String],
+    tick_tags: &[TickTagGroup],
+    sequence_tags: &[String],
+    score_breakdown: &[Value],
+) -> Option<String> {
+    let unique = tags.iter().filter(|tag| !tag.trim().is_empty()).collect::<BTreeSet<_>>();
+    unique
+        .into_iter()
+        .map(|tag| {
+            let occurrence_count = tick_tags
+                .iter()
+                .filter(|group| group.tags.iter().any(|candidate| candidate == tag))
+                .count();
+            let sequence_wide = sequence_tags.iter().any(|candidate| candidate == tag);
+            let evidence = score_breakdown
+                .iter()
+                .filter_map(|item| {
+                    let points = item.get("points").and_then(Value::as_f64)?;
+                    if points <= 0.0 {
+                        return None;
+                    }
+                    let reason = item.get("reason").and_then(Value::as_str).unwrap_or_default();
+                    let strength = tag_reason_match_strength(tag, reason);
+                    (strength > 0.0).then_some(points * strength)
+                })
+                .fold(0.0_f64, f64::max);
+            let specificity = normalized_words(tag).len();
+            (tag, evidence, occurrence_count, sequence_wide, specificity)
+        })
+        .max_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then(left.2.cmp(&right.2))
+                .then(left.3.cmp(&right.3))
+                .then(left.4.cmp(&right.4))
+                // Prefer the alphabetically earlier identifier for a stable tie.
+                .then_with(|| right.0.cmp(left.0))
+        })
+        .map(|entry| entry.0.clone())
+}
+
+fn tag_reason_match_strength(tag: &str, reason: &str) -> f64 {
+    let tag_words = normalized_words(tag);
+    let reason_words = normalized_words(reason);
+    if tag_words.is_empty() || reason_words.is_empty() {
+        return 0.0;
+    }
+    if tag_words.iter().all(|word| reason_words.contains(word)) {
+        return 1.0;
+    }
+
+    // Current sequence tags whose score-reason wording is intentionally more
+    // descriptive. New tags normally need no entry here because identifier
+    // words are matched generically above and below.
+    let explicit = matches!(
+        (tag, reason),
+        ("multi_kill", "additional_kills")
+            | ("double_airshot_sequence", "multiple_confirmed_airshots")
+            | ("team_wipe", "sequence_finished_enemy_team")
+            | ("medic_force", "enemy_medic_forced_uber_after_sequence")
+            | ("player_count_swing", "sequence_created_player_count_window")
+            | ("round_clinch", "team_won_immediately_after_sequence")
+            | ("building_to_kill_sequence", "building_destruction_led_to_kills")
+            | ("capture_denial_followup", "kill_sequence_blocked_capture")
+            | ("payload_progress_followup", "kill_sequence_led_to_payload_progress")
+    );
+    if explicit {
+        return 1.0;
+    }
+
+    let overlap = tag_words
+        .iter()
+        .filter(|word| reason_words.contains(*word))
+        .count();
+    if overlap == 0 {
+        0.0
+    } else {
+        (overlap as f64 / tag_words.len() as f64) * 0.65
+    }
+}
+
+fn normalized_words(value: &str) -> BTreeSet<String> {
+    value
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            if word.len() > 4 {
+                word.strip_suffix('s').unwrap_or(word).to_owned()
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -323,4 +454,44 @@ mod settings_tests {
         assert_eq!(settings.viewmodels, "On");
     }
 
+}
+
+#[cfg(test)]
+mod candidate_tag_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn primary_tag_uses_strongest_positive_score_evidence() {
+        let candidate = Candidate {
+            tags: vec!["projectile_kill".into(), "confirmed_airshot".into(), "late_round".into()],
+            tick_tags: vec![TickTagGroup {
+                demo_tick: 1_000,
+                server_ticks: vec![9_000],
+                tags: vec!["projectile_kill".into(), "confirmed_airshot".into()],
+            }],
+            sequence_tags: vec!["late_round".into()],
+            score_breakdown: vec![
+                json!({"reason":"state_confirmed_airshot","points":20.0}),
+                json!({"reason":"projectile_sequence","points":8.0}),
+                json!({"reason":"late_round","points":8.0}),
+            ],
+            ..Candidate::default()
+        };
+        assert_eq!(candidate.inferred_primary_tag(), "confirmed_airshot");
+    }
+
+    #[test]
+    fn future_matching_tag_identifiers_are_automatically_eligible() {
+        let candidate = Candidate {
+            tags: vec!["future_combo".into(), "projectile_kill".into()],
+            sequence_tags: vec!["future_combo".into()],
+            score_breakdown: vec![
+                json!({"reason":"future_combo","points":40.0}),
+                json!({"reason":"projectile_sequence","points":8.0}),
+            ],
+            ..Candidate::default()
+        };
+        assert_eq!(candidate.inferred_primary_tag(), "future_combo");
+    }
 }

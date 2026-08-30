@@ -1006,6 +1006,20 @@ fn main() -> Result<()> {
     ui.set_disable_announcer(settings.disable_announcer_voices);
     ui.set_disable_applause(settings.disable_applause_sounds);
     ui.set_disable_domination(settings.disable_domination_sounds);
+    ui.set_mirv_advance_time(settings.mirv_shortcuts.advance_time.clone().into());
+    ui.set_mirv_toggle_hud(settings.mirv_shortcuts.toggle_hud.clone().into());
+    ui.set_mirv_show_help(settings.mirv_shortcuts.show_help.clone().into());
+    ui.set_mirv_back_one_second(settings.mirv_shortcuts.back_one_second.clone().into());
+    ui.set_mirv_safe_restart(settings.mirv_shortcuts.safe_restart.clone().into());
+    ui.set_mirv_next_kill_tick(settings.mirv_shortcuts.next_kill_tick.clone().into());
+    ui.set_mirv_pause_resume(settings.mirv_shortcuts.pause_resume.clone().into());
+    ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
+    ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
+    ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
+    ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
+    ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
+    ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
     ui.set_custom_resources(
         settings
             .custom_resources
@@ -2553,6 +2567,20 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.disable_announcer_voices = ui.get_disable_announcer();
     settings.disable_applause_sounds = ui.get_disable_applause();
     settings.disable_domination_sounds = ui.get_disable_domination();
+    settings.mirv_shortcuts.advance_time = ui.get_mirv_advance_time().to_string();
+    settings.mirv_shortcuts.toggle_hud = ui.get_mirv_toggle_hud().to_string();
+    settings.mirv_shortcuts.show_help = ui.get_mirv_show_help().to_string();
+    settings.mirv_shortcuts.back_one_second = ui.get_mirv_back_one_second().to_string();
+    settings.mirv_shortcuts.safe_restart = ui.get_mirv_safe_restart().to_string();
+    settings.mirv_shortcuts.next_kill_tick = ui.get_mirv_next_kill_tick().to_string();
+    settings.mirv_shortcuts.pause_resume = ui.get_mirv_pause_resume().to_string();
+    settings.mirv_shortcuts.enter_camera = ui.get_mirv_enter_camera().to_string();
+    settings.mirv_shortcuts.add_keyframe = ui.get_mirv_add_keyframe().to_string();
+    settings.mirv_shortcuts.play_campath = ui.get_mirv_play_campath().to_string();
+    settings.mirv_shortcuts.start_recording = ui.get_mirv_start_recording().to_string();
+    settings.mirv_shortcuts.stop_recording = ui.get_mirv_stop_recording().to_string();
+    settings.mirv_shortcuts.print_keyframes = ui.get_mirv_print_keyframes().to_string();
+    settings.mirv_shortcuts.save_campath = ui.get_mirv_save_campath().to_string();
     settings.custom_resources = split_paths(&ui.get_custom_resources().to_string());
     settings.normalize_encoding_options();
     settings.normalize_recording_options();
@@ -2569,6 +2597,20 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_skybox(settings.skybox.clone().into());
     ui.set_hud(settings.hud.clone().into());
     ui.set_viewmodels(settings.viewmodels.clone().into());
+    ui.set_mirv_advance_time(settings.mirv_shortcuts.advance_time.clone().into());
+    ui.set_mirv_toggle_hud(settings.mirv_shortcuts.toggle_hud.clone().into());
+    ui.set_mirv_show_help(settings.mirv_shortcuts.show_help.clone().into());
+    ui.set_mirv_back_one_second(settings.mirv_shortcuts.back_one_second.clone().into());
+    ui.set_mirv_safe_restart(settings.mirv_shortcuts.safe_restart.clone().into());
+    ui.set_mirv_next_kill_tick(settings.mirv_shortcuts.next_kill_tick.clone().into());
+    ui.set_mirv_pause_resume(settings.mirv_shortcuts.pause_resume.clone().into());
+    ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
+    ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
+    ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
+    ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
+    ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
+    ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
     ui.set_recording_settings_syncing(false);
 }
 
@@ -2582,9 +2624,25 @@ fn persist_recording_settings(ui: &AppWindow, state: &Arc<Mutex<State>>, report_
     };
 
     apply_normalized_recording_settings(ui, &normalized);
+    let save_generation = if ui.get_recording_save_generation() == i32::MAX {
+        1
+    } else {
+        ui.get_recording_save_generation() + 1
+    };
+    ui.set_recording_save_generation(save_generation);
     match save_result {
         Ok(()) => {
             ui.set_recording_save_status("SETTINGS SAVED".into());
+            let weak = ui.as_weak();
+            slint::Timer::single_shot(Duration::from_secs(2), move || {
+                if let Some(ui) = weak.upgrade() {
+                    if ui.get_recording_save_generation() == save_generation
+                        && ui.get_recording_save_status().to_string() == "SETTINGS SAVED"
+                    {
+                        ui.set_recording_save_status("".into());
+                    }
+                }
+            });
             if report_manual_save {
                 ui.set_status_text("Settings saved".into());
             }

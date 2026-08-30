@@ -279,7 +279,110 @@ pub struct AppSettings {
     pub disable_announcer_voices: bool,
     pub disable_applause_sounds: bool,
     pub disable_domination_sounds: bool,
+    pub mirv_shortcuts: MirvShortcuts,
     pub custom_resources: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MirvShortcuts {
+    pub advance_time: String,
+    pub toggle_hud: String,
+    pub show_help: String,
+    pub back_one_second: String,
+    pub safe_restart: String,
+    pub next_kill_tick: String,
+    pub pause_resume: String,
+    pub enter_camera: String,
+    pub add_keyframe: String,
+    pub play_campath: String,
+    pub start_recording: String,
+    pub stop_recording: String,
+    pub print_keyframes: String,
+    pub save_campath: String,
+}
+
+impl Default for MirvShortcuts {
+    fn default() -> Self {
+        Self {
+            advance_time: "[".into(),
+            toggle_hud: "]".into(),
+            show_help: "1".into(),
+            back_one_second: "2".into(),
+            safe_restart: "3".into(),
+            next_kill_tick: "4".into(),
+            pause_resume: "5".into(),
+            enter_camera: "6".into(),
+            add_keyframe: "7".into(),
+            play_campath: "8".into(),
+            start_recording: "9".into(),
+            stop_recording: "0".into(),
+            print_keyframes: "-".into(),
+            save_campath: "=".into(),
+        }
+    }
+}
+
+impl MirvShortcuts {
+    pub fn is_reserved_arrow_key(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_uppercase().as_str(),
+            "UPARROW" | "DOWNARROW" | "LEFTARROW" | "RIGHTARROW"
+        )
+    }
+
+    fn normalized_key(value: &str, fallback: &str) -> String {
+        let value = value.trim();
+        let upper = value.to_ascii_uppercase();
+        let safe_named_key = matches!(
+            upper.as_str(),
+            "SPACE" | "TAB" | "ENTER" | "BACKSPACE" | "DEL" | "INS" | "HOME" | "END"
+                | "PGUP" | "PGDN" | "SCROLLLOCK" | "PAUSE"
+                | "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8"
+                | "F9" | "F10" | "F11" | "F12"
+        );
+        let safe_printable_key = value.chars().count() == 1
+            && value.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '_' | '[' | ']' | '-' | '=' | ',' | '.' | '/' | '\'')
+            });
+        if !Self::is_reserved_arrow_key(value) && safe_named_key {
+            upper
+        } else if !Self::is_reserved_arrow_key(value) && safe_printable_key {
+            value.into()
+        } else {
+            fallback.into()
+        }
+    }
+
+    pub fn normalize(&mut self) {
+        let defaults = Self::default();
+        self.advance_time = Self::normalized_key(&self.advance_time, &defaults.advance_time);
+        self.toggle_hud = Self::normalized_key(&self.toggle_hud, &defaults.toggle_hud);
+        self.show_help = Self::normalized_key(&self.show_help, &defaults.show_help);
+        self.back_one_second = Self::normalized_key(&self.back_one_second, &defaults.back_one_second);
+        self.safe_restart = Self::normalized_key(&self.safe_restart, &defaults.safe_restart);
+        self.next_kill_tick = Self::normalized_key(&self.next_kill_tick, &defaults.next_kill_tick);
+        self.pause_resume = Self::normalized_key(&self.pause_resume, &defaults.pause_resume);
+        self.enter_camera = Self::normalized_key(&self.enter_camera, &defaults.enter_camera);
+        self.add_keyframe = Self::normalized_key(&self.add_keyframe, &defaults.add_keyframe);
+        self.play_campath = Self::normalized_key(&self.play_campath, &defaults.play_campath);
+        self.start_recording = Self::normalized_key(&self.start_recording, &defaults.start_recording);
+        self.stop_recording = Self::normalized_key(&self.stop_recording, &defaults.stop_recording);
+        self.print_keyframes = Self::normalized_key(&self.print_keyframes, &defaults.print_keyframes);
+        self.save_campath = Self::normalized_key(&self.save_campath, &defaults.save_campath);
+
+        let mut seen = BTreeSet::new();
+        let keys = [
+            &self.advance_time, &self.toggle_hud, &self.show_help, &self.back_one_second,
+            &self.safe_restart, &self.next_kill_tick, &self.pause_resume, &self.enter_camera,
+            &self.add_keyframe, &self.play_campath, &self.start_recording, &self.stop_recording,
+            &self.print_keyframes, &self.save_campath,
+        ];
+        if keys.iter().any(|key| !seen.insert(key.to_ascii_lowercase())) {
+            *self = defaults;
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -298,7 +401,7 @@ impl Default for AppSettings {
             disable_hit_sounds: true, disable_voice_chat: true, minimal_hud: true, disable_combat_text: true,
             disable_crosshair: true, disable_crosshair_switching: true, hud_player_model: false,
             isolate_custom_resources: true, disable_announcer_voices: true, disable_applause_sounds: true,
-            disable_domination_sounds: true, custom_resources: Vec::new(),
+            disable_domination_sounds: true, mirv_shortcuts: MirvShortcuts::default(), custom_resources: Vec::new(),
         }
     }
 }
@@ -388,6 +491,7 @@ impl AppSettings {
             .into();
 
         self.viewmodels = if self.viewmodels.eq_ignore_ascii_case("Off") { "Off" } else { "On" }.into();
+        self.mirv_shortcuts.normalize();
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -464,6 +568,36 @@ mod settings_tests {
         assert_eq!(settings.skybox, "Default");
         assert_eq!(settings.hud, "Kill notices only");
         assert_eq!(settings.viewmodels, "On");
+    }
+
+    #[test]
+    fn mirv_shortcuts_keep_the_pdf_defaults() {
+        let shortcuts = MirvShortcuts::default();
+        assert_eq!(shortcuts.advance_time, "[");
+        assert_eq!(shortcuts.toggle_hud, "]");
+        assert_eq!(shortcuts.show_help, "1");
+        assert_eq!(shortcuts.save_campath, "=");
+    }
+
+    #[test]
+    fn mirv_shortcuts_reject_every_arrow_key_name() {
+        for arrow in ["UPARROW", "downarrow", "LeftArrow", "RIGHTARROW"] {
+            let mut shortcuts = MirvShortcuts::default();
+            shortcuts.advance_time = arrow.into();
+            shortcuts.normalize();
+            assert_eq!(shortcuts.advance_time, "[");
+            assert!(!shortcuts.advance_time.eq_ignore_ascii_case(arrow));
+        }
+    }
+
+    #[test]
+    fn mirv_shortcuts_accept_captured_printable_and_named_keys() {
+        let mut shortcuts = MirvShortcuts::default();
+        shortcuts.advance_time = "q".into();
+        shortcuts.toggle_hud = "f12".into();
+        shortcuts.normalize();
+        assert_eq!(shortcuts.advance_time, "q");
+        assert_eq!(shortcuts.toggle_hud, "F12");
     }
 
 }

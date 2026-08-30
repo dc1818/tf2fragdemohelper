@@ -2893,7 +2893,9 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         "Focus candidate and pause after safe seek",
         target_tick + 1,
         None,
-        &format!("{focus}demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"),
+        &format!(
+            "{focus}thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+        ),
     );
     lines.push("}".into());
     lines.join("\n")
@@ -2916,7 +2918,7 @@ fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64, staged_demo: &str)
          alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"\n\
          alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"\n\
          alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"\n\
-         alias tf2frag_manual_help \"echo TF2FRAG_KEYS RIGHT_ARROW_FORWARD_0.25_SECONDS UP_ARROW_TOGGLE_HUD 2_BACK_1_SECOND 3_CLIP_START 4_NEXT_KILL 5_PAUSE 6_CAMERA 7_KEYFRAME 8_PLAY_PATH 9_RECORD 0_STOP -_PRINT =_SAVE\"\n\
+         alias tf2frag_manual_help \"echo TF2FRAG_KEYS LEFT_BRACKET_FORWARD_0.25_SECONDS RIGHT_BRACKET_TOGGLE_HUD 2_BACK_1_SECOND 3_CLIP_START 4_NEXT_KILL 5_PAUSE 6_CAMERA 7_KEYFRAME 8_PLAY_PATH 9_RECORD 0_STOP -_PRINT =_SAVE\"\n\
          alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\"\n"
     );
     for (index, tick) in kill_ticks.iter().enumerate() {
@@ -2932,16 +2934,16 @@ fn manual_hotkey_cfg(candidate: &Candidate, target_tick: i64, staged_demo: &str)
          alias tf2frag_manual_hud_on \"cl_drawhud 1; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off; echo TF2FRAG_MANUAL_HUD_VISIBLE\"\n\
          alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off\n\
          alias tf2frag_manual_next_kill tf2frag_manual_kill_1\n\
-         bind \"RIGHTARROW\" \"mirv_skip time 0.25\"\n\
-         bind \"UPARROW\" \"tf2frag_manual_toggle_hud\"\n\
+         bind \"[\" \"mirv_skip time 0.25\"\n\
+         bind \"]\" \"tf2frag_manual_toggle_hud\"\n\
          bind \"1\" \"tf2frag_manual_help\"\n\
          bind \"2\" \"mirv_skip time -1\"\n\
          bind \"3\" \"tf2frag_manual_clip_start\"\n\
          bind \"4\" \"tf2frag_manual_next_kill\"\n\
          bind \"5\" \"demo_togglepause\"\n\
-         bind \"6\" \"sv_cheats 1; thirdperson; spec_autodirector 0; mirv_input camera\"\n\
+         bind \"6\" \"sv_cheats 1; thirdperson; r_drawviewmodel 0; spec_autodirector 0; mirv_input camera\"\n\
          bind \"7\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED\"\n\
-         bind \"8\" \"mirv_input end; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED\"\n\
+         bind \"8\" \"mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED_THIRDPERSON\"\n\
          bind \"9\" \"tf2frag_manual_start\"\n\
          bind \"0\" \"tf2frag_manual_stop\"\n\
          bind \"-\" \"mirv_campath print\"\n\
@@ -5212,12 +5214,17 @@ mod recording_tests {
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 TICK 925"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 TICK 970"));
         assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
-        assert!(cfg.contains("bind \"RIGHTARROW\" \"mirv_skip time 0.25\""));
-        assert!(cfg.contains("bind \"UPARROW\" \"tf2frag_manual_toggle_hud\""));
+        assert!(cfg.contains("bind \"[\" \"mirv_skip time 0.25\""));
+        assert!(cfg.contains("bind \"]\" \"tf2frag_manual_toggle_hud\""));
+        assert!(!cfg.contains("RIGHTARROW"));
+        assert!(!cfg.contains("UPARROW"));
         assert!(cfg.contains("cl_drawhud 0"));
         assert!(cfg.contains("cl_drawhud 1"));
         assert!(cfg.contains("bind \"6\""));
         assert!(cfg.contains("mirv_input camera"));
+        assert!(cfg.contains(
+            "mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1"
+        ));
         assert!(cfg.contains("bind \"9\" \"tf2frag_manual_start\""));
         assert!(cfg.contains("bind \"0\" \"tf2frag_manual_stop\""));
         assert!(cfg.contains("bind \"=\" \"tf2frag_manual_save\""));
@@ -5230,7 +5237,7 @@ mod recording_tests {
         assert!(vdm.contains("skiptotick \"500\""));
         assert!(vdm.contains("starttick \"501\""));
         assert!(vdm.contains(
-            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
+            "thirdperson; r_drawviewmodel 0; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START"
         ));
         assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
         let pause = vdm.find("demo_pause").expect("pause command");

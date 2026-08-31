@@ -97,6 +97,8 @@ export component DirectorStripWindow inherits Window {
     in property <bool> telemetry-active;
     in property <string> telemetry-status: "WAIT";
     in property <bool> panel-visible: true;
+    in property <bool> compact-layout;
+    in property <bool> narrow-layout;
     in property <string> panel-toggle-key;
     in property <[CueRow]> cues;
     in property <[KeyframeRow]> keyframes;
@@ -107,24 +109,24 @@ export component DirectorStripWindow inherits Window {
         border-color: Colors.border;
 
         HorizontalLayout {
-            padding-left: root.width < 800px ? 6px : 14px;
-            padding-right: root.width < 800px ? 6px : 14px;
+            padding-left: root.narrow-layout ? 6px : 14px;
+            padding-right: root.narrow-layout ? 6px : 14px;
             padding-top: 8px;
             padding-bottom: 8px;
-            spacing: root.width < 800px ? 6px : 18px;
+            spacing: root.narrow-layout ? 6px : 18px;
 
             HorizontalLayout {
-                width: root.width < 800px ? 140px : (root.width < 1000px ? 210px : 300px);
+                width: root.narrow-layout ? 140px : (root.compact-layout ? 210px : 300px);
                 spacing: 8px;
                 Text {
                     text: "TF2 MIRV DIRECTOR";
                     color: Colors.cream;
                     font-family: "Bebas Neue";
-                    font-size: root.width < 800px ? 15px : (root.width < 1000px ? 19px : 25px);
+                    font-size: root.narrow-layout ? 15px : (root.compact-layout ? 19px : 25px);
                     vertical-alignment: center;
                     overflow: elide;
                 }
-                if root.width >= 1000px : Rectangle {
+                if !root.compact-layout : Rectangle {
                     width: 72px;
                     height: 25px;
                     border-width: 1px;
@@ -198,7 +200,7 @@ export component DirectorStripWindow inherits Window {
             }
 
             VerticalLayout {
-                width: root.width < 800px ? 100px : (root.width < 1000px ? 130px : 190px);
+                width: root.narrow-layout ? 100px : (root.compact-layout ? 130px : 190px);
                 alignment: center;
                 Text { text: root.next-frag-tick > 0 ? "NEXT FRAG  " + root.next-frag-tick : "CLIP OUTRO"; color: Colors.gold; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: right; overflow: elide; }
                 Caption { text: root.panel-toggle-key + (root.panel-visible ? "  HIDE PANEL" : "  SHOW PANEL"); color: Colors.blue-text; horizontal-alignment: right; overflow: elide; }

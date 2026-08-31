@@ -409,6 +409,8 @@ fn dock_overlay_windows(
     let logical_height = geometry.size.height as f64 / geometry.scale;
     let card_width = CARD_WIDTH.min(logical_width);
     let card_height = (logical_height - STRIP_HEIGHT).max(1.0);
+    strip.set_compact_layout(logical_width < 1000.0);
+    strip.set_narrow_layout(logical_width < 800.0);
 
     let _ = strip.window().with_winit_window(|native| {
         let _ = native.request_inner_size(winit::dpi::LogicalSize::new(
@@ -641,6 +643,7 @@ fn parse_tick_update(line: &str, prefix: &str) -> Option<TickUpdate> {
         let tick = line[marker + "Current tick: ".len()..]
             .split_whitespace()
             .next()?
+            .trim_end_matches(',')
             .parse::<i64>()
             .ok()?;
         return Some(TickUpdate::Absolute(tick));

@@ -50,20 +50,21 @@ component ShortcutCell inherits Rectangle {
     in property <string> action-name;
     in property <length> key-width: 42px;
     in property <bool> selected;
+    in property <bool> enabled: true;
     callback activated();
     height: 26px;
-    background: root.selected ? #273b25 : Colors.panel-alt;
+    background: !root.enabled ? #20211f : (root.selected ? #273b25 : Colors.panel-alt);
     border-width: 1px;
-    border-color: root.selected ? Colors.green : #343633;
+    border-color: !root.enabled ? Colors.border : (root.selected ? Colors.green : #343633);
 
     HorizontalLayout {
         spacing: 7px;
         Rectangle {
             width: root.key-width;
-            background: Colors.blue;
+            background: root.enabled ? Colors.blue : #292a28;
             Text {
                 text: root.key-name;
-                color: Colors.blue-text;
+                color: root.enabled ? Colors.blue-text : Colors.dim;
                 font-family: "TF2 Build";
                 font-size: 11px;
                 horizontal-alignment: center;
@@ -72,14 +73,14 @@ component ShortcutCell inherits Rectangle {
         }
         Text {
             text: root.action-name;
-            color: Colors.cream;
+            color: root.enabled ? Colors.cream : Colors.dim;
             font-family: "Roboto Condensed";
             font-size: 11px;
             vertical-alignment: center;
             overflow: elide;
         }
     }
-    TouchArea { clicked => { root.activated(); } }
+    TouchArea { enabled: root.enabled; clicked => { root.activated(); } }
 }
 
 component DirectorButton inherits Rectangle {
@@ -122,6 +123,7 @@ export component DirectorStripWindow inherits Window {
     in property <bool> panel-visible: true;
     in property <bool> compact-layout;
     in property <bool> narrow-layout;
+    in property <bool> actions-enabled: true;
     in property <string> panel-toggle-key;
     in property <[CueRow]> cues;
     in property <[KeyframeRow]> keyframes;
@@ -210,6 +212,7 @@ export component DirectorStripWindow inherits Window {
                             horizontal-alignment: center;
                         }
                         TouchArea {
+                            enabled: root.actions-enabled;
                             x: Math.min(parent.width - 24px, Math.max(0px, 12px + keyframe.position * (parent.width - 24px) - 12px));
                             y: 0px;
                             width: 24px;
@@ -226,6 +229,7 @@ export component DirectorStripWindow inherits Window {
                         border-width: root.selected-cue-index == index ? 1px : 0px;
                         border-color: Colors.cream;
                         TouchArea {
+                            enabled: root.actions-enabled;
                             x: -5px;
                             y: -4px;
                             width: 17px;
@@ -277,12 +281,12 @@ export component DirectorCardWindow inherits Window {
     in property <bool> has-selected-keyframe;
     in property <int> selected-keyframe-id;
     in property <int> selected-keyframe-tick;
+    in property <bool> actions-enabled: true;
     in-out property <string> keyframe-action: "Go to keyframe";
     in-out property <string> keyframe-argument;
     in property <string> command-status: "DIRECTOR COMMAND QUEUE READY";
     callback hide-requested();
     callback frag-goto-requested();
-    callback frag-clear-requested();
     callback keyframe-activated(int, int);
     callback keyframe-action-requested(int, string, string);
 
@@ -328,8 +332,7 @@ export component DirectorCardWindow inherits Window {
                     }
                     HorizontalLayout {
                         spacing: 6px;
-                        DirectorButton { text: "GO TO FRAG (-1 SEC)"; enabled: root.next-frag-tick > 0; clicked => { root.frag-goto-requested(); } }
-                        if root.highlighted-frag : DirectorButton { width: 105px; text: "SHOW NEXT"; tone: Colors.panel-alt; clicked => { root.frag-clear-requested(); } }
+                        DirectorButton { text: "GO TO FRAG (-1 SEC)"; enabled: root.actions-enabled && root.next-frag-tick > 0; clicked => { root.frag-goto-requested(); } }
                     }
                 }
             }
@@ -358,6 +361,7 @@ export component DirectorCardWindow inherits Window {
                             Text { height: 20px; text: "SELECTED HLAE KEYFRAME  " + root.selected-keyframe-id + "  •  TICK  " + root.selected-keyframe-tick; color: Colors.green; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; overflow: elide; }
                             ComboBox {
                                 height: 32px;
+                                enabled: root.actions-enabled;
                                 model: [
                                     "Go to keyframe", "Go to 1 sec before", "Select only", "Add to selection",
                                     "Select range through ID", "Add range through ID", "Delete keyframe",
@@ -369,9 +373,9 @@ export component DirectorCardWindow inherits Window {
                                 ];
                                 current-value <=> root.keyframe-action;
                             }
-                            LineEdit { height: 30px; text <=> root.keyframe-argument; placeholder-text: "Optional value: seconds, X Y Z, P Y R, FOV, interpolation"; }
+                            LineEdit { height: 30px; enabled: root.actions-enabled; text <=> root.keyframe-argument; placeholder-text: "Optional value: seconds, X Y Z, P Y R, FOV, interpolation"; }
                             Caption { height: 28px; text: "Single-key edits select this exact HLAE ID first. IDs refresh from mirv_campath print after execution."; color: Colors.muted; font-size: 9px; wrap: word-wrap; }
-                            DirectorButton { text: "EXECUTE HLAE ACTION"; tone: #34542e; clicked => { root.keyframe-action-requested(root.selected-keyframe-id, root.keyframe-action, root.keyframe-argument); } }
+                            DirectorButton { text: "EXECUTE HLAE ACTION"; enabled: root.actions-enabled; tone: #34542e; clicked => { root.keyframe-action-requested(root.selected-keyframe-id, root.keyframe-action, root.keyframe-argument); } }
                         }
                     }
                     Caption { height: 22px; text: root.command-status; color: Colors.blue-text; font-size: 9px; wrap: word-wrap; }
@@ -381,23 +385,25 @@ export component DirectorCardWindow inherits Window {
                         key-width: 100px;
                         action-name: "TICK  " + keyframe.tick;
                         selected: root.has-selected-keyframe && root.selected-keyframe-id == keyframe.id;
+                        enabled: root.actions-enabled;
                         activated => { root.keyframe-activated(keyframe.id, keyframe.tick); }
                     }
                     Text { height: 20px; text: "MIRV SHORTCUTS"; color: Colors.cream; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; }
                     for shortcut in root.shortcuts : ShortcutCell {
                         key-name: shortcut.key;
                         action-name: shortcut.label;
+                        enabled: root.actions-enabled;
                     }
                 }
             }
 
             Rectangle {
                 height: 42px;
-                background: Colors.blue;
+                background: root.actions-enabled ? Colors.blue : #292a28;
                 border-width: 1px;
-                border-color: Colors.blue-line;
-                Text { text: root.panel-toggle-key + "  HIDE PANEL"; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-                TouchArea { clicked => { root.hide-requested(); } }
+                border-color: root.actions-enabled ? Colors.blue-line : Colors.border;
+                Text { text: root.panel-toggle-key + "  HIDE PANEL"; color: root.actions-enabled ? Colors.blue-text : Colors.dim; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
+                TouchArea { enabled: root.actions-enabled; clicked => { root.hide-requested(); } }
             }
             Text { height: 30px; text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
             Caption { height: 18px; text: "TIMELINE + CARD INTERACTIVE • TF2 REMAINS DIRECTLY USABLE"; color: Colors.muted; font-size: 9px; horizontal-alignment: center; }

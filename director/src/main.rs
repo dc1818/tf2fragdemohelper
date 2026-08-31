@@ -11,7 +11,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     rc::Rc,
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 use tf2_mirv_director::{
     DirectorControl, DirectorSession, DIRECTOR_ACTION_ACK_PREFIX,
@@ -20,6 +21,9 @@ use tf2_mirv_director::{
 };
 
 const ONE_SECOND_TICKS: i64 = 67;
+const DEMO_READY_MARKER: &str = "TF2FRAG_MANUAL_PAUSED_AT_START";
+const DEMO_RELOAD_MARKER: &str = "TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO";
+const DEMO_READY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 slint::include_modules!();
 
@@ -39,8 +43,16 @@ fn main() -> Result<()> {
             session.telemetry_marker_prefix,
         ),
     );
+    wait_for_demo_ready(
+        &session.telemetry_log,
+        &session.telemetry_marker_prefix,
+        &telemetry_diagnostic,
+    )?;
+    append_telemetry_diagnostic(&telemetry_diagnostic, "status=DEMO_FULLY_LOADED_AND_PAUSED");
+
     let strip = DirectorStripWindow::new()?;
     let card = DirectorCardWindow::new()?;
+    let demo_ready = Rc::new(Cell::new(true));
     let highlighted_cue = Rc::new(Cell::new(None::<usize>));
     let selected_keyframe = Rc::new(Cell::new(None::<(i32, i64)>));
     let last_tick = Rc::new(Cell::new(session.start_tick));
@@ -106,7 +118,9 @@ fn main() -> Result<()> {
 
     strip.set_selected_cue_index(-1);
     strip.set_has_selected_keyframe(false);
+    strip.set_actions_enabled(true);
     card.set_has_selected_keyframe(false);
+    card.set_actions_enabled(true);
     update_playback_state(
         &strip,
         &card,
@@ -122,7 +136,11 @@ fn main() -> Result<()> {
         let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let panel_visible = panel_visible.clone();
+        let demo_ready = demo_ready.clone();
         card.on_hide_requested(move || {
+            if !demo_ready.get() {
+                return;
+            }
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
@@ -134,7 +152,11 @@ fn main() -> Result<()> {
         let weak_card = card.as_weak();
         let selected_keyframe = selected_keyframe.clone();
         let panel_visible = panel_visible.clone();
+        let demo_ready = demo_ready.clone();
         strip.on_keyframe_activated(move |id, tick| {
+            if !demo_ready.get() {
+                return;
+            }
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
@@ -146,7 +168,11 @@ fn main() -> Result<()> {
         let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let selected_keyframe = selected_keyframe.clone();
+        let demo_ready = demo_ready.clone();
         card.on_keyframe_activated(move |id, tick| {
+            if !demo_ready.get() {
+                return;
+            }
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
@@ -160,7 +186,11 @@ fn main() -> Result<()> {
         let highlighted_cue = highlighted_cue.clone();
         let last_tick = last_tick.clone();
         let panel_visible = panel_visible.clone();
+        let demo_ready = demo_ready.clone();
         strip.on_cue_activated(move |index| {
+            if !demo_ready.get() {
+                return;
+            }
             let Ok(index) = usize::try_from(index) else {
                 return;
             };
@@ -184,38 +214,24 @@ fn main() -> Result<()> {
         });
     }
     {
-        let weak_strip = strip.as_weak();
-        let weak_card = card.as_weak();
-        let session = session.clone();
-        let highlighted_cue = highlighted_cue.clone();
-        let last_tick = last_tick.clone();
-        card.on_frag_clear_requested(move || {
-            highlighted_cue.set(None);
-            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
-                return;
-            };
-            strip.set_selected_cue_index(-1);
-            update_playback_state(
-                &strip,
-                &card,
-                &session,
-                last_tick.get(),
-                true,
-                None,
-            );
-        });
-    }
-    {
         let weak_card = card.as_weak();
         let session = session.clone();
         let highlighted_cue = highlighted_cue.clone();
         let last_tick = last_tick.clone();
         let action_queue = action_queue.clone();
+        let demo_ready = demo_ready.clone();
         card.on_frag_goto_requested(move || {
+            if !demo_ready.get() {
+                return;
+            }
             let Some(card) = weak_card.upgrade() else {
                 return;
             };
-            let Some(index) = displayed_cue_index(&session, last_tick.get(), highlighted_cue.get()) else {
+            let Some(index) = displayed_cue_index(
+                &session,
+                last_tick.get(),
+                highlighted_cue.get(),
+            ) else {
                 card.set_command_status("NO FRAG IS AVAILABLE TO SEEK".into());
                 return;
             };
@@ -240,10 +256,15 @@ fn main() -> Result<()> {
         let weak_card = card.as_weak();
         let session = session.clone();
         let action_queue = action_queue.clone();
+        let demo_ready = demo_ready.clone();
         card.on_keyframe_action_requested(move |id, action, argument| {
             let Some(card) = weak_card.upgrade() else {
                 return;
             };
+            if !demo_ready.get() {
+                card.set_command_status("WAITING FOR DEMO TO FINISH LOADING".into());
+                return;
+            }
             let tick = card.get_selected_keyframe_tick() as i64;
             match build_keyframe_action(
                 id,
@@ -294,10 +315,14 @@ fn main() -> Result<()> {
         let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let panel_visible = panel_visible.clone();
+        let demo_ready = demo_ready.clone();
         let was_down = Rc::new(Cell::new(false));
         hotkey_timer.start(TimerMode::Repeated, Duration::from_millis(30), move || {
             let down = global_key_is_down(virtual_key);
             if down && !was_down.replace(down) {
+                if !demo_ready.get() {
+                    return;
+                }
                 let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                     return;
                 };
@@ -318,6 +343,7 @@ fn main() -> Result<()> {
         let selected_keyframe = selected_keyframe.clone();
         let last_tick = last_tick.clone();
         let action_queue = action_queue.clone();
+        let demo_ready = demo_ready.clone();
         let mut tail = TickLogTail::new(session.telemetry_log.clone());
         let telemetry_diagnostic = telemetry_diagnostic.clone();
         let mut polls = 0_u32;
@@ -340,6 +366,29 @@ fn main() -> Result<()> {
                             &telemetry_diagnostic,
                             "status=TF2_CONSOLE_LOG_OPENED",
                         );
+                    }
+                    if poll.demo_loading {
+                        demo_ready.set(false);
+                        set_demo_actions_enabled(&strip, &card, false);
+                        strip.set_telemetry_status("LOADING".into());
+                        card.set_command_status("WAITING FOR DEMO TO FINISH LOADING".into());
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            "status=SAFE_RESTART_LOADING_ACTIONS_DISABLED",
+                        );
+                    }
+                    if poll.demo_ready {
+                        demo_ready.set(true);
+                        set_demo_actions_enabled(&strip, &card, true);
+                        strip.set_telemetry_status("LIVE".into());
+                        card.set_command_status("DEMO LOADED — DIRECTOR ACTIONS READY".into());
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            "status=DEMO_READY_ACTIONS_ENABLED",
+                        );
+                    }
+                    if !demo_ready.get() {
+                        return;
                     }
                     if poll.keyframes_invalidated {
                         clear_keyframe_snapshot(&strip, &card, &selected_keyframe);
@@ -466,6 +515,33 @@ fn append_telemetry_diagnostic(path: &Path, message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{message}");
     }
+}
+
+fn wait_for_demo_ready(log_path: &Path, prefix: &str, diagnostic_path: &Path) -> Result<()> {
+    let started = Instant::now();
+    let mut tail = TickLogTail::new(log_path.to_owned());
+    loop {
+        let poll = tail
+            .poll(prefix)
+            .with_context(|| format!("could not read TF2 readiness log {}", log_path.display()))?;
+        if poll.demo_ready {
+            return Ok(());
+        }
+        if started.elapsed() >= DEMO_READY_TIMEOUT {
+            append_telemetry_diagnostic(diagnostic_path, "status=DEMO_READY_TIMEOUT");
+            bail!("TF2 did not finish loading and pause within 20 minutes");
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn set_demo_actions_enabled(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    enabled: bool,
+) {
+    strip.set_actions_enabled(enabled);
+    card.set_actions_enabled(enabled);
 }
 
 fn update_playback_state(
@@ -1105,6 +1181,12 @@ impl TickLogTail {
         self.carry = remainder.to_owned();
         let mut poll = TelemetryPoll::default();
         for line in complete.lines() {
+            if line_starts_demo_load(line) {
+                poll.demo_loading = true;
+            }
+            if line_marks_demo_ready(line) {
+                poll.demo_ready = true;
+            }
             if let Some(update) = parse_tick_update(line, prefix) {
                 poll.tick_updates.push(update);
             }
@@ -1140,8 +1222,24 @@ impl TickLogTail {
     }
 }
 
+fn line_starts_demo_load(line: &str) -> bool {
+    if line.contains(DEMO_RELOAD_MARKER) {
+        return true;
+    }
+    let lower = line.to_ascii_lowercase();
+    lower.contains("] playdemo ")
+        || lower.contains("playing demo from ")
+        || lower.contains("demo playback finished")
+}
+
+fn line_marks_demo_ready(line: &str) -> bool {
+    line.contains(DEMO_READY_MARKER)
+}
+
 #[derive(Default)]
 struct TelemetryPoll {
+    demo_loading: bool,
+    demo_ready: bool,
     tick_updates: Vec<TickUpdate>,
     keyframe_snapshot: Option<Vec<ParsedCampathKey>>,
     keyframes_invalidated: bool,
@@ -1360,6 +1458,23 @@ mod tests {
             ),
             Some(TickUpdate::Absolute(11_933))
         );
+    }
+
+    #[test]
+    fn detects_demo_loading_and_authoritative_ready_markers() {
+        assert!(line_starts_demo_load(
+            "08/30 12:30:22 TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET 12000"
+        ));
+        assert!(line_starts_demo_load(
+            "08/30 12:30:22 ] playdemo demos/test.dem"
+        ));
+        assert!(line_starts_demo_load(
+            "08/30 12:30:22 Playing demo from demos/test.dem."
+        ));
+        assert!(!line_marks_demo_ready("Current tick: 12000"));
+        assert!(line_marks_demo_ready(
+            "08/30 12:30:22 TF2FRAG_MANUAL_PAUSED_AT_START"
+        ));
     }
 
     #[test]

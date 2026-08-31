@@ -5692,13 +5692,15 @@ mod recording_tests {
         assert_eq!(session.cues[0].victims, vec!["Alice"]);
         assert!(session.cues[1].victims.is_empty());
         assert_eq!(session.whole_candidate_tags, vec!["multi kill"]);
-        assert_eq!(session.shortcuts.len(), 16);
+        assert_eq!(session.shortcuts.len(), 17);
         assert_eq!(session.shortcuts[0].key, "[");
         assert_eq!(session.shortcuts[7].label, "MIRV camera");
         assert_eq!(session.campath_file, campath);
         assert_eq!(session.shortcuts[10].key, "/");
         assert_eq!(session.shortcuts[10].label, "Show / hide campath + IDs");
-        assert_eq!(session.shortcuts[15].key, "C");
+        assert_eq!(session.shortcuts[15].key, "'");
+        assert_eq!(session.shortcuts[15].label, "Execute queued Director action");
+        assert_eq!(session.shortcuts[16].key, "C");
         assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
     }
 

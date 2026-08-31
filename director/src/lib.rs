@@ -2,11 +2,14 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DIRECTOR_SESSION_SCHEMA: u32 = 3;
+pub const DIRECTOR_SESSION_SCHEMA: u32 = 4;
 pub const DIRECTOR_TICK_MARKER_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK";
 pub const DIRECTOR_TICK_OFFSET_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK_OFFSET";
 pub const DIRECTOR_KEYFRAME_BEGIN_PREFIX: &str = "TF2FRAG_DIRECTOR_KEYFRAMES_BEGIN";
 pub const DIRECTOR_KEYFRAME_END_PREFIX: &str = "TF2FRAG_DIRECTOR_KEYFRAMES_END";
+pub const DIRECTOR_ACTION_ACK_PREFIX: &str = "TF2FRAG_DIRECTOR_ACTION_ACK";
+pub const DIRECTOR_ACTION_FILE_PREFIX: &str = "tf2fragdemohelper_director_action";
+pub const DIRECTOR_ACTION_SLOTS: u16 = 64;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct DirectorSession {
@@ -24,6 +27,8 @@ pub struct DirectorSession {
     /// TF2's temporary console log. The Director tails only its own tick markers.
     pub telemetry_log: PathBuf,
     pub telemetry_marker_prefix: String,
+    /// Temporary TF2 cfg directory used by the injection-free Director command queue.
+    pub command_cfg_directory: PathBuf,
     pub control: DirectorControl,
 }
 
@@ -41,6 +46,9 @@ impl DirectorSession {
         }
         if self.telemetry_marker_prefix.trim().is_empty() {
             bail!("Director telemetry marker prefix cannot be empty");
+        }
+        if self.command_cfg_directory.as_os_str().is_empty() {
+            bail!("Director command cfg directory cannot be empty");
         }
         if self
             .cues
@@ -97,8 +105,11 @@ pub enum BridgeRequest {
     SkipSeconds { seconds: f64 },
     SetCamera { pose: CameraPose },
     AddKeyframe,
-    ReplaceKeyframe { id: u64, pose: CameraPose },
-    RemoveKeyframe { id: u64 },
+    ReplaceKeyframe {
+        hlae_index: i32,
+        pose: CameraPose,
+    },
+    RemoveKeyframe { hlae_index: i32 },
     EnableCampath { enabled: bool },
     DrawCampath { enabled: bool },
     SaveCampath { path: PathBuf },
@@ -128,7 +139,8 @@ pub struct BridgeState {
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct CampathKey {
-    pub id: u64,
+    /// Ephemeral time-sorted index printed and consumed by HLAE.
+    pub hlae_index: i32,
     pub demo_tick: i64,
     pub demo_time: f64,
     pub camera: CameraPose,
@@ -157,6 +169,7 @@ mod tests {
             }],
             telemetry_log: PathBuf::from("tf/tf2fragdemohelper_recording.log"),
             telemetry_marker_prefix: DIRECTOR_TICK_MARKER_PREFIX.into(),
+            command_cfg_directory: PathBuf::from("tf/cfg"),
             ..DirectorSession::default()
         }
     }

@@ -1,4 +1,4 @@
-import { ScrollView } from "std-widgets.slint";
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import "../../app/ui/assets/fonts/TF2Build.ttf";
 import "../../app/ui/assets/fonts/RobotoCondensed-Variable.ttf";
 import "../../app/ui/assets/fonts/BebasNeue-Regular.ttf";
@@ -49,10 +49,12 @@ component ShortcutCell inherits Rectangle {
     in property <string> key-name;
     in property <string> action-name;
     in property <length> key-width: 42px;
+    in property <bool> selected;
+    callback activated();
     height: 26px;
-    background: Colors.panel-alt;
+    background: root.selected ? #273b25 : Colors.panel-alt;
     border-width: 1px;
-    border-color: #343633;
+    border-color: root.selected ? Colors.green : #343633;
 
     HorizontalLayout {
         spacing: 7px;
@@ -77,10 +79,31 @@ component ShortcutCell inherits Rectangle {
             overflow: elide;
         }
     }
+    TouchArea { clicked => { root.activated(); } }
 }
 
-// Option C: this narrow, click-through window remains visible even when the
-// interactive cue card is hidden.
+component DirectorButton inherits Rectangle {
+    in property <string> text;
+    in property <brush> tone: Colors.blue;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 30px;
+    background: root.enabled ? root.tone : #292a28;
+    border-width: 1px;
+    border-color: root.enabled ? Colors.blue-line : Colors.border;
+    Text {
+        text: root.text;
+        color: root.enabled ? Colors.cream : Colors.dim;
+        font-family: "TF2 Build";
+        font-size: 10px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+// Option C: this narrow timeline remains visible even when the cue card is hidden.
 export component DirectorStripWindow inherits Window {
     title: "TF2 MIRV Director Timeline";
     preferred-width: 1500px;
@@ -102,6 +125,11 @@ export component DirectorStripWindow inherits Window {
     in property <string> panel-toggle-key;
     in property <[CueRow]> cues;
     in property <[KeyframeRow]> keyframes;
+    in property <bool> has-selected-keyframe;
+    in property <int> selected-keyframe-id;
+    in property <int> selected-cue-index: -1;
+    callback keyframe-activated(int, int);
+    callback cue-activated(int);
 
     Rectangle {
         background: Colors.header;
@@ -169,7 +197,7 @@ export component DirectorStripWindow inherits Window {
                             y: 13px;
                             width: 5px;
                             height: 18px;
-                            background: Colors.green;
+                            background: root.has-selected-keyframe && root.selected-keyframe-id == keyframe.id ? #c7f59a : Colors.green;
                         }
                         Text {
                             x: Math.min(parent.width - 94px, Math.max(0px, 12px + keyframe.position * (parent.width - 24px) - 47px));
@@ -181,13 +209,29 @@ export component DirectorStripWindow inherits Window {
                             font-size: 8px;
                             horizontal-alignment: center;
                         }
+                        TouchArea {
+                            x: Math.min(parent.width - 24px, Math.max(0px, 12px + keyframe.position * (parent.width - 24px) - 12px));
+                            y: 0px;
+                            width: 24px;
+                            height: 28px;
+                            clicked => { root.keyframe-activated(keyframe.id, keyframe.tick); }
+                        }
                     }
-                    for cue in root.cues : Rectangle {
+                    for cue[index] in root.cues : Rectangle {
                         x: 12px + cue.position * (parent.width - 24px) - 3px;
                         y: 28px;
                         width: 7px;
                         height: 13px;
-                        background: Colors.gold;
+                        background: root.selected-cue-index == index ? #ffad52 : Colors.gold;
+                        border-width: root.selected-cue-index == index ? 1px : 0px;
+                        border-color: Colors.cream;
+                        TouchArea {
+                            x: -5px;
+                            y: -4px;
+                            width: 17px;
+                            height: 21px;
+                            clicked => { root.cue-activated(index); }
+                        }
                     }
                     Rectangle {
                         x: 12px + root.current-position * (parent.width - 24px) - 2px;
@@ -204,7 +248,7 @@ export component DirectorStripWindow inherits Window {
                 alignment: center;
                 Text { text: root.next-frag-tick > 0 ? "NEXT FRAG  " + root.next-frag-tick : "CLIP OUTRO"; color: Colors.gold; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: right; overflow: elide; }
                 Caption { text: root.panel-toggle-key + (root.panel-visible ? "  HIDE PANEL" : "  SHOW PANEL"); color: Colors.blue-text; horizontal-alignment: right; overflow: elide; }
-                Caption { text: "GAME INPUT PASSES THROUGH"; font-size: 9px; horizontal-alignment: right; overflow: elide; }
+                Caption { text: "CLICK MARKERS TO INSPECT"; font-size: 9px; horizontal-alignment: right; overflow: elide; }
             }
         }
     }
@@ -228,7 +272,19 @@ export component DirectorCardWindow inherits Window {
     in property <string> record-order;
     in property <[ShortcutRow]> shortcuts;
     in property <[KeyframeRow]> keyframes;
+    in property <string> frag-heading: "NEXT FRAG";
+    in property <bool> highlighted-frag;
+    in property <bool> has-selected-keyframe;
+    in property <int> selected-keyframe-id;
+    in property <int> selected-keyframe-tick;
+    in-out property <string> keyframe-action: "Go to keyframe";
+    in-out property <string> keyframe-argument;
+    in property <string> command-status: "DIRECTOR COMMAND QUEUE READY";
     callback hide-requested();
+    callback frag-goto-requested();
+    callback frag-clear-requested();
+    callback keyframe-activated(int, int);
+    callback keyframe-action-requested(int, string, string);
 
     Rectangle {
         background: Colors.app;
@@ -240,32 +296,40 @@ export component DirectorCardWindow inherits Window {
 
             HorizontalLayout {
                 height: 28px;
-                Text { text: "NEXT FRAG"; color: Colors.cream; font-family: "TF2 Build"; font-size: 16px; vertical-alignment: center; }
+                Text { text: root.frag-heading; color: Colors.cream; font-family: "TF2 Build"; font-size: 16px; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; background: #00000000; }
                 Caption { text: "LIVE " + root.current-tick; color: Colors.blue-text; horizontal-alignment: right; }
             }
 
             Rectangle {
-                height: 112px;
+                height: 146px;
                 background: Colors.panel;
                 border-width: 1px;
                 border-color: #343633;
-                HorizontalLayout {
+                VerticalLayout {
                     padding: 10px;
-                    spacing: 12px;
-                    Rectangle {
-                        width: 66px;
-                        height: 66px;
-                        background: Colors.blue;
-                        border-width: 1px;
-                        border-color: Colors.blue-line;
-                        Text { text: root.next-frag-number; color: Colors.cream; font-family: "TF2 Build"; font-size: 30px; horizontal-alignment: center; vertical-alignment: center; }
+                    spacing: 7px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Rectangle {
+                            width: 66px;
+                            height: 66px;
+                            background: Colors.blue;
+                            border-width: 1px;
+                            border-color: Colors.blue-line;
+                            Text { text: root.next-frag-number; color: Colors.cream; font-family: "TF2 Build"; font-size: 30px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: root.next-frag-tick > 0 ? "TICK  " + root.next-frag-tick : "OUTRO"; color: Colors.cream; font-family: "TF2 Build"; font-size: 12px; }
+                            Caption { text: root.next-frag-victims == "" ? "VICTIM: UNKNOWN" : "VICTIM: " + root.next-frag-victims; color: Colors.cream; overflow: elide; }
+                            Caption { text: root.next-frag-tags == "" ? "TAGS: NONE" : "TAGS: " + root.next-frag-tags; color: Colors.cream; wrap: word-wrap; }
+                        }
                     }
-                    VerticalLayout {
-                        spacing: 4px;
-                        Text { text: root.next-frag-tick > 0 ? "TICK  " + root.next-frag-tick : "OUTRO"; color: Colors.cream; font-family: "TF2 Build"; font-size: 12px; }
-                        Caption { text: root.next-frag-victims == "" ? "VICTIM: UNKNOWN" : "VICTIM: " + root.next-frag-victims; color: Colors.cream; overflow: elide; }
-                        Caption { text: root.next-frag-tags == "" ? "TAGS: NONE" : "TAGS: " + root.next-frag-tags; color: Colors.cream; wrap: word-wrap; }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        DirectorButton { text: "GO TO FRAG (-1 SEC)"; enabled: root.next-frag-tick > 0; clicked => { root.frag-goto-requested(); } }
+                        if root.highlighted-frag : DirectorButton { width: 105px; text: "SHOW NEXT"; tone: Colors.panel-alt; clicked => { root.frag-clear-requested(); } }
                     }
                 }
             }
@@ -283,11 +347,41 @@ export component DirectorCardWindow inherits Window {
                 horizontal-scrollbar-policy: always-off;
                 VerticalLayout {
                     spacing: 2px;
+                    if root.has-selected-keyframe : Rectangle {
+                        height: 190px;
+                        background: Colors.panel;
+                        border-width: 1px;
+                        border-color: Colors.green;
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 5px;
+                            Text { height: 20px; text: "SELECTED HLAE KEYFRAME  " + root.selected-keyframe-id + "  •  TICK  " + root.selected-keyframe-tick; color: Colors.green; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; overflow: elide; }
+                            ComboBox {
+                                height: 32px;
+                                model: [
+                                    "Go to keyframe", "Go to 1 sec before", "Select only", "Add to selection",
+                                    "Select range through ID", "Add range through ID", "Delete keyframe",
+                                    "Move time to current", "Shift time by seconds", "Set absolute time", "Position from current camera",
+                                    "Set position X Y Z", "Angles from current camera", "Set angles P Y R", "FOV from current camera",
+                                    "Set FOV", "Rotate P Y R", "Anchor to current camera", "Align path to keyframe",
+                                    "Align path with offset", "Set selected duration", "Interpolation position", "Interpolation rotation",
+                                    "Interpolation FOV", "Select all", "Deselect all", "Invert selection"
+                                ];
+                                current-value <=> root.keyframe-action;
+                            }
+                            LineEdit { height: 30px; text <=> root.keyframe-argument; placeholder-text: "Optional value: seconds, X Y Z, P Y R, FOV, interpolation"; }
+                            Caption { height: 28px; text: "Single-key edits select this exact HLAE ID first. IDs refresh from mirv_campath print after execution."; color: Colors.muted; font-size: 9px; wrap: word-wrap; }
+                            DirectorButton { text: "EXECUTE HLAE ACTION"; tone: #34542e; clicked => { root.keyframe-action-requested(root.selected-keyframe-id, root.keyframe-action, root.keyframe-argument); } }
+                        }
+                    }
+                    Caption { height: 22px; text: root.command-status; color: Colors.blue-text; font-size: 9px; wrap: word-wrap; }
                     Text { height: 20px; text: "HLAE KEYFRAME ID  →  DEMO TICK"; color: Colors.green; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; }
                     for keyframe in root.keyframes : ShortcutCell {
                         key-name: "" + keyframe.id;
                         key-width: 100px;
                         action-name: "TICK  " + keyframe.tick;
+                        selected: root.has-selected-keyframe && root.selected-keyframe-id == keyframe.id;
+                        activated => { root.keyframe-activated(keyframe.id, keyframe.tick); }
                     }
                     Text { height: 20px; text: "MIRV SHORTCUTS"; color: Colors.cream; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; }
                     for shortcut in root.shortcuts : ShortcutCell {
@@ -306,7 +400,7 @@ export component DirectorCardWindow inherits Window {
                 TouchArea { clicked => { root.hide-requested(); } }
             }
             Text { height: 30px; text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
-            Caption { height: 18px; text: "CARD INTERACTIVE • GAME AREA CLICK-THROUGH"; color: Colors.muted; font-size: 9px; horizontal-alignment: center; }
+            Caption { height: 18px; text: "TIMELINE + CARD INTERACTIVE • TF2 REMAINS DIRECTLY USABLE"; color: Colors.muted; font-size: 9px; horizontal-alignment: center; }
         }
     }
 }

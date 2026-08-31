@@ -1813,12 +1813,35 @@ fn append_bookmarks(export: &Path, source_demo: &str, context: &DemoContext, can
     bookmarks.sort_by_key(|(tick, _)| *tick);
 
     for (index, (tick, comment)) in bookmarks.into_iter().enumerate() {
-        let linked = candidates
+        let linked_index = candidates
             .iter()
-            .filter(|candidate| tick >= candidate.clip_start_tick - OBJECTIVE_CONVERSION_TICKS && tick <= candidate.clip_end_tick + CAPTURE_DENIAL_TICKS)
-            .min_by_key(|candidate| candidate.point_of_kill_ticks.iter().map(|kill| (kill - tick).abs()).min().unwrap_or(i64::MAX))
-            .cloned();
-        let mut candidate = linked.unwrap_or_else(|| Candidate {
+            .enumerate()
+            // Only a real frag candidate can absorb a bookmark. A standalone
+            // bookmark uses its own tick as a synthetic point-of-kill and must
+            // not swallow another nearby bookmark.
+            .filter(|(_, candidate)| {
+                candidate.kill_count() > 0 && candidate.attacker_class != "bookmark"
+            })
+            .filter(|(_, candidate)| {
+                tick >= candidate.clip_start_tick - OBJECTIVE_CONVERSION_TICKS
+                    && tick <= candidate.clip_end_tick + CAPTURE_DENIAL_TICKS
+            })
+            .min_by_key(|(_, candidate)| {
+                candidate
+                    .point_of_kill_ticks
+                    .iter()
+                    .map(|kill| (kill - tick).abs())
+                    .min()
+                    .unwrap_or(i64::MAX)
+            })
+            .map(|(candidate_index, _)| candidate_index);
+
+        if let Some(candidate_index) = linked_index {
+            add_bookmark_to_candidate(&mut candidates[candidate_index], tick, comment);
+            continue;
+        }
+
+        let mut candidate = Candidate {
             candidate_id: format!("bookmark-{tick}-{index}"),
             source_demo: source_demo.into(),
             attacker_class: "bookmark".into(),
@@ -1828,26 +1851,43 @@ fn append_bookmarks(export: &Path, source_demo: &str, context: &DemoContext, can
             metrics: json!({"kills":0}),
             demo_context: context.clone(),
             ..Candidate::default()
-        });
-        candidate.candidate_id = format!("bookmark-{tick}-{index}");
-        candidate.overall_score += BOOKMARK_SCORE;
-        candidate.tags.push("bookmark".into());
-        candidate.tags.sort();
-        candidate.tags.dedup();
-        candidate.sequence_tags.push("bookmark".into());
-        candidate.sequence_tags.sort();
-        candidate.sequence_tags.dedup();
-        candidate.bookmark_comment = comment;
-        candidate.bookmark_tick = Some(tick);
-        if !candidate.metrics.is_object() { candidate.metrics = json!({}); }
-        candidate.metrics["bookmarks"] = json!(1);
-        candidate.metrics["bookmark_score"] = json!(BOOKMARK_SCORE);
-        candidate.score_breakdown.push(json!({"reason":"bookmark","points":BOOKMARK_SCORE,"event_tick":tick}));
-        candidate.primary_tag.clear();
-        candidate.primary_tag = candidate.inferred_primary_tag();
+        };
+        add_bookmark_to_candidate(&mut candidate, tick, comment);
         candidates.push(candidate);
     }
     Ok(())
+}
+
+fn add_bookmark_to_candidate(candidate: &mut Candidate, tick: i64, comment: String) {
+    let previous_bookmarks = candidate
+        .metrics
+        .get("bookmarks")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let previous_bookmark_score = candidate
+        .metrics
+        .get("bookmark_score")
+        .and_then(Value::as_f64)
+        .unwrap_or_default();
+    candidate.overall_score += BOOKMARK_SCORE;
+    candidate.tags.push("bookmark".into());
+    candidate.tags.sort();
+    candidate.tags.dedup();
+    candidate.sequence_tags.push("bookmark".into());
+    candidate.sequence_tags.sort();
+    candidate.sequence_tags.dedup();
+    candidate.bookmark_comment = comment;
+    candidate.bookmark_tick = Some(tick);
+    if !candidate.metrics.is_object() {
+        candidate.metrics = json!({});
+    }
+    candidate.metrics["bookmarks"] = json!(previous_bookmarks + 1);
+    candidate.metrics["bookmark_score"] = json!(previous_bookmark_score + BOOKMARK_SCORE);
+    candidate
+        .score_breakdown
+        .push(json!({"reason":"bookmark","points":BOOKMARK_SCORE,"event_tick":tick}));
+    candidate.primary_tag.clear();
+    candidate.primary_tag = candidate.inferred_primary_tag();
 }
 
 fn write_candidates(export: &Path, candidates: &[Candidate], context: &DemoContext, source_demo: &str, map_name: &str, item_schema: Option<&Path>) -> Result<()> {
@@ -2107,12 +2147,41 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(candidates.len(), 2);
-        let bookmarked = candidates.iter().find(|candidate| candidate.bookmark_tick == Some(1_000)).unwrap();
+        assert_eq!(candidates.len(), 1);
+        let bookmarked = &candidates[0];
+        assert_eq!(bookmarked.candidate_id, "frag");
+        assert_eq!(bookmarked.bookmark_tick, Some(1_000));
         assert_eq!(bookmarked.overall_score, 20.0 + BOOKMARK_SCORE);
         assert!(bookmarked.tags.iter().any(|tag| tag == "airshot"));
         assert!(bookmarked.tags.iter().any(|tag| tag == "bookmark"));
         assert_eq!(bookmarked.metrics["bookmark_score"], json!(BOOKMARK_SCORE));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn separate_unlinked_bookmarks_remain_separate_candidates() {
+        let root = bookmark_test_directory("unlinked");
+        let export = root.join("export");
+        fs::create_dir_all(&export).unwrap();
+        let demo = root.join("marked.dem");
+        fs::write(
+            demo.with_extension("json"),
+            br#"{"events":[{"tick":1000,"name":"Bookmark","value":"first"},{"tick":1100,"name":"Bookmark","value":"second"}]}"#,
+        )
+        .unwrap();
+        let mut candidates = Vec::new();
+
+        append_bookmarks(
+            &export,
+            demo.to_str().unwrap(),
+            &DemoContext::default(),
+            &mut candidates,
+        )
+        .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].candidate_id, "bookmark-1000-0");
+        assert_eq!(candidates[1].candidate_id, "bookmark-1100-1");
         fs::remove_dir_all(root).unwrap();
     }
 }

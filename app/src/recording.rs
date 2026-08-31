@@ -19,7 +19,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tf2_mirv_director::{
-    DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_SESSION_SCHEMA,
+    DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_ACTION_FILE_PREFIX,
+    DIRECTOR_ACTION_SLOTS, DIRECTOR_SESSION_SCHEMA,
     DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_END_PREFIX,
     DIRECTOR_TICK_MARKER_PREFIX, DIRECTOR_TICK_OFFSET_PREFIX,
 };
@@ -1106,6 +1107,7 @@ fn build_director_session(
     output_directory: &Path,
     campath_file: &Path,
     telemetry_log: &Path,
+    command_cfg_directory: &Path,
     settings: &AppSettings,
 ) -> DirectorSession {
     let mut victims_by_tick = BTreeMap::<i64, BTreeSet<String>>::new();
@@ -1218,6 +1220,7 @@ fn build_director_session(
         output_directory: output_directory.to_owned(),
         telemetry_log: telemetry_log.to_owned(),
         telemetry_marker_prefix: DIRECTOR_TICK_MARKER_PREFIX.into(),
+        command_cfg_directory: command_cfg_directory.to_owned(),
         control: DirectorControl::HotkeysOnly,
     }
 }
@@ -1230,6 +1233,7 @@ fn write_director_session(
     campath_file: &Path,
     session_path: &Path,
     telemetry_log: &Path,
+    command_cfg_directory: &Path,
     settings: &AppSettings,
 ) -> Result<PathBuf> {
     let session = build_director_session(
@@ -1239,6 +1243,7 @@ fn write_director_session(
         output_directory,
         campath_file,
         telemetry_log,
+        command_cfg_directory,
         settings,
     );
     session.validate()?;
@@ -1396,6 +1401,7 @@ pub fn launch_manual_hlae_candidate(
     fs::create_dir_all(&recording_working)?;
     let campath_file = output_path.join(format!("{recording_identifier}__camera_path.xml"));
     let telemetry_log = game.join("tf2fragdemohelper_recording.log");
+    let cfg_root = game.join("cfg");
     let _ = fs::remove_file(&telemetry_log);
     let director_session = write_director_session(
         candidate,
@@ -1405,6 +1411,7 @@ pub fn launch_manual_hlae_candidate(
         &campath_file,
         &session.join("director_session.json"),
         &telemetry_log,
+        &cfg_root,
         settings,
     )?;
     let launch_log = session.join("hlae_launch.log");
@@ -1418,7 +1425,6 @@ pub fn launch_manual_hlae_candidate(
     )
     .context("could not stage the temporary TF2/HLAE profile")?;
 
-    let cfg_root = game.join("cfg");
     let cfg_result = (|| -> Result<()> {
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual.cfg"),
@@ -1444,6 +1450,12 @@ pub fn launch_manual_hlae_candidate(
                 campath_file.display().to_string().replace('\\', "/")
             ),
         )?;
+        for slot in 0..DIRECTOR_ACTION_SLOTS {
+            fs::write(
+                cfg_root.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}.cfg")),
+                "// Waiting for a TF2 MIRV Director action.\n",
+            )?;
+        }
         Ok(())
     })();
     if let Err(error) = cfg_result {
@@ -3200,6 +3212,7 @@ fn manual_hotkey_cfg(
         "mirv_input end".into(),
         "mirv_cmd clear".into(),
         "mirv_cmd enabled 1".into(),
+        "sv_allow_wait_command 1".into(),
         format!(
             "mirv_cmd addCurves tick {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} - interp=linear space=abs {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} -- \"echo {DIRECTOR_TICK_MARKER_PREFIX} {{0}}\""
         ),
@@ -3218,6 +3231,12 @@ fn manual_hotkey_cfg(
         ),
         format!("alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\""),
     ];
+    for slot in 0..DIRECTOR_ACTION_SLOTS {
+        lines.push(format!(
+            "alias tf2frag_director_poll_{slot:02} \"exec {DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}; wait 10; tf2frag_director_poll\""
+        ));
+    }
+    lines.push("alias tf2frag_director_poll tf2frag_director_poll_00".into());
     for (index, tick) in kill_ticks.iter().enumerate() {
         let current = index + 1;
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
@@ -3253,6 +3272,7 @@ fn manual_hotkey_cfg(
         "echo TF2FRAG_MANUAL_READY".into(),
         "tf2frag_manual_sync_keyframes".into(),
         "tf2frag_manual_help".into(),
+        "tf2frag_director_poll".into(),
     ]);
     format!("{}\n", lines.join("\n"))
 }
@@ -5657,6 +5677,7 @@ mod recording_tests {
             output,
             &campath,
             Path::new(r"C:\Team Fortress 2\tf\tf2fragdemohelper_recording.log"),
+            Path::new(r"C:\Team Fortress 2\tf\cfg"),
             &AppSettings::default(),
         );
 
@@ -5831,6 +5852,14 @@ mod recording_tests {
         assert!(cfg.contains(
             "mirv_cmd addCurves tick 1 2147483646 - interp=linear space=abs 1 1 2147483646 2147483646 -- \"echo TF2FRAG_DIRECTOR_TICK {0}\""
         ));
+        assert!(cfg.contains("sv_allow_wait_command 1"));
+        assert!(cfg.contains(
+            "alias tf2frag_director_poll_00 \"exec tf2fragdemohelper_director_action_00; wait 10; tf2frag_director_poll\""
+        ));
+        assert!(cfg.contains(
+            "alias tf2frag_director_poll_63 \"exec tf2fragdemohelper_director_action_63; wait 10; tf2frag_director_poll\""
+        ));
+        assert!(cfg.ends_with("tf2frag_director_poll\n"));
     }
 
     #[test]

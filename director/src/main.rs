@@ -1,10 +1,11 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::VecDeque,
     env,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -13,9 +14,12 @@ use std::{
     time::Duration,
 };
 use tf2_mirv_director::{
-    DirectorControl, DirectorSession, DIRECTOR_KEYFRAME_BEGIN_PREFIX,
+    DirectorControl, DirectorSession, DIRECTOR_ACTION_ACK_PREFIX,
+    DIRECTOR_ACTION_FILE_PREFIX, DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX,
     DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_TICK_OFFSET_PREFIX,
 };
+
+const ONE_SECOND_TICKS: i64 = 67;
 
 slint::include_modules!();
 
@@ -37,6 +41,12 @@ fn main() -> Result<()> {
     );
     let strip = DirectorStripWindow::new()?;
     let card = DirectorCardWindow::new()?;
+    let highlighted_cue = Rc::new(Cell::new(None::<usize>));
+    let selected_keyframe = Rc::new(Cell::new(None::<(i32, i64)>));
+    let last_tick = Rc::new(Cell::new(session.start_tick));
+    let action_queue = Rc::new(RefCell::new(DirectorActionQueue::new(
+        session.command_cfg_directory.clone(),
+    )));
 
     let shortcut_key = |id: &str, fallback: &str| {
         session
@@ -94,7 +104,17 @@ fn main() -> Result<()> {
         .collect::<Vec<_>>();
     card.set_shortcuts(ModelRc::new(VecModel::from(shortcut_rows)));
 
-    update_playback_state(&strip, &card, &session, session.start_tick, false);
+    strip.set_selected_cue_index(-1);
+    strip.set_has_selected_keyframe(false);
+    card.set_has_selected_keyframe(false);
+    update_playback_state(
+        &strip,
+        &card,
+        &session,
+        session.start_tick,
+        false,
+        highlighted_cue.get(),
+    );
     strip.set_telemetry_status("WAIT".into());
 
     let panel_visible = Rc::new(Cell::new(true));
@@ -107,6 +127,139 @@ fn main() -> Result<()> {
                 return;
             };
             set_panel_visibility(&strip, &card, &panel_visible, false);
+        });
+    }
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let selected_keyframe = selected_keyframe.clone();
+        let panel_visible = panel_visible.clone();
+        strip.on_keyframe_activated(move |id, tick| {
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            set_selected_keyframe(&strip, &card, &selected_keyframe, id, tick as i64);
+            set_panel_visibility(&strip, &card, &panel_visible, true);
+        });
+    }
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let selected_keyframe = selected_keyframe.clone();
+        card.on_keyframe_activated(move |id, tick| {
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            set_selected_keyframe(&strip, &card, &selected_keyframe, id, tick as i64);
+        });
+    }
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let session = session.clone();
+        let highlighted_cue = highlighted_cue.clone();
+        let last_tick = last_tick.clone();
+        let panel_visible = panel_visible.clone();
+        strip.on_cue_activated(move |index| {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            if index >= session.cues.len() {
+                return;
+            }
+            highlighted_cue.set(Some(index));
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            strip.set_selected_cue_index(index.min(i32::MAX as usize) as i32);
+            update_playback_state(
+                &strip,
+                &card,
+                &session,
+                last_tick.get(),
+                true,
+                Some(index),
+            );
+            set_panel_visibility(&strip, &card, &panel_visible, true);
+        });
+    }
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let session = session.clone();
+        let highlighted_cue = highlighted_cue.clone();
+        let last_tick = last_tick.clone();
+        card.on_frag_clear_requested(move || {
+            highlighted_cue.set(None);
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            strip.set_selected_cue_index(-1);
+            update_playback_state(
+                &strip,
+                &card,
+                &session,
+                last_tick.get(),
+                true,
+                None,
+            );
+        });
+    }
+    {
+        let weak_card = card.as_weak();
+        let session = session.clone();
+        let highlighted_cue = highlighted_cue.clone();
+        let last_tick = last_tick.clone();
+        let action_queue = action_queue.clone();
+        card.on_frag_goto_requested(move || {
+            let Some(card) = weak_card.upgrade() else {
+                return;
+            };
+            let Some(index) = displayed_cue_index(&session, last_tick.get(), highlighted_cue.get()) else {
+                card.set_command_status("NO FRAG IS AVAILABLE TO SEEK".into());
+                return;
+            };
+            let cue = &session.cues[index];
+            let target = cue
+                .tick
+                .saturating_sub(ONE_SECOND_TICKS)
+                .max(session.start_tick)
+                .max(0);
+            enqueue_director_action(
+                &action_queue,
+                &card,
+                format!(
+                    "demo_gototick {target}; echo {} {target}",
+                    session.telemetry_marker_prefix
+                ),
+                format!("GO TO FRAG {} AT TICK {target}", index + 1),
+            );
+        });
+    }
+    {
+        let weak_card = card.as_weak();
+        let session = session.clone();
+        let action_queue = action_queue.clone();
+        card.on_keyframe_action_requested(move |id, action, argument| {
+            let Some(card) = weak_card.upgrade() else {
+                return;
+            };
+            let tick = card.get_selected_keyframe_tick() as i64;
+            match build_keyframe_action(
+                id,
+                tick,
+                action.as_str(),
+                argument.as_str(),
+                &session.telemetry_marker_prefix,
+                session.start_tick,
+            ) {
+                Ok((command, label)) => {
+                    enqueue_director_action(&action_queue, &card, command, label)
+                }
+                Err(error) => card.set_command_status(
+                    format!("ACTION NOT SENT: {error}").to_ascii_uppercase().into(),
+                ),
+            }
         });
     }
 
@@ -161,6 +314,10 @@ fn main() -> Result<()> {
         let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let session = session.clone();
+        let highlighted_cue = highlighted_cue.clone();
+        let selected_keyframe = selected_keyframe.clone();
+        let last_tick = last_tick.clone();
+        let action_queue = action_queue.clone();
         let mut tail = TickLogTail::new(session.telemetry_log.clone());
         let telemetry_diagnostic = telemetry_diagnostic.clone();
         let mut polls = 0_u32;
@@ -169,7 +326,6 @@ fn main() -> Result<()> {
         let mut reported_no_tick = false;
         let mut reported_first_tick = false;
         let mut reported_error = false;
-        let mut last_tick = session.start_tick;
         telemetry_timer.start(TimerMode::Repeated, Duration::from_millis(15), move || {
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
@@ -185,9 +341,15 @@ fn main() -> Result<()> {
                             "status=TF2_CONSOLE_LOG_OPENED",
                         );
                     }
+                    if poll.keyframes_invalidated {
+                        clear_keyframe_snapshot(&strip, &card, &selected_keyframe);
+                        card.set_command_status(
+                            "KEYFRAME IDS CHANGED — WAITING FOR HLAE PRINT".into(),
+                        );
+                    }
                     if let Some(keys) = poll.keyframe_snapshot {
                         let rows = keys
-                            .into_iter()
+                            .iter()
                             .filter(|key| {
                                 key.tick >= session.start_tick && key.tick <= session.end_tick
                             })
@@ -206,13 +368,31 @@ fn main() -> Result<()> {
                         let model = ModelRc::new(VecModel::from(rows));
                         strip.set_keyframes(model.clone());
                         card.set_keyframes(model);
+                        if let Some((selected_id, _)) = selected_keyframe.get() {
+                            if let Some(key) = keys.iter().find(|key| key.id == selected_id) {
+                                set_selected_keyframe(
+                                    &strip,
+                                    &card,
+                                    &selected_keyframe,
+                                    key.id,
+                                    key.tick,
+                                );
+                            } else {
+                                clear_selected_keyframe(&strip, &card, &selected_keyframe);
+                            }
+                        }
+                        card.set_command_status("AUTHORITATIVE HLAE IDS REFRESHED".into());
+                    }
+                    for sequence in poll.action_acks {
+                        let status = action_queue.borrow_mut().acknowledge(sequence);
+                        card.set_command_status(status.into());
                     }
                     if !poll.tick_updates.is_empty() {
                         for update in poll.tick_updates {
-                            last_tick = match update {
+                            let updated_tick = match update {
                                 TickUpdate::Absolute(tick) => tick,
                                 TickUpdate::Relative(delta) => {
-                                    let tick = last_tick.saturating_add(delta).max(0);
+                                    let tick = last_tick.get().saturating_add(delta).max(0);
                                     append_telemetry_diagnostic(
                                         &telemetry_diagnostic,
                                         &format!(
@@ -222,16 +402,24 @@ fn main() -> Result<()> {
                                     tick
                                 }
                             };
+                            last_tick.set(updated_tick);
                         }
                         if !reported_first_tick {
                             reported_first_tick = true;
                             append_telemetry_diagnostic(
                                 &telemetry_diagnostic,
-                                &format!("status=FIRST_TICK_RECEIVED tick={last_tick}"),
+                                &format!("status=FIRST_TICK_RECEIVED tick={}", last_tick.get()),
                             );
                         }
                         strip.set_telemetry_status("LIVE".into());
-                        update_playback_state(&strip, &card, &session, last_tick, true);
+                        update_playback_state(
+                            &strip,
+                            &card,
+                            &session,
+                            last_tick.get(),
+                            true,
+                            highlighted_cue.get(),
+                        );
                     } else if polls >= 200 && !reported_first_tick {
                         if tail.is_open() {
                             strip.set_telemetry_status("NO TICK".into());
@@ -286,6 +474,7 @@ fn update_playback_state(
     session: &DirectorSession,
     tick: i64,
     telemetry_active: bool,
+    highlighted_cue: Option<usize>,
 ) {
     strip.set_current_tick(to_ui_tick(tick));
     strip.set_current_position(session.cue_position(tick));
@@ -294,19 +483,37 @@ fn update_playback_state(
     );
     card.set_current_tick(to_ui_tick(tick));
 
-    if let Some((index, cue)) = session
+    let next = session
         .cues
         .iter()
         .enumerate()
-        .find(|(_, cue)| cue.tick >= tick)
-    {
+        .find(|(_, cue)| cue.tick >= tick);
+    if let Some((_, cue)) = next {
         strip.set_next_frag_tick(to_ui_tick(cue.tick));
+    } else {
+        strip.set_next_frag_tick(0);
+    }
+
+    let displayed = highlighted_cue
+        .and_then(|index| session.cues.get(index).map(|cue| (index, cue)))
+        .or(next);
+    if let Some((index, cue)) = displayed {
+        card.set_frag_heading(
+            if highlighted_cue.is_some() {
+                "HIGHLIGHTED FRAG"
+            } else {
+                "NEXT FRAG"
+            }
+            .into(),
+        );
+        card.set_highlighted_frag(highlighted_cue.is_some());
         card.set_next_frag_number((index + 1).min(i32::MAX as usize) as i32);
         card.set_next_frag_tick(to_ui_tick(cue.tick));
         card.set_next_frag_victims(cue.victims.join(", ").into());
         card.set_next_frag_tags(cue.tags.join(", ").into());
     } else {
-        strip.set_next_frag_tick(0);
+        card.set_frag_heading("NEXT FRAG".into());
+        card.set_highlighted_frag(false);
         card.set_next_frag_number(0);
         card.set_next_frag_tick(0);
         card.set_next_frag_victims(SharedString::default());
@@ -327,6 +534,380 @@ fn set_panel_visibility(
         let _ = card.window().with_winit_window(force_topmost);
     } else {
         let _ = card.hide();
+    }
+}
+
+fn set_selected_keyframe(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    state: &Cell<Option<(i32, i64)>>,
+    id: i32,
+    tick: i64,
+) {
+    state.set(Some((id, tick)));
+    strip.set_has_selected_keyframe(true);
+    strip.set_selected_keyframe_id(id);
+    card.set_has_selected_keyframe(true);
+    card.set_selected_keyframe_id(id);
+    card.set_selected_keyframe_tick(to_ui_tick(tick));
+}
+
+fn clear_selected_keyframe(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    state: &Cell<Option<(i32, i64)>>,
+) {
+    state.set(None);
+    strip.set_has_selected_keyframe(false);
+    card.set_has_selected_keyframe(false);
+}
+
+fn clear_keyframe_snapshot(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    selected: &Cell<Option<(i32, i64)>>,
+) {
+    let empty = ModelRc::new(VecModel::from(Vec::<KeyframeRow>::new()));
+    strip.set_keyframes(empty.clone());
+    card.set_keyframes(empty);
+    clear_selected_keyframe(strip, card, selected);
+}
+
+fn displayed_cue_index(
+    session: &DirectorSession,
+    tick: i64,
+    highlighted: Option<usize>,
+) -> Option<usize> {
+    highlighted.filter(|index| *index < session.cues.len()).or_else(|| {
+        session
+            .cues
+            .iter()
+            .position(|cue| cue.tick >= tick)
+    })
+}
+
+fn enqueue_director_action(
+    queue: &RefCell<DirectorActionQueue>,
+    card: &DirectorCardWindow,
+    command: String,
+    label: String,
+) {
+    match queue.borrow_mut().enqueue(command, label) {
+        Ok(status) => card.set_command_status(status.into()),
+        Err(error) => card.set_command_status(
+            format!("DIRECTOR COMMAND FAILED: {error}")
+                .to_ascii_uppercase()
+                .into(),
+        ),
+    }
+}
+
+struct QueuedDirectorAction {
+    command: String,
+    label: String,
+}
+
+struct InFlightDirectorAction {
+    sequence: u64,
+    slot: u16,
+    label: String,
+}
+
+struct DirectorActionQueue {
+    directory: PathBuf,
+    pending: VecDeque<QueuedDirectorAction>,
+    in_flight: Option<InFlightDirectorAction>,
+    next_slot: u16,
+    next_sequence: u64,
+}
+
+impl DirectorActionQueue {
+    fn new(directory: PathBuf) -> Self {
+        Self {
+            directory,
+            pending: VecDeque::new(),
+            in_flight: None,
+            next_slot: 0,
+            next_sequence: 1,
+        }
+    }
+
+    fn enqueue(&mut self, command: String, label: String) -> Result<String> {
+        if command.chars().any(|character| matches!(character, '\r' | '\n')) {
+            bail!("an internal command contained an unsafe line break");
+        }
+        self.pending
+            .push_back(QueuedDirectorAction { command, label });
+        if self.in_flight.is_none() {
+            self.start_next()
+        } else {
+            Ok(format!(
+                "QUEUED • {} ACTION(S) WAITING",
+                self.pending.len()
+            ))
+        }
+    }
+
+    fn acknowledge(&mut self, sequence: u64) -> String {
+        let Some(in_flight) = self.in_flight.take() else {
+            return format!("IGNORED UNEXPECTED TF2 ACK {sequence}");
+        };
+        if in_flight.sequence != sequence {
+            self.in_flight = Some(in_flight);
+            return format!("WAITING FOR TF2 ACK {}", self.in_flight.as_ref().unwrap().sequence);
+        }
+
+        let consumed = self.action_path(in_flight.slot);
+        let _ = replace_action_file(
+            &consumed,
+            b"// Director action consumed; waiting for this slot to be reused.\n",
+        );
+        self.next_slot = (in_flight.slot + 1) % DIRECTOR_ACTION_SLOTS;
+        let completed = format!("COMPLETE • {}", in_flight.label);
+        if self.pending.is_empty() {
+            completed
+        } else {
+            match self.start_next() {
+                Ok(status) => format!("{completed} • {status}"),
+                Err(error) => format!("{completed} • NEXT ACTION FAILED: {error}"),
+            }
+        }
+    }
+
+    fn start_next(&mut self) -> Result<String> {
+        let Some(action) = self.pending.pop_front() else {
+            return Ok("DIRECTOR COMMAND QUEUE READY".into());
+        };
+        fs::create_dir_all(&self.directory).with_context(|| {
+            format!(
+                "could not access Director command directory {}",
+                self.directory.display()
+            )
+        })?;
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        let slot = self.next_slot;
+        let next_slot = (slot + 1) % DIRECTOR_ACTION_SLOTS;
+        let contents = format!(
+            "{}\ntf2frag_manual_sync_keyframes\necho {DIRECTOR_ACTION_ACK_PREFIX} {sequence}\nalias tf2frag_director_poll tf2frag_director_poll_{next_slot:02}\n",
+            action.command
+        );
+        let path = self.action_path(slot);
+        if let Err(error) = replace_action_file(&path, contents.as_bytes()) {
+            self.pending.push_front(action);
+            return Err(error).with_context(|| {
+                format!("could not write Director action slot {}", path.display())
+            });
+        }
+        let label = action.label;
+        self.in_flight = Some(InFlightDirectorAction {
+            sequence,
+            slot,
+            label: label.clone(),
+        });
+        Ok(format!("SENT TO TF2 • {label}"))
+    }
+
+    fn action_path(&self, slot: u16) -> PathBuf {
+        self.directory
+            .join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}.cfg"))
+    }
+}
+
+fn replace_action_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let temp = path.with_extension("cfg.tmp");
+    fs::write(&temp, contents)?;
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn build_keyframe_action(
+    id: i32,
+    tick: i64,
+    action: &str,
+    argument: &str,
+    tick_marker_prefix: &str,
+    clip_start_tick: i64,
+) -> Result<(String, String)> {
+    if id < 0 {
+        bail!("HLAE keyframe ID must be zero or greater");
+    }
+    let select = format!("mirv_campath select #{id} #{id}");
+    let command = match action {
+        "Go to keyframe" => format!(
+            "demo_gototick {tick}; echo {tick_marker_prefix} {tick}"
+        ),
+        "Go to 1 sec before" => {
+            let target = tick
+                .saturating_sub(ONE_SECOND_TICKS)
+                .max(clip_start_tick)
+                .max(0);
+            format!("demo_gototick {target}; echo {tick_marker_prefix} {target}")
+        }
+        "Select only" => select,
+        "Add to selection" => format!("mirv_campath select add #{id} #{id}"),
+        "Select range through ID" => {
+            let end = normalized_nonnegative_id(argument)?;
+            format!("mirv_campath select #{id} #{end}")
+        }
+        "Add range through ID" => {
+            let end = normalized_nonnegative_id(argument)?;
+            format!("mirv_campath select add #{id} #{end}")
+        }
+        "Delete keyframe" => format!("mirv_campath remove {id}"),
+        "Move time to current" => format!("{select}; mirv_campath edit start"),
+        "Shift time by seconds" => {
+            let value = normalized_number(argument, "time shift")?;
+            format!("{select}; mirv_campath edit start delta{value}")
+        }
+        "Set absolute time" => {
+            let value = normalized_number(argument, "absolute time")?;
+            format!("{select}; mirv_campath edit start abs {value}")
+        }
+        "Position from current camera" => {
+            format!("{select}; mirv_campath edit position current")
+        }
+        "Set position X Y Z" => {
+            let values = normalized_triplet(argument, true, "position")?;
+            format!("{select}; mirv_campath edit position {values}")
+        }
+        "Angles from current camera" => {
+            format!("{select}; mirv_campath edit angles current")
+        }
+        "Set angles P Y R" => {
+            let values = normalized_triplet(argument, true, "angles")?;
+            format!("{select}; mirv_campath edit angles {values}")
+        }
+        "FOV from current camera" => format!("{select}; mirv_campath edit fov current"),
+        "Set FOV" => {
+            let value = parse_finite_number(argument, "FOV")?;
+            if !(1.0..=179.0).contains(&value) {
+                bail!("FOV must be between 1 and 179");
+            }
+            format!("{select}; mirv_campath edit fov {}", format_number(value))
+        }
+        "Rotate P Y R" => {
+            let values = normalized_triplet(argument, false, "rotation")?;
+            format!("{select}; mirv_campath edit rotate {values}")
+        }
+        "Anchor to current camera" => format!(
+            "mirv_campath select all; mirv_campath edit anchor #{id} current; mirv_campath select none"
+        ),
+        "Align path to keyframe" => format!("mirv_campath offset current#{id}"),
+        "Align path with offset" => {
+            let value = normalized_number(argument, "path offset")?;
+            format!("mirv_campath offset current#{id}{value}")
+        }
+        "Set selected duration" => {
+            let value = parse_finite_number(argument, "duration")?;
+            if value <= 0.0 {
+                bail!("duration must be greater than zero");
+            }
+            format!("mirv_campath edit duration {}", format_number(value))
+        }
+        "Interpolation position" => format!(
+            "mirv_campath edit interp position {}",
+            normalized_interpolation(argument, false)?
+        ),
+        "Interpolation rotation" => format!(
+            "mirv_campath edit interp rotation {}",
+            normalized_interpolation(argument, true)?
+        ),
+        "Interpolation FOV" => format!(
+            "mirv_campath edit interp fov {}",
+            normalized_interpolation(argument, false)?
+        ),
+        "Select all" => "mirv_campath select all".into(),
+        "Deselect all" => "mirv_campath select none".into(),
+        "Invert selection" => "mirv_campath select invert".into(),
+        _ => bail!("unknown keyframe action '{action}'"),
+    };
+    Ok((command, format!("KEYFRAME {id} • {action}")))
+}
+
+fn normalized_nonnegative_id(value: &str) -> Result<i32> {
+    let value = value.trim().trim_start_matches('#');
+    let parsed = value
+        .parse::<i32>()
+        .with_context(|| "range end must be a non-negative HLAE ID")?;
+    if parsed < 0 {
+        bail!("range end must be a non-negative HLAE ID");
+    }
+    Ok(parsed)
+}
+
+fn parse_finite_number(value: &str, label: &str) -> Result<f64> {
+    let parsed = value
+        .trim()
+        .parse::<f64>()
+        .with_context(|| format!("{label} requires a numeric value"))?;
+    if !parsed.is_finite() {
+        bail!("{label} must be finite");
+    }
+    Ok(parsed)
+}
+
+fn normalized_number(value: &str, label: &str) -> Result<String> {
+    let parsed = parse_finite_number(value, label)?;
+    let formatted = format_number(parsed.abs());
+    Ok(if parsed < 0.0 {
+        format!("-{formatted}")
+    } else {
+        format!("+{formatted}")
+    })
+}
+
+fn normalized_triplet(value: &str, allow_star: bool, label: &str) -> Result<String> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 3 {
+        bail!("{label} requires exactly three space-separated values");
+    }
+    parts
+        .into_iter()
+        .map(|part| {
+            if allow_star && part == "*" {
+                Ok("*".to_owned())
+            } else {
+                parse_finite_number(part, label).map(format_number)
+            }
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join(" "))
+}
+
+fn normalized_interpolation(value: &str, rotation: bool) -> Result<&'static str> {
+    let value = value.trim().to_ascii_lowercase();
+    match (rotation, value.as_str()) {
+        (_, "default") => Ok("default"),
+        (false, "linear") => Ok("linear"),
+        (false, "cubic") => Ok("cubic"),
+        (true, "slinear") => Ok("sLinear"),
+        (true, "scubic") => Ok("sCubic"),
+        (true, _) => bail!("rotation interpolation must be default, sLinear, or sCubic"),
+        (false, _) => bail!("interpolation must be default, linear, or cubic"),
+    }
+}
+
+fn format_number(value: f64) -> String {
+    let mut formatted = format!("{value:.6}");
+    while formatted.contains('.') && formatted.ends_with('0') {
+        formatted.pop();
+    }
+    if formatted.ends_with('.') {
+        formatted.pop();
+    }
+    if formatted == "-0" {
+        "0".into()
+    } else {
+        formatted
     }
 }
 
@@ -354,7 +935,9 @@ fn configure_overlay_windows(
             native.set_window_level(winit::window::WindowLevel::AlwaysOnTop);
             native.set_decorations(false);
             native.set_resizable(false);
-            let _ = native.set_cursor_hittest(false);
+            // The narrow strip accepts clicks only over its own top-of-screen
+            // area so timeline markers can select their matching cue-card row.
+            let _ = native.set_cursor_hittest(true);
             force_topmost(native);
         });
 
@@ -473,7 +1056,6 @@ struct TickLogTail {
     offset: u64,
     carry: String,
     keyframe_capture: Option<Vec<ParsedCampathKey>>,
-    known_keyframes: Vec<ParsedCampathKey>,
 }
 
 impl TickLogTail {
@@ -484,7 +1066,6 @@ impl TickLogTail {
             offset: 0,
             carry: String::new(),
             keyframe_capture: None,
-            known_keyframes: Vec::new(),
         }
     }
 
@@ -527,6 +1108,9 @@ impl TickLogTail {
             if let Some(update) = parse_tick_update(line, prefix) {
                 poll.tick_updates.push(update);
             }
+            if let Some(sequence) = parse_action_ack(line) {
+                poll.action_acks.push(sequence);
+            }
             if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX)
                 || line.contains("passed? selected? id : tick[offset]")
             {
@@ -537,8 +1121,7 @@ impl TickLogTail {
                 || line.contains(DIRECTOR_KEYFRAME_END_PREFIX)
             {
                 if let Some(snapshot) = self.keyframe_capture.take() {
-                    self.known_keyframes = snapshot;
-                    poll.keyframe_snapshot = Some(self.known_keyframes.clone());
+                    poll.keyframe_snapshot = Some(snapshot);
                 }
                 continue;
             }
@@ -548,26 +1131,9 @@ impl TickLogTail {
                 capture.push(key);
                 continue;
             }
-            if let Some(mutation) = parse_campath_mutation(line) {
-                match mutation {
-                    CampathMutation::Remove(id) => {
-                        self.known_keyframes.retain(|key| key.id != id);
-                        for (index, key) in self.known_keyframes.iter_mut().enumerate() {
-                            key.id = index as i32;
-                        }
-                    }
-                    CampathMutation::Clear => {
-                        if self.known_keyframes.iter().any(|key| key.selected) {
-                            self.known_keyframes.retain(|key| !key.selected);
-                            for (index, key) in self.known_keyframes.iter_mut().enumerate() {
-                                key.id = index as i32;
-                            }
-                        } else {
-                            self.known_keyframes.clear();
-                        }
-                    }
-                }
-                poll.keyframe_snapshot = Some(self.known_keyframes.clone());
+            if is_campath_identity_mutation(line) {
+                self.keyframe_capture = None;
+                poll.keyframes_invalidated = true;
             }
         }
         Ok(poll)
@@ -578,6 +1144,8 @@ impl TickLogTail {
 struct TelemetryPoll {
     tick_updates: Vec<TickUpdate>,
     keyframe_snapshot: Option<Vec<ParsedCampathKey>>,
+    keyframes_invalidated: bool,
+    action_acks: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -587,21 +1155,28 @@ struct ParsedCampathKey {
     selected: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum CampathMutation {
-    Remove(i32),
-    Clear,
+fn is_campath_identity_mutation(line: &str) -> bool {
+    let Some((_, command)) = line.split_once("] ") else {
+        return false;
+    };
+    let command = command.trim();
+    let lower = command.to_ascii_lowercase();
+    lower == "mirv_campath add"
+        || lower == "mirv_campath clear"
+        || lower.starts_with("mirv_campath remove ")
+        || lower.starts_with("mirv_campath load ")
+        || lower.starts_with("mirv_campath edit start")
+        || lower.starts_with("mirv_campath edit duration ")
+        || lower.starts_with("mirv_campath offset ")
 }
 
-fn parse_campath_mutation(line: &str) -> Option<CampathMutation> {
-    let command = line.split_once("] ").map(|(_, command)| command.trim())?;
-    let lower = command.to_ascii_lowercase();
-    if lower == "mirv_campath clear" {
-        return Some(CampathMutation::Clear);
-    }
-    let argument = lower.strip_prefix("mirv_campath remove ")?;
-    let id = argument.split_whitespace().next()?.parse::<i32>().ok()?;
-    Some(CampathMutation::Remove(id))
+fn parse_action_ack(line: &str) -> Option<u64> {
+    let marker = line.rfind(DIRECTOR_ACTION_ACK_PREFIX)?;
+    line[marker + DIRECTOR_ACTION_ACK_PREFIX.len()..]
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn parse_campath_key(line: &str) -> Option<ParsedCampathKey> {
@@ -809,14 +1384,54 @@ mod tests {
     }
 
     #[test]
-    fn parses_direct_console_keyframe_removal_and_clear() {
+    fn invalidates_inferred_ids_after_direct_console_mutations() {
+        assert!(is_campath_identity_mutation(
+            "08/30 12:30:22 ] mirv_campath remove 2"
+        ));
+        assert!(is_campath_identity_mutation(
+            "08/30 12:30:22 ] mirv_campath clear"
+        ));
+        assert!(is_campath_identity_mutation(
+            "08/30 12:30:22 ] mirv_campath edit start delta-1"
+        ));
+        assert!(!is_campath_identity_mutation(
+            "08/30 12:30:22 ] mirv_campath print"
+        ));
+    }
+
+    #[test]
+    fn parses_director_action_acknowledgements() {
         assert_eq!(
-            parse_campath_mutation("08/30 12:30:22 ] mirv_campath remove 2"),
-            Some(CampathMutation::Remove(2))
+            parse_action_ack("08/30 12:30:22 TF2FRAG_DIRECTOR_ACTION_ACK 42"),
+            Some(42)
         );
+    }
+
+    #[test]
+    fn builds_exact_hlae_id_actions_without_persistent_ids() {
+        let (delete, _) = build_keyframe_action(
+            4,
+            12_345,
+            "Delete keyframe",
+            "",
+            "TF2FRAG_DIRECTOR_TICK",
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(delete, "mirv_campath remove 4");
+
+        let (position, _) = build_keyframe_action(
+            4,
+            12_345,
+            "Position from current camera",
+            "",
+            "TF2FRAG_DIRECTOR_TICK",
+            10_000,
+        )
+        .unwrap();
         assert_eq!(
-            parse_campath_mutation("08/30 12:30:22 ] mirv_campath clear"),
-            Some(CampathMutation::Clear)
+            position,
+            "mirv_campath select #4 #4; mirv_campath edit position current"
         );
     }
 

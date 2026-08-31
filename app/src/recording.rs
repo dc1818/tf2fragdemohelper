@@ -3181,7 +3181,7 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         target_tick + 1,
         None,
         &format!(
-            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes"
+            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes; tf2frag_director_poll_start"
         ),
     );
     lines.push("}".into());
@@ -3237,6 +3237,11 @@ fn manual_hotkey_cfg(
         ));
     }
     lines.push("alias tf2frag_director_poll tf2frag_director_poll_00".into());
+    lines.push("alias tf2frag_director_poll_noop \"\"".into());
+    lines.push(
+        "alias tf2frag_director_poll_start \"alias tf2frag_director_poll_start tf2frag_director_poll_noop; tf2frag_director_poll\""
+            .into(),
+    );
     for (index, tick) in kill_ticks.iter().enumerate() {
         let current = index + 1;
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
@@ -3272,7 +3277,6 @@ fn manual_hotkey_cfg(
         "echo TF2FRAG_MANUAL_READY".into(),
         "tf2frag_manual_sync_keyframes".into(),
         "tf2frag_manual_help".into(),
-        "tf2frag_director_poll".into(),
     ]);
     format!("{}\n", lines.join("\n"))
 }
@@ -5859,7 +5863,11 @@ mod recording_tests {
         assert!(cfg.contains(
             "alias tf2frag_director_poll_63 \"exec tf2fragdemohelper_director_action_63; wait 10; tf2frag_director_poll\""
         ));
-        assert!(cfg.ends_with("tf2frag_director_poll\n"));
+        assert!(cfg.contains("alias tf2frag_director_poll_noop \"\""));
+        assert!(cfg.contains(
+            "alias tf2frag_director_poll_start \"alias tf2frag_director_poll_start tf2frag_director_poll_noop; tf2frag_director_poll\""
+        ));
+        assert!(!cfg.lines().any(|line| line == "tf2frag_director_poll"));
     }
 
     #[test]
@@ -5891,7 +5899,7 @@ mod recording_tests {
         assert!(vdm.contains("skiptotick \"500\""));
         assert!(vdm.contains("starttick \"501\""));
         assert!(vdm.contains(
-            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes\""
+            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes; tf2frag_director_poll_start\""
         ));
         assert!(!vdm.contains("mirv_cmd"));
         assert!(!vdm.contains("TF2FRAG_DIRECTOR_TICK"));

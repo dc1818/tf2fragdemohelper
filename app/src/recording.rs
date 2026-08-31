@@ -12,11 +12,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, OnceLock},
     thread,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tf2_mirv_director::{
     DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_ACTION_FILE_PREFIX,
@@ -64,6 +65,41 @@ static DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignatureCacheE
     OnceLock::new();
 static PORTABLE_DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignatureCacheEntry>>> =
     OnceLock::new();
+
+#[derive(Clone, Debug)]
+struct ManualRconConfig {
+    port: u16,
+    password: String,
+}
+
+impl ManualRconConfig {
+    fn create(session: &Path) -> Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .context("could not reserve a local port for Director control")?;
+        let port = listener.local_addr()?.port();
+        drop(listener);
+
+        let mut digest = Sha256::new();
+        digest.update(session.as_os_str().to_string_lossy().as_bytes());
+        digest.update(std::process::id().to_le_bytes());
+        digest.update(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .to_le_bytes(),
+        );
+        let password = format!("{:x}", digest.finalize());
+        Ok(Self { port, password })
+    }
+
+    fn control(&self) -> DirectorControl {
+        DirectorControl::LocalRcon {
+            endpoint: format!("127.0.0.1:{}", self.port),
+            password: self.password.clone(),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum RecordingProgress {
@@ -1109,6 +1145,7 @@ fn build_director_session(
     telemetry_log: &Path,
     command_cfg_directory: &Path,
     settings: &AppSettings,
+    control: DirectorControl,
 ) -> DirectorSession {
     let mut victims_by_tick = BTreeMap::<i64, BTreeSet<String>>::new();
     for kill in &candidate.kills {
@@ -1187,7 +1224,7 @@ fn build_director_session(
         (
             "execute_director_action",
             &shortcuts.execute_director_action,
-            "Execute queued Director action",
+            "Emergency action fallback",
         ),
         (
             "overlay_panel_toggle",
@@ -1226,7 +1263,7 @@ fn build_director_session(
         telemetry_log: telemetry_log.to_owned(),
         telemetry_marker_prefix: DIRECTOR_TICK_MARKER_PREFIX.into(),
         command_cfg_directory: command_cfg_directory.to_owned(),
-        control: DirectorControl::HotkeysOnly,
+        control,
     }
 }
 
@@ -1240,6 +1277,7 @@ fn write_director_session(
     telemetry_log: &Path,
     command_cfg_directory: &Path,
     settings: &AppSettings,
+    control: DirectorControl,
 ) -> Result<PathBuf> {
     let session = build_director_session(
         candidate,
@@ -1250,6 +1288,7 @@ fn write_director_session(
         telemetry_log,
         command_cfg_directory,
         settings,
+        control,
     );
     session.validate()?;
     fs::write(session_path, serde_json::to_vec_pretty(&session)?)
@@ -1407,6 +1446,7 @@ pub fn launch_manual_hlae_candidate(
     let campath_file = output_path.join(format!("{recording_identifier}__camera_path.xml"));
     let telemetry_log = game.join("tf2fragdemohelper_recording.log");
     let cfg_root = game.join("cfg");
+    let rcon = ManualRconConfig::create(&session)?;
     let _ = fs::remove_file(&telemetry_log);
     let director_session = write_director_session(
         candidate,
@@ -1418,6 +1458,7 @@ pub fn launch_manual_hlae_candidate(
         &telemetry_log,
         &cfg_root,
         settings,
+        rcon.control(),
     )?;
     let launch_log = session.join("hlae_launch.log");
     let launch_log_file = File::create(&launch_log)?;
@@ -1438,6 +1479,7 @@ pub fn launch_manual_hlae_candidate(
                 target_tick,
                 &staged_relative,
                 settings,
+                Some(&rcon),
             ),
         )?;
         fs::write(
@@ -1483,13 +1525,14 @@ pub fn launch_manual_hlae_candidate(
         )
     };
     let game_arguments = format!(
-        "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf -w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_relative}"
+        "-steam -insecure -usercon +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf -w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_relative}"
     );
     log_recording_diagnostic(
         &diagnostic_log,
         format!(
-            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; command line: {game_arguments}",
-            output_path.display()
+            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; Director control 127.0.0.1:{}; command line: {game_arguments}",
+            output_path.display(),
+            rcon.port,
         ),
     );
     let launch_log_stdout = match launch_log_file.try_clone() {
@@ -3198,6 +3241,7 @@ fn manual_hotkey_cfg(
     target_tick: i64,
     staged_demo: &str,
     settings: &AppSettings,
+    rcon: Option<&ManualRconConfig>,
 ) -> String {
     let mut shortcuts = settings.mirv_shortcuts.clone();
     shortcuts.normalize();
@@ -3225,7 +3269,7 @@ fn manual_hotkey_cfg(
         "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
         format!("alias tf2frag_manual_sync_keyframes \"echo {DIRECTOR_KEYFRAME_BEGIN_PREFIX}; mirv_campath print; echo {DIRECTOR_KEYFRAME_END_PREFIX}\""),
         format!(
-            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE {}_EXECUTE_DIRECTOR_ACTION\"",
+            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE {}_EMERGENCY_DIRECTOR_FALLBACK\"",
             shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
             shortcuts.back_one_second, shortcuts.safe_restart, shortcuts.next_kill_tick,
             shortcuts.pause_resume, shortcuts.enter_camera, shortcuts.add_keyframe,
@@ -3236,6 +3280,18 @@ fn manual_hotkey_cfg(
         ),
         format!("alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\""),
     ];
+    if let Some(rcon) = rcon {
+        lines.splice(
+            1..1,
+            [
+                "ip 0.0.0.0".into(),
+                format!("hostport {}", rcon.port),
+                format!("rcon_password \"{}\"", rcon.password),
+                "sv_rcon_whitelist_address 127.0.0.1".into(),
+                "net_start".into(),
+            ],
+        );
+    }
     for slot in 0..DIRECTOR_ACTION_SLOTS {
         lines.push(format!(
             "alias tf2frag_director_execute_{slot:02} \"exec {DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}\""
@@ -5684,6 +5740,7 @@ mod recording_tests {
             Path::new(r"C:\Team Fortress 2\tf\tf2fragdemohelper_recording.log"),
             Path::new(r"C:\Team Fortress 2\tf\cfg"),
             &AppSettings::default(),
+            DirectorControl::HotkeysOnly,
         );
 
         session.validate().unwrap();
@@ -5699,7 +5756,7 @@ mod recording_tests {
         assert_eq!(session.shortcuts[10].key, "/");
         assert_eq!(session.shortcuts[10].label, "Show / hide campath + IDs");
         assert_eq!(session.shortcuts[15].key, "'");
-        assert_eq!(session.shortcuts[15].label, "Execute queued Director action");
+        assert_eq!(session.shortcuts[15].label, "Emergency action fallback");
         assert_eq!(session.shortcuts[16].key, "C");
         assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
     }
@@ -5812,6 +5869,7 @@ mod recording_tests {
             500,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &AppSettings::default(),
+            None,
         );
         assert!(cfg.contains(
             "playdemo demos/tf2fragdemohelper_manual/session/candidate.dem"
@@ -5882,6 +5940,7 @@ mod recording_tests {
             500,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &settings,
+            None,
         );
         assert!(cfg.contains(
             "bind \"q\" \"mirv_skip time 0.25; tf2frag_manual_sync_keyframes\""
@@ -5892,6 +5951,29 @@ mod recording_tests {
         assert!(!cfg.contains("bind \"RIGHTARROW\""));
         assert!(!cfg.contains("bind \"UPARROW\""));
         assert!(!cfg.contains("bind \"DOWNARROW\""));
+    }
+
+    #[test]
+    fn manual_rcon_is_session_scoped_and_loopback_whitelisted() {
+        let rcon = ManualRconConfig {
+            port: 32_145,
+            password: "0123456789abcdef0123456789abcdef".into(),
+        };
+        let cfg = manual_hotkey_cfg(
+            &Candidate::default(),
+            500,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+            &AppSettings::default(),
+            Some(&rcon),
+        );
+        assert!(cfg.contains("ip 0.0.0.0"));
+        assert!(cfg.contains("hostport 32145"));
+        assert!(cfg.contains(
+            "rcon_password \"0123456789abcdef0123456789abcdef\""
+        ));
+        assert!(cfg.contains("sv_rcon_whitelist_address 127.0.0.1"));
+        assert!(cfg.contains("net_start"));
+        assert!(cfg.find("net_start").unwrap() < cfg.find("mirv_cmd enabled 1").unwrap());
     }
 
     #[test]

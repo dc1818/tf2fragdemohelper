@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DIRECTOR_SESSION_SCHEMA: u32 = 4;
+pub const DIRECTOR_SESSION_SCHEMA: u32 = 5;
 pub const DIRECTOR_TICK_MARKER_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK";
 pub const DIRECTOR_TICK_OFFSET_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK_OFFSET";
 pub const DIRECTOR_KEYFRAME_BEGIN_PREFIX: &str = "TF2FRAG_DIRECTOR_KEYFRAMES_BEGIN";
@@ -50,6 +50,21 @@ impl DirectorSession {
         if self.command_cfg_directory.as_os_str().is_empty() {
             bail!("Director command cfg directory cannot be empty");
         }
+        if let DirectorControl::LocalRcon { endpoint, password } = &self.control {
+            let address = endpoint
+                .parse::<std::net::SocketAddr>()
+                .map_err(|_| anyhow::anyhow!("Director RCON endpoint is invalid"))?;
+            if !address.ip().is_loopback() {
+                bail!("Director RCON endpoint must use the loopback interface");
+            }
+            if password.len() < 16
+                || !password
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+            {
+                bail!("Director RCON password must be a session-generated hex secret");
+            }
+        }
         if self
             .cues
             .iter()
@@ -88,6 +103,7 @@ pub struct DirectorShortcut {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum DirectorControl {
     HotkeysOnly,
+    LocalRcon { endpoint: String, password: String },
     LocalBridge { endpoint: String, token: String },
 }
 
@@ -207,5 +223,21 @@ mod tests {
             restored.telemetry_marker_prefix,
             DIRECTOR_TICK_MARKER_PREFIX
         );
+    }
+
+    #[test]
+    fn local_rcon_is_restricted_to_a_loopback_endpoint() {
+        let mut session = session();
+        session.control = DirectorControl::LocalRcon {
+            endpoint: "127.0.0.1:32145".into(),
+            password: "0123456789abcdef0123456789abcdef".into(),
+        };
+        session.validate().unwrap();
+
+        session.control = DirectorControl::LocalRcon {
+            endpoint: "192.168.1.10:32145".into(),
+            password: "0123456789abcdef0123456789abcdef".into(),
+        };
+        assert!(session.validate().is_err());
     }
 }

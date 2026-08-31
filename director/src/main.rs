@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod rcon;
+
 use anyhow::{bail, Context, Result};
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
@@ -11,6 +13,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
 };
@@ -19,6 +22,7 @@ use tf2_mirv_director::{
     DIRECTOR_ACTION_FILE_PREFIX, DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX,
     DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_TICK_OFFSET_PREFIX,
 };
+use rcon::CommandDelivery;
 
 const ONE_SECOND_TICKS: i64 = 67;
 const DEMO_READY_MARKER: &str = "TF2FRAG_MANUAL_PAUSED_AT_START";
@@ -71,14 +75,26 @@ fn main() -> Result<()> {
         session.command_cfg_directory.clone(),
         execute_action_key.clone(),
     )));
+    let (direct_action_sender, direct_action_results) = match &session.control {
+        DirectorControl::LocalRcon { endpoint, password } => {
+            let (sender, results) = spawn_direct_action_worker(endpoint.clone(), password.clone());
+            (Some(sender), Some(results))
+        }
+        _ => (None, None),
+    };
     let panel_toggle_key = shortcut_key("overlay_panel_toggle", "C");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
-    card.set_command_status(
-        format!("READY • CLICK AN ACTION, THEN PRESS {execute_action_key} IN TF2").into(),
-    );
+    let initial_command_status = if direct_action_sender.is_some() {
+        SharedString::from("DIRECT CONTROL READY • CLICK AN ACTION")
+    } else {
+        SharedString::from(format!(
+            "READY • CLICK AN ACTION, THEN PRESS {execute_action_key} IN TF2"
+        ))
+    };
+    card.set_command_status(initial_command_status);
     card.set_record_order(
         format!(
             "{} FOLLOW CAMPATH  →  {} RESUME  →  {} RECORD  →  {} STOP",
@@ -224,6 +240,7 @@ fn main() -> Result<()> {
         let highlighted_cue = highlighted_cue.clone();
         let last_tick = last_tick.clone();
         let action_queue = action_queue.clone();
+        let direct_action_sender = direct_action_sender.clone();
         let demo_ready = demo_ready.clone();
         card.on_frag_goto_requested(move || {
             if !demo_ready.get() {
@@ -246,7 +263,8 @@ fn main() -> Result<()> {
                 .saturating_sub(ONE_SECOND_TICKS)
                 .max(session.start_tick)
                 .max(0);
-            enqueue_director_action(
+            dispatch_director_action(
+                direct_action_sender.as_ref(),
                 &action_queue,
                 &card,
                 format!(
@@ -261,6 +279,7 @@ fn main() -> Result<()> {
         let weak_card = card.as_weak();
         let session = session.clone();
         let action_queue = action_queue.clone();
+        let direct_action_sender = direct_action_sender.clone();
         let demo_ready = demo_ready.clone();
         card.on_keyframe_action_requested(move |id, action, argument| {
             let Some(card) = weak_card.upgrade() else {
@@ -280,7 +299,13 @@ fn main() -> Result<()> {
                 session.start_tick,
             ) {
                 Ok((command, label)) => {
-                    enqueue_director_action(&action_queue, &card, command, label)
+                    dispatch_director_action(
+                        direct_action_sender.as_ref(),
+                        &action_queue,
+                        &card,
+                        command,
+                        label,
+                    )
                 }
                 Err(error) => card.set_command_status(
                     format!("ACTION NOT SENT: {error}").to_ascii_uppercase().into(),
@@ -335,6 +360,47 @@ fn main() -> Result<()> {
                 set_panel_visibility(&strip, &card, &panel_visible, visible);
             } else if !down {
                 was_down.set(false);
+            }
+        });
+    }
+
+    let direct_action_timer = Timer::default();
+    if let Some(results) = direct_action_results {
+        let weak_card = card.as_weak();
+        let action_queue = action_queue.clone();
+        direct_action_timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+            let Some(card) = weak_card.upgrade() else {
+                return;
+            };
+            while let Ok(result) = results.try_recv() {
+                match result {
+                    DirectActionResult::Confirmed { label } => {
+                        card.set_command_status(format!("COMPLETE • {label}").into());
+                    }
+                    DirectActionResult::SentUnconfirmed { label, reason } => {
+                        card.set_command_status(
+                            format!("SENT • {label} • CONFIRMATION LOST: {reason}")
+                                .to_ascii_uppercase()
+                                .into(),
+                        );
+                    }
+                    DirectActionResult::Unavailable {
+                        command,
+                        label,
+                        reason,
+                    } => match action_queue.borrow_mut().enqueue(command, label) {
+                        Ok(status) => card.set_command_status(
+                            format!("DIRECT CONTROL UNAVAILABLE: {reason} • {status}")
+                                .to_ascii_uppercase()
+                                .into(),
+                        ),
+                        Err(error) => card.set_command_status(
+                            format!("DIRECT CONTROL AND FALLBACK FAILED: {error}")
+                                .to_ascii_uppercase()
+                                .into(),
+                        ),
+                    },
+                }
             }
         });
     }
@@ -511,7 +577,12 @@ fn main() -> Result<()> {
     }
 
     // Keep the timers alive for the complete Slint event loop.
-    let _timer_lifetime = (&topmost_timer, &hotkey_timer, &telemetry_timer);
+    let _timer_lifetime = (
+        &topmost_timer,
+        &hotkey_timer,
+        &direct_action_timer,
+        &telemetry_timer,
+    );
     strip.run()?;
     Ok(())
 }
@@ -560,7 +631,11 @@ fn update_playback_state(
     strip.set_current_tick(to_ui_tick(tick));
     strip.set_current_position(session.cue_position(tick));
     strip.set_telemetry_active(
-        telemetry_active || matches!(&session.control, DirectorControl::LocalBridge { .. }),
+        telemetry_active
+            || matches!(
+                &session.control,
+                DirectorControl::LocalRcon { .. } | DirectorControl::LocalBridge { .. }
+            ),
     );
     card.set_current_tick(to_ui_tick(tick));
 
@@ -667,12 +742,36 @@ fn displayed_cue_index(
     })
 }
 
-fn enqueue_director_action(
+fn dispatch_director_action(
+    direct: Option<&Sender<DirectActionRequest>>,
     queue: &RefCell<DirectorActionQueue>,
     card: &DirectorCardWindow,
     command: String,
     label: String,
 ) {
+    if let Some(direct) = direct {
+        let status_label = label.clone();
+        match direct.send(DirectActionRequest { command, label }) {
+            Ok(()) => {
+                card.set_command_status(format!("SENDING • {status_label}").into());
+                return;
+            }
+            Err(error) => {
+                let request = error.0;
+                match queue.borrow_mut().enqueue(request.command, request.label) {
+                    Ok(status) => card.set_command_status(
+                        format!("DIRECT CONTROL STOPPED • {status}").into(),
+                    ),
+                    Err(error) => card.set_command_status(
+                        format!("DIRECTOR COMMAND FAILED: {error}")
+                            .to_ascii_uppercase()
+                            .into(),
+                    ),
+                }
+                return;
+            }
+        }
+    }
     match queue.borrow_mut().enqueue(command, label) {
         Ok(status) => card.set_command_status(status.into()),
         Err(error) => card.set_command_status(
@@ -681,6 +780,59 @@ fn enqueue_director_action(
                 .into(),
         ),
     }
+}
+
+struct DirectActionRequest {
+    command: String,
+    label: String,
+}
+
+enum DirectActionResult {
+    Confirmed {
+        label: String,
+    },
+    SentUnconfirmed {
+        label: String,
+        reason: String,
+    },
+    Unavailable {
+        command: String,
+        label: String,
+        reason: String,
+    },
+}
+
+fn spawn_direct_action_worker(
+    endpoint: String,
+    password: String,
+) -> (Sender<DirectActionRequest>, Receiver<DirectActionResult>) {
+    let (request_sender, request_receiver) = mpsc::channel::<DirectActionRequest>();
+    let (result_sender, result_receiver) = mpsc::channel::<DirectActionResult>();
+    thread::spawn(move || {
+        while let Ok(request) = request_receiver.recv() {
+            let rcon_command = format!("{}; tf2frag_manual_sync_keyframes", request.command);
+            let result = match rcon::execute_once(&endpoint, &password, &rcon_command) {
+                Ok(CommandDelivery::Confirmed(_)) => DirectActionResult::Confirmed {
+                    label: request.label,
+                },
+                Ok(CommandDelivery::SentUnconfirmed(reason)) => {
+                    DirectActionResult::SentUnconfirmed {
+                        label: request.label,
+                        reason,
+                    }
+                }
+                Err(error) => DirectActionResult::Unavailable {
+                    command: request.command,
+                    label: request.label,
+                    reason: error.to_string(),
+                },
+            };
+            if result_sender.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    (request_sender, result_receiver)
 }
 
 struct QueuedDirectorAction {

@@ -20,6 +20,7 @@ use std::{
 };
 use tf2_mirv_director::{
     DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_SESSION_SCHEMA,
+    DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_END_PREFIX,
     DIRECTOR_TICK_MARKER_PREFIX, DIRECTOR_TICK_OFFSET_PREFIX,
 };
 use walkdir::WalkDir;
@@ -1092,11 +1093,18 @@ fn director_display_tag(tag: &str) -> String {
     tag.trim().replace(['_', '-'], " ")
 }
 
+fn manual_output_directory(root: &Path, candidate: &Candidate) -> PathBuf {
+    root.join("Videos")
+        .join("Manual HLAE")
+        .join(candidate_output_category(candidate))
+}
+
 fn build_director_session(
     candidate: &Candidate,
     target_tick: i64,
     end_tick: i64,
-    output_path: &Path,
+    output_directory: &Path,
+    campath_file: &Path,
     telemetry_log: &Path,
     settings: &AppSettings,
 ) -> DirectorSession {
@@ -1161,10 +1169,18 @@ fn build_director_session(
         ("enter_camera", &shortcuts.enter_camera, "MIRV camera"),
         ("add_keyframe", &shortcuts.add_keyframe, "Add keyframe"),
         ("play_campath", &shortcuts.play_campath, "Play campath"),
-        ("draw_campath", &shortcuts.draw_campath, "Show / hide campath"),
+        (
+            "draw_campath",
+            &shortcuts.draw_campath,
+            "Show / hide campath + IDs",
+        ),
         ("start_recording", &shortcuts.start_recording, "Start recording"),
         ("stop_recording", &shortcuts.stop_recording, "Stop recording"),
-        ("print_keyframes", &shortcuts.print_keyframes, "Print keyframes"),
+        (
+            "print_keyframes",
+            &shortcuts.print_keyframes,
+            "Refresh keyframe markers",
+        ),
         ("save_campath", &shortcuts.save_campath, "Save campath XML"),
         (
             "overlay_panel_toggle",
@@ -1198,8 +1214,8 @@ fn build_director_session(
             .map(|tag| director_display_tag(tag))
             .collect(),
         shortcuts,
-        campath_file: output_path.join("camera_path.xml"),
-        output_directory: output_path.to_owned(),
+        campath_file: campath_file.to_owned(),
+        output_directory: output_directory.to_owned(),
         telemetry_log: telemetry_log.to_owned(),
         telemetry_marker_prefix: DIRECTOR_TICK_MARKER_PREFIX.into(),
         control: DirectorControl::HotkeysOnly,
@@ -1210,7 +1226,9 @@ fn write_director_session(
     candidate: &Candidate,
     target_tick: i64,
     end_tick: i64,
-    output_path: &Path,
+    output_directory: &Path,
+    campath_file: &Path,
+    session_path: &Path,
     telemetry_log: &Path,
     settings: &AppSettings,
 ) -> Result<PathBuf> {
@@ -1218,15 +1236,15 @@ fn write_director_session(
         candidate,
         target_tick,
         end_tick,
-        output_path,
+        output_directory,
+        campath_file,
         telemetry_log,
         settings,
     );
     session.validate()?;
-    let path = output_path.join("director_session.json");
-    fs::write(&path, serde_json::to_vec_pretty(&session)?)
-        .with_context(|| format!("could not write Director session {}", path.display()))?;
-    Ok(path)
+    fs::write(session_path, serde_json::to_vec_pretty(&session)?)
+        .with_context(|| format!("could not write Director session {}", session_path.display()))?;
+    Ok(session_path.to_owned())
 }
 
 fn launch_director_companion(session_path: &Path) -> Result<Option<std::process::Child>> {
@@ -1368,15 +1386,15 @@ pub fn launch_manual_hlae_candidate(
         "demos/tf2fragdemohelper_manual/{session_name}/{staged_name}"
     );
 
-    let output_path = settings
-        .recording_output_directory
-        .join("Manual HLAE")
-        .join(candidate_output_category(candidate))
-        .join(format!(
-            "{demo_stem}__{candidate_name}__t{target_tick}-{end_tick}__{}",
-            Utc::now().format("%Y%m%d_%H%M%S")
-        ));
+    let output_path = manual_output_directory(&settings.recording_output_directory, candidate);
     fs::create_dir_all(&output_path)?;
+    let recording_identifier = format!(
+        "{demo_stem}__{candidate_name}__t{target_tick}-{end_tick}__{}",
+        Utc::now().format("%Y%m%d_%H%M%S_%3f")
+    );
+    let recording_working = session.join("manual_capture");
+    fs::create_dir_all(&recording_working)?;
+    let campath_file = output_path.join(format!("{recording_identifier}__camera_path.xml"));
     let telemetry_log = game.join("tf2fragdemohelper_recording.log");
     let _ = fs::remove_file(&telemetry_log);
     let director_session = write_director_session(
@@ -1384,6 +1402,8 @@ pub fn launch_manual_hlae_candidate(
         target_tick,
         end_tick,
         &output_path,
+        &campath_file,
+        &session.join("director_session.json"),
         &telemetry_log,
         settings,
     )?;
@@ -1411,7 +1431,7 @@ pub fn launch_manual_hlae_candidate(
         )?;
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual_start.cfg"),
-            manual_recording_start_cfg(settings, &output_path),
+            manual_recording_start_cfg(settings, &recording_working),
         )?;
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual_stop.cfg"),
@@ -1420,8 +1440,8 @@ pub fn launch_manual_hlae_candidate(
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual_save.cfg"),
             format!(
-                "mirv_campath save \"{}\"\necho TF2FRAG_MANUAL_CAMPATH_SAVED\n",
-                output_path.join("camera_path.xml").display().to_string().replace('\\', "/")
+                "mirv_campath save \"{}\"\necho TF2FRAG_MANUAL_CAMPATH_SAVED\ntf2frag_manual_sync_keyframes\n",
+                campath_file.display().to_string().replace('\\', "/")
             ),
         )?;
         Ok(())
@@ -1501,8 +1521,12 @@ pub fn launch_manual_hlae_candidate(
     let monitor_output = output_path.clone();
     let monitor_session = session.clone();
     let monitor_progress = progress.clone();
+    let monitor_settings = settings.clone();
+    let monitor_recording_working = recording_working.clone();
+    let monitor_recording_identifier = recording_identifier.clone();
     staging_guard.disarm();
     thread::spawn(move || {
+        let mut profile = profile;
         if let Some(sink) = &monitor_progress {
             sink(RecordingProgress::Status(format!(
                 "Manual HLAE paused at tick {target_tick} — 6 camera, 7 keyframe, 9/0 record"
@@ -1551,13 +1575,33 @@ pub fn launch_manual_hlae_candidate(
         }
         close_director_companion(&mut director_child);
         wait_for_hlae_shutdown(&mut child, &monitor_log);
+        let finalization_error = finalize_manual_outputs(
+            &monitor_recording_working,
+            &monitor_output,
+            &monitor_recording_identifier,
+            &monitor_settings,
+            &monitor_log,
+        )
+        .err();
+        if let Some(error) = &finalization_error {
+            log_recording_diagnostic(
+                &monitor_log,
+                format!("ERROR: manual output finalization failed: {error:#}"),
+            );
+            profile
+                .temporary_paths
+                .retain(|path| path != &monitor_session);
+        }
         log_recording_diagnostic(&monitor_log, "TF2 closed; restoring the original TF2 profile");
-        let session_for_logs = if let Err(error) = restore_recording_profile(&profile) {
+        let restoration_error = restore_recording_profile(&profile).err();
+        let session_for_logs = if let Some(error) = restoration_error {
             log_recording_diagnostic(&monitor_log, format!("ERROR: restore failed: {error}"));
             let _ = fs::write(
                 profile.backup_directory.join("RESTORE_REQUIRED.txt"),
                 error.to_string(),
             );
+            Some(monitor_session)
+        } else if finalization_error.is_some() {
             Some(monitor_session)
         } else {
             None
@@ -3125,7 +3169,7 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         target_tick + 1,
         None,
         &format!(
-            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0"
+            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes"
         ),
     );
     lines.push("}".into());
@@ -3162,6 +3206,7 @@ fn manual_hotkey_cfg(
         "alias tf2frag_manual_start \"exec tf2fragdemohelper_manual_start\"".into(),
         "alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"".into(),
         "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
+        format!("alias tf2frag_manual_sync_keyframes \"echo {DIRECTOR_KEYFRAME_BEGIN_PREFIX}; mirv_campath print; echo {DIRECTOR_KEYFRAME_END_PREFIX}\""),
         format!(
             "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE\"",
             shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
@@ -3178,7 +3223,7 @@ fn manual_hotkey_cfg(
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
         let cue_tick = (tick - MANUAL_ONE_SECOND_TICKS).max(target_tick).max(0);
         lines.push(format!(
-            "alias tf2frag_manual_kill_{current} \"demo_gototick {cue_tick}; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}\"",
+            "alias tf2frag_manual_kill_{current} \"demo_gototick {cue_tick}; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; tf2frag_manual_sync_keyframes; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}\"",
             kill_ticks.len()
         ));
     }
@@ -3186,26 +3231,27 @@ fn manual_hotkey_cfg(
         "alias tf2frag_manual_hud_off \"cl_drawhud 0; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_on; echo TF2FRAG_MANUAL_HUD_HIDDEN\"".into(),
         "alias tf2frag_manual_hud_on \"cl_drawhud 1; alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off; echo TF2FRAG_MANUAL_HUD_VISIBLE\"".into(),
         "alias tf2frag_manual_toggle_hud tf2frag_manual_hud_off".into(),
-        "alias tf2frag_manual_draw_on \"mirv_campath draw enabled 1; alias tf2frag_manual_toggle_draw tf2frag_manual_draw_off; echo TF2FRAG_MANUAL_CAMPATH_DRAW_ENABLED\"".into(),
+        "alias tf2frag_manual_draw_on \"mirv_campath draw keyIndex 12; mirv_campath draw enabled 1; alias tf2frag_manual_toggle_draw tf2frag_manual_draw_off; echo TF2FRAG_MANUAL_CAMPATH_DRAW_ENABLED\"".into(),
         "alias tf2frag_manual_draw_off \"mirv_campath draw enabled 0; alias tf2frag_manual_toggle_draw tf2frag_manual_draw_on; echo TF2FRAG_MANUAL_CAMPATH_DRAW_DISABLED\"".into(),
         "alias tf2frag_manual_toggle_draw tf2frag_manual_draw_on".into(),
         "alias tf2frag_manual_next_kill tf2frag_manual_kill_1".into(),
-        format!("bind \"{}\" \"mirv_skip time 0.25\"", shortcuts.advance_time),
+        format!("bind \"{}\" \"mirv_skip time 0.25; tf2frag_manual_sync_keyframes\"", shortcuts.advance_time),
         format!("bind \"{}\" \"tf2frag_manual_toggle_hud\"", shortcuts.toggle_hud),
         format!("bind \"{}\" \"tf2frag_manual_help\"", shortcuts.show_help),
-        format!("bind \"{}\" \"mirv_skip time -1; echo {DIRECTOR_TICK_OFFSET_PREFIX} -{MANUAL_ONE_SECOND_TICKS}\"", shortcuts.back_one_second),
+        format!("bind \"{}\" \"mirv_skip time -1; echo {DIRECTOR_TICK_OFFSET_PREFIX} -{MANUAL_ONE_SECOND_TICKS}; tf2frag_manual_sync_keyframes\"", shortcuts.back_one_second),
         format!("bind \"{}\" \"tf2frag_manual_clip_start\"", shortcuts.safe_restart),
         format!("bind \"{}\" \"tf2frag_manual_next_kill\"", shortcuts.next_kill_tick),
         format!("bind \"{}\" \"demo_togglepause\"", shortcuts.pause_resume),
         format!("bind \"{}\" \"sv_cheats 1; thirdperson; r_drawviewmodel 0; spec_autodirector 0; mirv_input camera\"", shortcuts.enter_camera),
-        format!("bind \"{}\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED\"", shortcuts.add_keyframe),
+        format!("bind \"{}\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED; tf2frag_manual_sync_keyframes\"", shortcuts.add_keyframe),
         format!("bind \"{}\" \"mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED_THIRDPERSON\"", shortcuts.play_campath),
         format!("bind \"{}\" \"tf2frag_manual_toggle_draw\"", shortcuts.draw_campath),
         format!("bind \"{}\" \"tf2frag_manual_start\"", shortcuts.start_recording),
         format!("bind \"{}\" \"tf2frag_manual_stop\"", shortcuts.stop_recording),
-        format!("bind \"{}\" \"mirv_campath print\"", shortcuts.print_keyframes),
+        format!("bind \"{}\" \"tf2frag_manual_sync_keyframes\"", shortcuts.print_keyframes),
         format!("bind \"{}\" \"tf2frag_manual_save\"", shortcuts.save_campath),
         "echo TF2FRAG_MANUAL_READY".into(),
+        "tf2frag_manual_sync_keyframes".into(),
         "tf2frag_manual_help".into(),
     ]);
     format!("{}\n", lines.join("\n"))
@@ -4185,6 +4231,146 @@ fn finalize_encoded_video(
         bail!("the finalized video is missing or empty");
     }
     Ok(clip.final_output_path.clone())
+}
+
+fn finalize_manual_outputs(
+    working: &Path,
+    output_directory: &Path,
+    recording_identifier: &str,
+    settings: &AppSettings,
+    diagnostic_log: &Path,
+) -> Result<Vec<PathBuf>> {
+    if !working.is_dir() {
+        return Ok(Vec::new());
+    }
+    fs::create_dir_all(output_directory)?;
+    if settings.recording_format.contains("Image") {
+        let mut sources = fs::read_dir(working)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        sources.sort();
+        if sources.is_empty() {
+            remove_empty_tree(working);
+            return Ok(Vec::new());
+        }
+        let sequence = unique_manual_output_path(
+            output_directory,
+            &format!("{recording_identifier}__image_sequence"),
+            None,
+        );
+        fs::create_dir_all(&sequence)?;
+        for source in sources {
+            let Some(name) = source.file_name() else { continue };
+            move_file(&source, &sequence.join(name))?;
+        }
+        remove_empty_tree(working);
+        return Ok(vec![sequence]);
+    }
+
+    let media_name = encoded_media_name(settings);
+    let mut takes = fs::read_dir(working)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.is_dir()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("take"))
+                && path.join(media_name).is_file()
+        })
+        .collect::<Vec<_>>();
+    if working.join(media_name).is_file() {
+        takes.push(working.to_owned());
+    }
+    takes.sort();
+    takes.dedup();
+    if takes.is_empty() {
+        remove_empty_tree(working);
+        return Ok(Vec::new());
+    }
+
+    let extension = encoded_extension(settings);
+    let multiple = takes.len() > 1;
+    let mut finalized = Vec::with_capacity(takes.len());
+    for (index, take) in takes.iter().enumerate() {
+        let video = take.join(media_name);
+        let audio = take.join("audio.wav");
+        wait_for_stable_file(&video, Duration::from_secs(20))?;
+        wait_for_stable_file(&audio, Duration::from_secs(20))?;
+        let muxing = take.join(encoded_muxing_name(settings));
+        let mut command = Command::new(&settings.ffmpeg_executable);
+        command
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&video)
+            .arg("-i")
+            .arg(&audio)
+            .args(["-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]);
+        if settings.recording_format.contains("AVI")
+            || settings.recording_format == "MOV - DNxHR"
+        {
+            command.args(["-c:a", "pcm_s16le", "-shortest"]);
+        } else {
+            let audio_bitrate = format!("{}k", settings.mp4_audio_bitrate_kbps);
+            command
+                .args(["-c:a", "aac", "-b:a"])
+                .arg(audio_bitrate)
+                .args(["-movflags", "+faststart", "-shortest"]);
+        }
+        command
+            .arg(&muxing)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        log_recording_diagnostic(
+            diagnostic_log,
+            format!("[Manual Recording] Final FFmpeg mux command: {command:?}"),
+        );
+        let output = command.output()?;
+        if !output.status.success() {
+            bail!(
+                "FFmpeg audio mux failed for manual take {}: {}",
+                index + 1,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        wait_for_stable_file(&muxing, Duration::from_secs(20))?;
+        let stem = if multiple {
+            format!("{recording_identifier}__take_{:02}", index + 1)
+        } else {
+            recording_identifier.to_owned()
+        };
+        let destination = unique_manual_output_path(output_directory, &stem, Some(extension));
+        move_file(&muxing, &destination)?;
+        let _ = fs::remove_file(&video);
+        let _ = fs::remove_file(&audio);
+        finalized.push(destination);
+    }
+    remove_empty_tree(working);
+    Ok(finalized)
+}
+
+fn unique_manual_output_path(directory: &Path, stem: &str, extension: Option<&str>) -> PathBuf {
+    for suffix in 1usize.. {
+        let name = if suffix == 1 {
+            stem.to_owned()
+        } else {
+            format!("{stem}_{suffix}")
+        };
+        let path = match extension {
+            Some(extension) => directory.join(format!("{name}.{extension}")),
+            None => directory.join(name),
+        };
+        if !path.exists() {
+            return path;
+        }
+    }
+    unreachable!("manual output suffix loop is unbounded")
 }
 
 fn find_encoded_take_directory(working: &Path, media_name: &str) -> PathBuf {
@@ -5463,11 +5649,13 @@ mod recording_tests {
             ..Candidate::default()
         };
         let output = Path::new(r"C:\captures\candidate");
+        let campath = output.join("match__candidate__camera_path.xml");
         let session = build_director_session(
             &candidate,
             11_000,
             13_000,
             output,
+            &campath,
             Path::new(r"C:\Team Fortress 2\tf\tf2fragdemohelper_recording.log"),
             &AppSettings::default(),
         );
@@ -5481,9 +5669,9 @@ mod recording_tests {
         assert_eq!(session.shortcuts.len(), 16);
         assert_eq!(session.shortcuts[0].key, "[");
         assert_eq!(session.shortcuts[7].label, "MIRV camera");
-        assert_eq!(session.campath_file, output.join("camera_path.xml"));
+        assert_eq!(session.campath_file, campath);
         assert_eq!(session.shortcuts[10].key, "/");
-        assert_eq!(session.shortcuts[10].label, "Show / hide campath");
+        assert_eq!(session.shortcuts[10].label, "Show / hide campath + IDs");
         assert_eq!(session.shortcuts[15].key, "C");
         assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
     }
@@ -5607,7 +5795,9 @@ mod recording_tests {
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 FRAG_TICK 925 CUE_TICK 858"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 FRAG_TICK 970 CUE_TICK 903"));
         assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
-        assert!(cfg.contains("bind \"[\" \"mirv_skip time 0.25\""));
+        assert!(cfg.contains(
+            "bind \"[\" \"mirv_skip time 0.25; tf2frag_manual_sync_keyframes\""
+        ));
         assert!(cfg.contains("bind \"]\" \"tf2frag_manual_toggle_hud\""));
         assert!(!cfg.contains("RIGHTARROW"));
         assert!(!cfg.contains("UPARROW"));
@@ -5624,8 +5814,16 @@ mod recording_tests {
         assert!(cfg.contains("bind \"/\" \"tf2frag_manual_toggle_draw\""));
         assert!(cfg.contains("mirv_campath draw enabled 1"));
         assert!(cfg.contains("mirv_campath draw enabled 0"));
+        assert!(cfg.contains("mirv_campath draw keyIndex 12"));
+        assert!(cfg.contains("alias tf2frag_manual_sync_keyframes"));
+        assert!(cfg.contains("TF2FRAG_DIRECTOR_KEYFRAMES_BEGIN"));
+        assert!(cfg.contains("TF2FRAG_DIRECTOR_KEYFRAMES_END"));
         assert!(cfg.contains(
-            "bind \"2\" \"mirv_skip time -1; echo TF2FRAG_DIRECTOR_TICK_OFFSET -67\""
+            "bind \"7\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED; tf2frag_manual_sync_keyframes\""
+        ));
+        assert!(cfg.contains("bind \"-\" \"tf2frag_manual_sync_keyframes\""));
+        assert!(cfg.contains(
+            "bind \"2\" \"mirv_skip time -1; echo TF2FRAG_DIRECTOR_TICK_OFFSET -67; tf2frag_manual_sync_keyframes\""
         ));
         assert!(!cfg.contains("bind \"F"));
         assert!(cfg.contains("mirv_cmd clear"));
@@ -5647,7 +5845,9 @@ mod recording_tests {
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &settings,
         );
-        assert!(cfg.contains("bind \"q\" \"mirv_skip time 0.25\""));
+        assert!(cfg.contains(
+            "bind \"q\" \"mirv_skip time 0.25; tf2frag_manual_sync_keyframes\""
+        ));
         assert!(cfg.contains("bind \"F12\" \"tf2frag_manual_toggle_hud\""));
         assert!(cfg.contains("bind \"3\" \"tf2frag_manual_clip_start\""));
         assert!(!cfg.contains("bind \"LEFTARROW\""));
@@ -5662,7 +5862,7 @@ mod recording_tests {
         assert!(vdm.contains("skiptotick \"500\""));
         assert!(vdm.contains("starttick \"501\""));
         assert!(vdm.contains(
-            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0\""
+            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes\""
         ));
         assert!(!vdm.contains("mirv_cmd"));
         assert!(!vdm.contains("TF2FRAG_DIRECTOR_TICK"));
@@ -5701,6 +5901,22 @@ mod recording_tests {
         assert!(cfg.contains("mirv_streams record fps 240"));
         assert!(cfg.contains("mirv_streams record screen settings tf2FragMp4"));
         assert!(cfg.contains("mirv_streams record name \"C:/manual/capture\""));
+    }
+
+    #[test]
+    fn manual_outputs_use_videos_then_manual_hlae_then_category() {
+        let candidate = Candidate {
+            tags: vec!["confirmed_airshot".into()],
+            primary_tag: "confirmed_airshot".into(),
+            ..Candidate::default()
+        };
+        assert_eq!(
+            manual_output_directory(Path::new("C:/outputs"), &candidate),
+            PathBuf::from("C:/outputs")
+                .join("Videos")
+                .join("Manual HLAE")
+                .join("Confirmed Airshot")
+        );
     }
 
     fn recording_profile_suppresses_recorded_vote_and_server_message_panels() {

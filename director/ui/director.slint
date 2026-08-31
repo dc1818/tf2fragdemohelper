@@ -16,6 +16,12 @@ export struct ShortcutRow {
     label: string,
 }
 
+export struct KeyframeRow {
+    id: int,
+    tick: int,
+    position: float,
+}
+
 global Colors {
     in property <brush> app: #181918;
     in property <brush> header: #121412;
@@ -42,6 +48,7 @@ component Caption inherits Text {
 component ShortcutCell inherits Rectangle {
     in property <string> key-name;
     in property <string> action-name;
+    in property <length> key-width: 42px;
     height: 26px;
     background: Colors.panel-alt;
     border-width: 1px;
@@ -50,7 +57,7 @@ component ShortcutCell inherits Rectangle {
     HorizontalLayout {
         spacing: 7px;
         Rectangle {
-            width: 42px;
+            width: root.key-width;
             background: Colors.blue;
             Text {
                 text: root.key-name;
@@ -92,6 +99,7 @@ export component DirectorStripWindow inherits Window {
     in property <bool> panel-visible: true;
     in property <string> panel-toggle-key;
     in property <[CueRow]> cues;
+    in property <[KeyframeRow]> keyframes;
 
     Rectangle {
         background: Colors.header;
@@ -99,23 +107,24 @@ export component DirectorStripWindow inherits Window {
         border-color: Colors.border;
 
         HorizontalLayout {
-            padding-left: 14px;
-            padding-right: 14px;
+            padding-left: root.width < 800px ? 6px : 14px;
+            padding-right: root.width < 800px ? 6px : 14px;
             padding-top: 8px;
             padding-bottom: 8px;
-            spacing: 18px;
+            spacing: root.width < 800px ? 6px : 18px;
 
             HorizontalLayout {
-                width: 300px;
+                width: root.width < 800px ? 140px : (root.width < 1000px ? 210px : 300px);
                 spacing: 8px;
                 Text {
                     text: "TF2 MIRV DIRECTOR";
                     color: Colors.cream;
                     font-family: "Bebas Neue";
-                    font-size: 25px;
+                    font-size: root.width < 800px ? 15px : (root.width < 1000px ? 19px : 25px);
                     vertical-alignment: center;
+                    overflow: elide;
                 }
-                Rectangle {
+                if root.width >= 1000px : Rectangle {
                     width: 72px;
                     height: 25px;
                     border-width: 1px;
@@ -149,32 +158,51 @@ export component DirectorStripWindow inherits Window {
                     background: Colors.panel-alt;
                     border-width: 1px;
                     border-color: #343633;
-                    Rectangle { x: 12px; y: 25px; width: parent.width - 24px; height: 3px; background: Colors.dim; }
-                    Rectangle { x: 12px; y: 25px; width: root.current-position * (parent.width - 24px); height: 3px; background: Colors.blue-line; }
+                    Rectangle { x: 12px; y: 28px; width: parent.width - 24px; height: 3px; background: Colors.dim; }
+                    Rectangle { x: 12px; y: 28px; width: root.current-position * (parent.width - 24px); height: 3px; background: Colors.blue-line; }
+                    for keyframe in root.keyframes : Rectangle {
+                        background: #00000000;
+                        Rectangle {
+                            x: 12px + keyframe.position * (parent.width - 24px) - 2px;
+                            y: 13px;
+                            width: 5px;
+                            height: 18px;
+                            background: Colors.green;
+                        }
+                        Text {
+                            x: Math.min(parent.width - 94px, Math.max(0px, 12px + keyframe.position * (parent.width - 24px) - 47px));
+                            y: 1px;
+                            width: 94px;
+                            text: "" + keyframe.id;
+                            color: Colors.green;
+                            font-family: "TF2 Build";
+                            font-size: 8px;
+                            horizontal-alignment: center;
+                        }
+                    }
                     for cue in root.cues : Rectangle {
                         x: 12px + cue.position * (parent.width - 24px) - 3px;
-                        y: 17px;
+                        y: 28px;
                         width: 7px;
-                        height: 18px;
+                        height: 13px;
                         background: Colors.gold;
-                        Text { x: -22px; y: -14px; width: 52px; text: cue.tick; color: Colors.cream; font-family: "Roboto Condensed"; font-size: 9px; horizontal-alignment: center; }
                     }
                     Rectangle {
                         x: 12px + root.current-position * (parent.width - 24px) - 2px;
-                        y: 6px;
+                        y: 4px;
                         width: 4px;
-                        height: 36px;
+                        height: 40px;
                         background: Colors.blue-line;
                     }
                 }
             }
 
             VerticalLayout {
-                width: 190px;
+                width: root.width < 800px ? 100px : (root.width < 1000px ? 130px : 190px);
                 alignment: center;
-                Text { text: root.next-frag-tick > 0 ? "NEXT FRAG  " + root.next-frag-tick : "CLIP OUTRO"; color: Colors.gold; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: right; }
-                Caption { text: root.panel-toggle-key + (root.panel-visible ? "  HIDE PANEL" : "  SHOW PANEL"); color: Colors.blue-text; horizontal-alignment: right; }
-                Caption { text: "GAME INPUT PASSES THROUGH"; font-size: 9px; horizontal-alignment: right; }
+                Text { text: root.next-frag-tick > 0 ? "NEXT FRAG  " + root.next-frag-tick : "CLIP OUTRO"; color: Colors.gold; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: right; overflow: elide; }
+                Caption { text: root.panel-toggle-key + (root.panel-visible ? "  HIDE PANEL" : "  SHOW PANEL"); color: Colors.blue-text; horizontal-alignment: right; overflow: elide; }
+                Caption { text: "GAME INPUT PASSES THROUGH"; font-size: 9px; horizontal-alignment: right; overflow: elide; }
             }
         }
     }
@@ -186,7 +214,7 @@ export component DirectorCardWindow inherits Window {
     preferred-width: 360px;
     preferred-height: 650px;
     min-width: 300px;
-    min-height: 360px;
+    min-height: 240px;
     background: Colors.app;
 
     in property <int> current-tick;
@@ -195,9 +223,9 @@ export component DirectorCardWindow inherits Window {
     in property <string> next-frag-victims;
     in property <string> next-frag-tags;
     in property <string> panel-toggle-key;
-    in property <string> draw-campath-key;
     in property <string> record-order;
     in property <[ShortcutRow]> shortcuts;
+    in property <[KeyframeRow]> keyframes;
     callback hide-requested();
 
     Rectangle {
@@ -240,39 +268,26 @@ export component DirectorCardWindow inherits Window {
                 }
             }
 
-            Rectangle {
-                height: 44px;
-                background: Colors.panel-alt;
-                border-width: 1px;
-                border-color: #343633;
-                HorizontalLayout {
-                    padding-left: 9px;
-                    padding-right: 9px;
-                    spacing: 9px;
-                    Rectangle {
-                        width: 42px;
-                        background: Colors.blue;
-                        Text { text: root.draw-campath-key; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 11px; horizontal-alignment: center; vertical-alignment: center; }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Text { text: "DRAW CAMPATH"; color: Colors.cream; font-family: "TF2 Build"; font-size: 11px; }
-                        Caption { text: "mirv_campath draw enabled 1"; color: Colors.blue-text; font-size: 10px; }
-                    }
-                }
-            }
-
             HorizontalLayout {
                 height: 20px;
-                Text { text: "SHORTCUTS"; color: Colors.cream; font-family: "TF2 Build"; font-size: 12px; vertical-alignment: center; }
+                Text { text: "CAMPATH + SHORTCUTS"; color: Colors.cream; font-family: "TF2 Build"; font-size: 12px; vertical-alignment: center; }
                 Rectangle { horizontal-stretch: 1; background: #00000000; }
                 Caption { text: "ARROWS = CAMERA"; color: Colors.blue-text; font-size: 9px; }
             }
 
             ScrollView {
                 vertical-stretch: 1;
+                vertical-scrollbar-policy: as-needed;
+                horizontal-scrollbar-policy: always-off;
                 VerticalLayout {
                     spacing: 2px;
+                    Text { height: 20px; text: "HLAE KEYFRAME ID  →  DEMO TICK"; color: Colors.green; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; }
+                    for keyframe in root.keyframes : ShortcutCell {
+                        key-name: "" + keyframe.id;
+                        key-width: 100px;
+                        action-name: "TICK  " + keyframe.tick;
+                    }
+                    Text { height: 20px; text: "MIRV SHORTCUTS"; color: Colors.cream; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; }
                     for shortcut in root.shortcuts : ShortcutCell {
                         key-name: shortcut.key;
                         action-name: shortcut.label;
@@ -288,7 +303,7 @@ export component DirectorCardWindow inherits Window {
                 Text { text: root.panel-toggle-key + "  HIDE PANEL"; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
                 TouchArea { clicked => { root.hide-requested(); } }
             }
-            Text { height: 20px; text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 10px; horizontal-alignment: center; vertical-alignment: center; }
+            Text { height: 30px; text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
             Caption { height: 18px; text: "CARD INTERACTIVE • GAME AREA CLICK-THROUGH"; color: Colors.muted; font-size: 9px; horizontal-alignment: center; }
         }
     }

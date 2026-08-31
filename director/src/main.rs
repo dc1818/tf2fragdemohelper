@@ -13,7 +13,8 @@ use std::{
     time::Duration,
 };
 use tf2_mirv_director::{
-    DirectorControl, DirectorSession, DIRECTOR_TICK_OFFSET_PREFIX,
+    DirectorControl, DirectorSession, DIRECTOR_KEYFRAME_BEGIN_PREFIX,
+    DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_TICK_OFFSET_PREFIX,
 };
 
 slint::include_modules!();
@@ -47,15 +48,14 @@ fn main() -> Result<()> {
             .to_owned()
     };
     let panel_toggle_key = shortcut_key("overlay_panel_toggle", "C");
-    let draw_campath_key = shortcut_key("draw_campath", "/");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
-    card.set_draw_campath_key(draw_campath_key.into());
     card.set_record_order(
         format!(
-            "{} RESUME  →  {} START  →  {} STOP",
+            "{} FOLLOW CAMPATH  →  {} RESUME  →  {} RECORD  →  {} STOP",
+            shortcut_key("play_campath", "8"),
             shortcut_key("pause_resume", "5"),
             shortcut_key("start_recording", "9"),
             shortcut_key("stop_recording", "0")
@@ -80,6 +80,9 @@ fn main() -> Result<()> {
         })
         .collect::<Vec<_>>();
     strip.set_cues(ModelRc::new(VecModel::from(cue_rows)));
+    let empty_keyframes = ModelRc::new(VecModel::from(Vec::<KeyframeRow>::new()));
+    strip.set_keyframes(empty_keyframes.clone());
+    card.set_keyframes(empty_keyframes);
 
     let shortcut_rows = session
         .shortcuts
@@ -173,7 +176,7 @@ fn main() -> Result<()> {
             };
             polls = polls.saturating_add(1);
             match tail.poll(&session.telemetry_marker_prefix) {
-                Ok(updates) => {
+                Ok(poll) => {
                     if tail.is_open() && !reported_log_open {
                         reported_log_open = true;
                         reported_missing_log = false;
@@ -182,8 +185,30 @@ fn main() -> Result<()> {
                             "status=TF2_CONSOLE_LOG_OPENED",
                         );
                     }
-                    if !updates.is_empty() {
-                        for update in updates {
+                    if let Some(keys) = poll.keyframe_snapshot {
+                        let rows = keys
+                            .into_iter()
+                            .filter(|key| {
+                                key.tick >= session.start_tick && key.tick <= session.end_tick
+                            })
+                            .map(|key| KeyframeRow {
+                                // HLAE prints and consumes this exact signed-int index.
+                                // Do not replace it with an overlay-generated identifier.
+                                id: key.id,
+                                tick: to_ui_tick(key.tick),
+                                position: session.cue_position(key.tick),
+                            })
+                            .collect::<Vec<_>>();
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            &format!("status=KEYFRAMES_SYNCED visible_count={}", rows.len()),
+                        );
+                        let model = ModelRc::new(VecModel::from(rows));
+                        strip.set_keyframes(model.clone());
+                        card.set_keyframes(model);
+                    }
+                    if !poll.tick_updates.is_empty() {
+                        for update in poll.tick_updates {
                             last_tick = match update {
                                 TickUpdate::Absolute(tick) => tick,
                                 TickUpdate::Relative(delta) => {
@@ -379,12 +404,11 @@ fn dock_overlay_windows(
 ) {
     const STRIP_HEIGHT: f64 = 108.0;
     const CARD_WIDTH: f64 = 360.0;
-    const CARD_HEIGHT: f64 = 650.0;
 
     let logical_width = geometry.size.width as f64 / geometry.scale;
     let logical_height = geometry.size.height as f64 / geometry.scale;
     let card_width = CARD_WIDTH.min(logical_width);
-    let card_height = CARD_HEIGHT.min((logical_height - STRIP_HEIGHT).max(1.0));
+    let card_height = (logical_height - STRIP_HEIGHT).max(1.0);
 
     let _ = strip.window().with_winit_window(|native| {
         let _ = native.request_inner_size(winit::dpi::LogicalSize::new(
@@ -446,6 +470,8 @@ struct TickLogTail {
     file: Option<File>,
     offset: u64,
     carry: String,
+    keyframe_capture: Option<Vec<ParsedCampathKey>>,
+    known_keyframes: Vec<ParsedCampathKey>,
 }
 
 impl TickLogTail {
@@ -455,6 +481,8 @@ impl TickLogTail {
             file: None,
             offset: 0,
             carry: String::new(),
+            keyframe_capture: None,
+            known_keyframes: Vec::new(),
         }
     }
 
@@ -462,11 +490,13 @@ impl TickLogTail {
         self.file.is_some()
     }
 
-    fn poll(&mut self, prefix: &str) -> std::io::Result<Vec<TickUpdate>> {
+    fn poll(&mut self, prefix: &str) -> std::io::Result<TelemetryPoll> {
         if self.file.is_none() {
             match File::open(&self.path) {
                 Ok(file) => self.file = Some(file),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(TelemetryPoll::default())
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -475,13 +505,14 @@ impl TickLogTail {
         if length < self.offset {
             self.offset = 0;
             self.carry.clear();
+            self.keyframe_capture = None;
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         self.offset += bytes.len() as u64;
         if bytes.is_empty() {
-            return Ok(Vec::new());
+            return Ok(TelemetryPoll::default());
         }
 
         let mut text = std::mem::take(&mut self.carry);
@@ -489,10 +520,110 @@ impl TickLogTail {
         let complete_length = text.rfind('\n').map(|index| index + 1).unwrap_or(0);
         let (complete, remainder) = text.split_at(complete_length);
         self.carry = remainder.to_owned();
-        Ok(complete
-            .lines()
-            .filter_map(|line| parse_tick_update(line, prefix))
-            .collect())
+        let mut poll = TelemetryPoll::default();
+        for line in complete.lines() {
+            if let Some(update) = parse_tick_update(line, prefix) {
+                poll.tick_updates.push(update);
+            }
+            if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX)
+                || line.contains("passed? selected? id : tick[offset]")
+            {
+                self.keyframe_capture = Some(Vec::new());
+                continue;
+            }
+            if line.trim_end().ends_with("----")
+                || line.contains(DIRECTOR_KEYFRAME_END_PREFIX)
+            {
+                if let Some(snapshot) = self.keyframe_capture.take() {
+                    self.known_keyframes = snapshot;
+                    poll.keyframe_snapshot = Some(self.known_keyframes.clone());
+                }
+                continue;
+            }
+            if let (Some(capture), Some(key)) =
+                (self.keyframe_capture.as_mut(), parse_campath_key(line))
+            {
+                capture.push(key);
+                continue;
+            }
+            if let Some(mutation) = parse_campath_mutation(line) {
+                match mutation {
+                    CampathMutation::Remove(id) => {
+                        self.known_keyframes.retain(|key| key.id != id);
+                        for (index, key) in self.known_keyframes.iter_mut().enumerate() {
+                            key.id = index as i32;
+                        }
+                    }
+                    CampathMutation::Clear => {
+                        if self.known_keyframes.iter().any(|key| key.selected) {
+                            self.known_keyframes.retain(|key| !key.selected);
+                            for (index, key) in self.known_keyframes.iter_mut().enumerate() {
+                                key.id = index as i32;
+                            }
+                        } else {
+                            self.known_keyframes.clear();
+                        }
+                    }
+                }
+                poll.keyframe_snapshot = Some(self.known_keyframes.clone());
+            }
+        }
+        Ok(poll)
+    }
+}
+
+#[derive(Default)]
+struct TelemetryPoll {
+    tick_updates: Vec<TickUpdate>,
+    keyframe_snapshot: Option<Vec<ParsedCampathKey>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ParsedCampathKey {
+    id: i32,
+    tick: i64,
+    selected: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CampathMutation {
+    Remove(i32),
+    Clear,
+}
+
+fn parse_campath_mutation(line: &str) -> Option<CampathMutation> {
+    let command = line.split_once("] ").map(|(_, command)| command.trim())?;
+    let lower = command.to_ascii_lowercase();
+    if lower == "mirv_campath clear" {
+        return Some(CampathMutation::Clear);
+    }
+    let argument = lower.strip_prefix("mirv_campath remove ")?;
+    let id = argument.split_whitespace().next()?.parse::<i32>().ok()?;
+    Some(CampathMutation::Remove(id))
+}
+
+fn parse_campath_key(line: &str) -> Option<ParsedCampathKey> {
+    let (left, right) = line.split_once(" : ")?;
+    let mut fields = left.split_whitespace().rev();
+    let id = fields.next()?.parse::<i32>().ok()?;
+    let selected = fields.next()?.eq_ignore_ascii_case("Y");
+    let tick_text = right.split(',').next()?.trim();
+    let tick = parse_campath_tick(tick_text)?;
+    Some(ParsedCampathKey { id, tick, selected })
+}
+
+fn parse_campath_tick(value: &str) -> Option<i64> {
+    let split = value
+        .char_indices()
+        .skip(1)
+        .find_map(|(index, character)| matches!(character, '+' | '-').then_some(index));
+    match split {
+        Some(index) => {
+            let base = value[..index].trim().parse::<i64>().ok()?;
+            let offset = value[index..].trim().parse::<i64>().ok()?;
+            Some(base.saturating_add(offset))
+        }
+        None => value.trim().parse::<i64>().ok(),
     }
 }
 
@@ -504,6 +635,14 @@ enum TickUpdate {
 
 fn parse_tick_update(line: &str, prefix: &str) -> Option<TickUpdate> {
     if let Some(tick) = parse_tick_marker(line, prefix) {
+        return Some(TickUpdate::Absolute(tick));
+    }
+    if let Some(marker) = line.rfind("Current tick: ") {
+        let tick = line[marker + "Current tick: ".len()..]
+            .split_whitespace()
+            .next()?
+            .parse::<i64>()
+            .ok()?;
         return Some(TickUpdate::Absolute(tick));
     }
     let marker = line.rfind(DIRECTOR_TICK_OFFSET_PREFIX)?;
@@ -635,6 +774,46 @@ mod tests {
                 "TF2FRAG_DIRECTOR_TICK"
             ),
             Some(TickUpdate::Absolute(12_000))
+        );
+        assert_eq!(
+            parse_tick_update(
+                "08/30 12:30:22 Current tick: 11933, Current demoTime: 179.0",
+                "TF2FRAG_DIRECTOR_TICK"
+            ),
+            Some(TickUpdate::Absolute(11_933))
+        );
+    }
+
+    #[test]
+    fn parses_hlae_campath_key_ids_and_ticks() {
+        assert_eq!(
+            parse_campath_key("Y n 2 : 12345 , 185.175 , 185.175 -> ( 1 2 3 )"),
+            Some(ParsedCampathKey {
+                id: 2,
+                tick: 12_345,
+                selected: false,
+            })
+        );
+        assert_eq!(
+            parse_campath_key("08/30 12:30:22 Y Y 0 : 12345-10 , 185.175"),
+            Some(ParsedCampathKey {
+                id: 0,
+                tick: 12_335,
+                selected: true,
+            })
+        );
+        assert_eq!(parse_campath_tick("12345+10"), Some(12_355));
+    }
+
+    #[test]
+    fn parses_direct_console_keyframe_removal_and_clear() {
+        assert_eq!(
+            parse_campath_mutation("08/30 12:30:22 ] mirv_campath remove 2"),
+            Some(CampathMutation::Remove(2))
+        );
+        assert_eq!(
+            parse_campath_mutation("08/30 12:30:22 ] mirv_campath clear"),
+            Some(CampathMutation::Clear)
         );
     }
 

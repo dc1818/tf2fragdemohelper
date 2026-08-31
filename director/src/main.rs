@@ -56,9 +56,6 @@ fn main() -> Result<()> {
     let highlighted_cue = Rc::new(Cell::new(None::<usize>));
     let selected_keyframe = Rc::new(Cell::new(None::<(i32, i64)>));
     let last_tick = Rc::new(Cell::new(session.start_tick));
-    let action_queue = Rc::new(RefCell::new(DirectorActionQueue::new(
-        session.command_cfg_directory.clone(),
-    )));
 
     let shortcut_key = |id: &str, fallback: &str| {
         session
@@ -69,11 +66,19 @@ fn main() -> Result<()> {
             .unwrap_or(fallback)
             .to_owned()
     };
+    let execute_action_key = shortcut_key("execute_director_action", "'");
+    let action_queue = Rc::new(RefCell::new(DirectorActionQueue::new(
+        session.command_cfg_directory.clone(),
+        execute_action_key.clone(),
+    )));
     let panel_toggle_key = shortcut_key("overlay_panel_toggle", "C");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
+    card.set_command_status(
+        format!("READY • CLICK AN ACTION, THEN PRESS {execute_action_key} IN TF2").into(),
+    );
     card.set_record_order(
         format!(
             "{} FOLLOW CAMPATH  →  {} RESUME  →  {} RECORD  →  {} STOP",
@@ -691,6 +696,7 @@ struct InFlightDirectorAction {
 
 struct DirectorActionQueue {
     directory: PathBuf,
+    execute_key: String,
     pending: VecDeque<QueuedDirectorAction>,
     in_flight: Option<InFlightDirectorAction>,
     next_slot: u16,
@@ -698,9 +704,10 @@ struct DirectorActionQueue {
 }
 
 impl DirectorActionQueue {
-    fn new(directory: PathBuf) -> Self {
+    fn new(directory: PathBuf, execute_key: String) -> Self {
         Self {
             directory,
+            execute_key,
             pending: VecDeque::new(),
             in_flight: None,
             next_slot: 0,
@@ -718,8 +725,9 @@ impl DirectorActionQueue {
             self.start_next()
         } else {
             Ok(format!(
-                "QUEUED • {} ACTION(S) WAITING",
-                self.pending.len()
+                "QUEUED • {} ACTION(S) WAITING • PRESS {} AFTER THE CURRENT ACTION",
+                self.pending.len(),
+                self.execute_key,
             ))
         }
     }
@@ -765,7 +773,7 @@ impl DirectorActionQueue {
         let slot = self.next_slot;
         let next_slot = (slot + 1) % DIRECTOR_ACTION_SLOTS;
         let contents = format!(
-            "{}\ntf2frag_manual_sync_keyframes\necho {DIRECTOR_ACTION_ACK_PREFIX} {sequence}\nalias tf2frag_director_poll tf2frag_director_poll_{next_slot:02}\n",
+            "{}\ntf2frag_manual_sync_keyframes\necho {DIRECTOR_ACTION_ACK_PREFIX} {sequence}\nalias tf2frag_director_execute tf2frag_director_execute_{next_slot:02}\n",
             action.command
         );
         let path = self.action_path(slot);
@@ -781,7 +789,10 @@ impl DirectorActionQueue {
             slot,
             label: label.clone(),
         });
-        Ok(format!("SENT TO TF2 • {label}"))
+        Ok(format!(
+            "QUEUED • {label} • RETURN TO TF2 + PRESS {}",
+            self.execute_key
+        ))
     }
 
     fn action_path(&self, slot: u16) -> PathBuf {
@@ -1520,6 +1531,35 @@ mod tests {
             parse_action_ack("08/30 12:30:22 TF2FRAG_DIRECTOR_ACTION_ACK 42"),
             Some(42)
         );
+    }
+
+    #[test]
+    fn queued_action_requires_an_explicit_tf2_keypress_without_polling() {
+        let directory = std::env::temp_dir().join(format!(
+            "tf2frag-director-action-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+
+        let mut queue = DirectorActionQueue::new(directory.clone(), "'".into());
+        let status = queue
+            .enqueue("mirv_campath print".into(), "PRINT KEYFRAMES".into())
+            .unwrap();
+        assert!(status.contains("PRESS '"));
+
+        let action = fs::read_to_string(
+            directory.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_00.cfg")),
+        )
+        .unwrap();
+        assert!(action.contains("mirv_campath print"));
+        assert!(action.contains(
+            "alias tf2frag_director_execute tf2frag_director_execute_01"
+        ));
+        assert!(!action.contains("wait"));
+        assert!(!action.contains("tf2frag_director_poll"));
+
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

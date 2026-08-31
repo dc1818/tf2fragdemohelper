@@ -301,6 +301,7 @@ pub struct MirvShortcuts {
     pub stop_recording: String,
     pub print_keyframes: String,
     pub save_campath: String,
+    pub execute_director_action: String,
     pub overlay_panel_toggle: String,
     #[serde(default)]
     pub overlay_panel_toggle_default_version: u8,
@@ -324,6 +325,7 @@ impl Default for MirvShortcuts {
             stop_recording: "0".into(),
             print_keyframes: "-".into(),
             save_campath: "=".into(),
+            execute_director_action: "'".into(),
             overlay_panel_toggle: "C".into(),
             overlay_panel_toggle_default_version: 3,
         }
@@ -398,6 +400,10 @@ impl MirvShortcuts {
         self.stop_recording = Self::normalized_key(&self.stop_recording, &defaults.stop_recording);
         self.print_keyframes = Self::normalized_key(&self.print_keyframes, &defaults.print_keyframes);
         self.save_campath = Self::normalized_key(&self.save_campath, &defaults.save_campath);
+        self.execute_director_action = Self::normalized_key(
+            &self.execute_director_action,
+            &defaults.execute_director_action,
+        );
         self.overlay_panel_toggle = Self::normalized_key(
             &self.overlay_panel_toggle,
             &defaults.overlay_panel_toggle,
@@ -410,6 +416,7 @@ impl MirvShortcuts {
             &self.add_keyframe, &self.play_campath, &self.draw_campath,
             &self.start_recording, &self.stop_recording,
             &self.print_keyframes, &self.save_campath,
+            &self.execute_director_action,
             &self.overlay_panel_toggle,
         ];
         if keys.iter().any(|key| !seen.insert(key.to_ascii_lowercase())) {
@@ -611,6 +618,7 @@ mod settings_tests {
         assert_eq!(shortcuts.show_help, "1");
         assert_eq!(shortcuts.save_campath, "=");
         assert_eq!(shortcuts.draw_campath, "/");
+        assert_eq!(shortcuts.execute_director_action, "'");
         assert_eq!(shortcuts.overlay_panel_toggle, "C");
         assert_eq!(shortcuts.overlay_panel_toggle_default_version, 3);
     }

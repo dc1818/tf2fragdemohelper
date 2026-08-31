@@ -1185,6 +1185,11 @@ fn build_director_session(
         ),
         ("save_campath", &shortcuts.save_campath, "Save campath XML"),
         (
+            "execute_director_action",
+            &shortcuts.execute_director_action,
+            "Execute queued Director action",
+        ),
+        (
             "overlay_panel_toggle",
             &shortcuts.overlay_panel_toggle,
             "Hide / show cue panel",
@@ -3181,7 +3186,7 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         target_tick + 1,
         None,
         &format!(
-            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes; tf2frag_director_poll_start"
+            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes"
         ),
     );
     lines.push("}".into());
@@ -3212,7 +3217,6 @@ fn manual_hotkey_cfg(
         "mirv_input end".into(),
         "mirv_cmd clear".into(),
         "mirv_cmd enabled 1".into(),
-        "sv_allow_wait_command 1".into(),
         format!(
             "mirv_cmd addCurves tick {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} - interp=linear space=abs {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_FIRST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} {DIRECTOR_TELEMETRY_LAST_TICK} -- \"echo {DIRECTOR_TICK_MARKER_PREFIX} {{0}}\""
         ),
@@ -3221,27 +3225,23 @@ fn manual_hotkey_cfg(
         "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
         format!("alias tf2frag_manual_sync_keyframes \"echo {DIRECTOR_KEYFRAME_BEGIN_PREFIX}; mirv_campath print; echo {DIRECTOR_KEYFRAME_END_PREFIX}\""),
         format!(
-            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE\"",
+            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE {}_EXECUTE_DIRECTOR_ACTION\"",
             shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
             shortcuts.back_one_second, shortcuts.safe_restart, shortcuts.next_kill_tick,
             shortcuts.pause_resume, shortcuts.enter_camera, shortcuts.add_keyframe,
             shortcuts.play_campath, shortcuts.draw_campath,
             shortcuts.start_recording, shortcuts.stop_recording,
             shortcuts.print_keyframes, shortcuts.save_campath,
+            shortcuts.execute_director_action,
         ),
         format!("alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\""),
     ];
     for slot in 0..DIRECTOR_ACTION_SLOTS {
         lines.push(format!(
-            "alias tf2frag_director_poll_{slot:02} \"exec {DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}; wait 10; tf2frag_director_poll\""
+            "alias tf2frag_director_execute_{slot:02} \"exec {DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}\""
         ));
     }
-    lines.push("alias tf2frag_director_poll tf2frag_director_poll_00".into());
-    lines.push("alias tf2frag_director_poll_noop \"\"".into());
-    lines.push(
-        "alias tf2frag_director_poll_start \"alias tf2frag_director_poll_start tf2frag_director_poll_noop; tf2frag_director_poll\""
-            .into(),
-    );
+    lines.push("alias tf2frag_director_execute tf2frag_director_execute_00".into());
     for (index, tick) in kill_ticks.iter().enumerate() {
         let current = index + 1;
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
@@ -3274,6 +3274,7 @@ fn manual_hotkey_cfg(
         format!("bind \"{}\" \"tf2frag_manual_stop\"", shortcuts.stop_recording),
         format!("bind \"{}\" \"tf2frag_manual_sync_keyframes\"", shortcuts.print_keyframes),
         format!("bind \"{}\" \"tf2frag_manual_save\"", shortcuts.save_campath),
+        format!("bind \"{}\" \"tf2frag_director_execute\"", shortcuts.execute_director_action),
         "echo TF2FRAG_MANUAL_READY".into(),
         "tf2frag_manual_sync_keyframes".into(),
         "tf2frag_manual_help".into(),
@@ -5856,18 +5857,16 @@ mod recording_tests {
         assert!(cfg.contains(
             "mirv_cmd addCurves tick 1 2147483646 - interp=linear space=abs 1 1 2147483646 2147483646 -- \"echo TF2FRAG_DIRECTOR_TICK {0}\""
         ));
-        assert!(cfg.contains("sv_allow_wait_command 1"));
+        assert!(!cfg.contains("sv_allow_wait_command"));
         assert!(cfg.contains(
-            "alias tf2frag_director_poll_00 \"exec tf2fragdemohelper_director_action_00; wait 10; tf2frag_director_poll\""
+            "alias tf2frag_director_execute_00 \"exec tf2fragdemohelper_director_action_00\""
         ));
         assert!(cfg.contains(
-            "alias tf2frag_director_poll_63 \"exec tf2fragdemohelper_director_action_63; wait 10; tf2frag_director_poll\""
+            "alias tf2frag_director_execute_63 \"exec tf2fragdemohelper_director_action_63\""
         ));
-        assert!(cfg.contains("alias tf2frag_director_poll_noop \"\""));
-        assert!(cfg.contains(
-            "alias tf2frag_director_poll_start \"alias tf2frag_director_poll_start tf2frag_director_poll_noop; tf2frag_director_poll\""
-        ));
-        assert!(!cfg.lines().any(|line| line == "tf2frag_director_poll"));
+        assert!(cfg.contains("bind \"'\" \"tf2frag_director_execute\""));
+        assert!(!cfg.contains("tf2frag_director_poll"));
+        assert!(!cfg.contains("wait 10"));
     }
 
     #[test]
@@ -5899,12 +5898,13 @@ mod recording_tests {
         assert!(vdm.contains("skiptotick \"500\""));
         assert!(vdm.contains("starttick \"501\""));
         assert!(vdm.contains(
-            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes; tf2frag_director_poll_start\""
+            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0; tf2frag_manual_sync_keyframes\""
         ));
         assert!(!vdm.contains("mirv_cmd"));
         assert!(!vdm.contains("TF2FRAG_DIRECTOR_TICK"));
         assert_eq!(vdm.matches("TF2 MIRV Director live tick").count(), 0);
         assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
+        assert!(!vdm.contains("tf2frag_director_poll"));
         let pause = vdm.find("demo_pause").expect("pause command");
         let seek = vdm.find("skiptotick \"500\"").expect("safe seek command");
         assert!(pause > seek);

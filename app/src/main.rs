@@ -1021,6 +1021,9 @@ fn main() -> Result<()> {
     ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
     ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
     ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
+    ui.set_mirv_execute_director_action(
+        settings.mirv_shortcuts.execute_director_action.clone().into(),
+    );
     ui.set_mirv_overlay_panel_toggle(
         settings.mirv_shortcuts.overlay_panel_toggle.clone().into(),
     );
@@ -2586,6 +2589,8 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.mirv_shortcuts.stop_recording = ui.get_mirv_stop_recording().to_string();
     settings.mirv_shortcuts.print_keyframes = ui.get_mirv_print_keyframes().to_string();
     settings.mirv_shortcuts.save_campath = ui.get_mirv_save_campath().to_string();
+    settings.mirv_shortcuts.execute_director_action =
+        ui.get_mirv_execute_director_action().to_string();
     settings.mirv_shortcuts.overlay_panel_toggle =
         ui.get_mirv_overlay_panel_toggle().to_string();
     settings.custom_resources = split_paths(&ui.get_custom_resources().to_string());
@@ -2619,6 +2624,9 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
     ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
     ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
+    ui.set_mirv_execute_director_action(
+        settings.mirv_shortcuts.execute_director_action.clone().into(),
+    );
     ui.set_mirv_overlay_panel_toggle(
         settings.mirv_shortcuts.overlay_panel_toggle.clone().into(),
     );

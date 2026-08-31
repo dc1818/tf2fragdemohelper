@@ -499,9 +499,10 @@ component MirvShortcutPanel inherits Rectangle {
     in-out property <string> stop-recording;
     in-out property <string> print-keyframes;
     in-out property <string> save-campath;
+    in-out property <string> execute-director-action;
     in-out property <string> overlay-panel-toggle;
 
-    height: root.compact ? 312px : 190px;
+    height: root.compact ? 340px : 220px;
     background: Tf2Colors.panel-dark;
     border-width: 1px;
     border-color: Tf2Colors.border;
@@ -519,6 +520,7 @@ component MirvShortcutPanel inherits Rectangle {
                     root.safe-restart = "3"; root.next-kill-tick = "4"; root.pause-resume = "5"; root.enter-camera = "6";
                     root.add-keyframe = "7"; root.play-campath = "8"; root.start-recording = "9"; root.stop-recording = "0";
                     root.draw-campath = "/"; root.print-keyframes = "-"; root.save-campath = "=";
+                    root.execute-director-action = "'";
                     root.overlay-panel-toggle = "C";
                 }
             }
@@ -535,12 +537,12 @@ component MirvShortcutPanel inherits Rectangle {
             VerticalLayout { spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } }
             VerticalLayout { spacing: 2px; ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next frag (1s early)"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } }
             VerticalLayout { spacing: 2px; ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Draw campath"; binding <=> root.draw-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } }
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } ShortcutCapture { label: "Hide/show overlay panel"; binding <=> root.overlay-panel-toggle; } }
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } ShortcutCapture { label: "Execute queued action"; binding <=> root.execute-director-action; } ShortcutCapture { label: "Hide/show overlay panel"; binding <=> root.overlay-panel-toggle; } }
         }
         if root.compact : HorizontalLayout {
             spacing: 12px;
             VerticalLayout { spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next frag (1s early)"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } }
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Draw campath"; binding <=> root.draw-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } ShortcutCapture { label: "Hide/show overlay panel"; binding <=> root.overlay-panel-toggle; } }
+            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Draw campath"; binding <=> root.draw-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } ShortcutCapture { label: "Execute queued action"; binding <=> root.execute-director-action; } ShortcutCapture { label: "Hide/show overlay panel"; binding <=> root.overlay-panel-toggle; } }
         }
     }
 }
@@ -719,6 +721,7 @@ export component AppWindow inherits Window {
     in-out property <string> mirv-stop-recording: "0";
     in-out property <string> mirv-print-keyframes: "-";
     in-out property <string> mirv-save-campath: "=";
+    in-out property <string> mirv-execute-director-action: "'";
     in-out property <string> mirv-overlay-panel-toggle: "C";
     in-out property <string> custom-resources;
 
@@ -782,6 +785,7 @@ export component AppWindow inherits Window {
     changed mirv-stop-recording => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-print-keyframes => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-save-campath => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-execute-director-action => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-overlay-panel-toggle => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed custom-resources => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
 
@@ -1125,6 +1129,7 @@ export component AppWindow inherits Window {
                 draw-campath <=> root.mirv-draw-campath;
                 start-recording <=> root.mirv-start-recording; stop-recording <=> root.mirv-stop-recording;
                 print-keyframes <=> root.mirv-print-keyframes; save-campath <=> root.mirv-save-campath;
+                execute-director-action <=> root.mirv-execute-director-action;
                 overlay-panel-toggle <=> root.mirv-overlay-panel-toggle;
             }
             VerticalLayout {
@@ -1269,6 +1274,7 @@ export component AppWindow inherits Window {
                     draw-campath <=> root.mirv-draw-campath;
                     start-recording <=> root.mirv-start-recording; stop-recording <=> root.mirv-stop-recording;
                     print-keyframes <=> root.mirv-print-keyframes; save-campath <=> root.mirv-save-campath;
+                    execute-director-action <=> root.mirv-execute-director-action;
                     overlay-panel-toggle <=> root.mirv-overlay-panel-toggle;
                 }
 

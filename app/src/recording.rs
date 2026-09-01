@@ -85,8 +85,9 @@ impl ManualBridgeConfig {
             .context("could not reserve a loopback port for Director control")?;
 
         let mut random_token = [0_u8; 16];
-        getrandom::fill(&mut random_token)
-            .context("could not create the Director session token")?;
+        getrandom::fill(&mut random_token).map_err(|error| {
+            anyhow::anyhow!("could not create the Director session token: {error}")
+        })?;
         let token = hex::encode(random_token);
         Ok(Self { port, token })
     }

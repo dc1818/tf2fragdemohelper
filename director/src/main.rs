@@ -1533,6 +1533,12 @@ fn post_tf2_bound_key(key: &str) -> Result<()> {
     const WM_KEYDOWN: u32 = 0x0100;
     const WM_KEYUP: u32 = 0x0101;
 
+    // Unit tests exercise mailbox sequencing without a running TF2 process.
+    // The non-test Windows build still compiles and uses the real user32 path.
+    if cfg!(test) {
+        return Ok(());
+    }
+
     let virtual_key = virtual_key_code(key)
         .with_context(|| format!("the configured fallback key '{key}' has no Windows key code"))?;
     let mut search = Tf2WindowSearch {

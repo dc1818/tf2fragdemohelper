@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DIRECTOR_SESSION_SCHEMA: u32 = 6;
+pub const DIRECTOR_SESSION_SCHEMA: u32 = 7;
 pub const DIRECTOR_TICK_MARKER_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK";
 pub const DIRECTOR_TICK_OFFSET_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK_OFFSET";
 pub const DIRECTOR_KEYFRAME_BEGIN_PREFIX: &str = "TF2FRAG_DIRECTOR_KEYFRAMES_BEGIN";
@@ -65,17 +65,6 @@ impl DirectorSession {
                 bail!("Director RCON password must be a session-generated hex secret");
             }
         }
-        if let DirectorControl::LocalBridge { endpoint, token } = &self.control {
-            let address = endpoint
-                .parse::<std::net::SocketAddr>()
-                .map_err(|_| anyhow::anyhow!("Director bridge endpoint is invalid"))?;
-            if !address.ip().is_loopback() {
-                bail!("Director bridge endpoint must use the loopback interface");
-            }
-            if token.len() < 16 || !token.chars().all(|character| character.is_ascii_hexdigit()) {
-                bail!("Director bridge token must be a session-generated hex secret");
-            }
-        }
         if self
             .cues
             .iter()
@@ -115,59 +104,16 @@ pub struct DirectorShortcut {
 pub enum DirectorControl {
     HotkeysOnly,
     LocalRcon { endpoint: String, password: String },
-    LocalBridge { endpoint: String, token: String },
+    /// Director writes a private CFG action slot and posts its dedicated bind
+    /// only to TF2's Valve001 window. The slot advances only after TF2 echoes
+    /// the action sequence acknowledgement.
+    CfgMailbox,
 }
 
 impl Default for DirectorControl {
     fn default() -> Self {
         Self::HotkeysOnly
     }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum BridgeRequest {
-    GetState,
-    SetPaused { paused: bool },
-    SkipSeconds { seconds: f64 },
-    SetCamera { pose: CameraPose },
-    AddKeyframe,
-    ReplaceKeyframe { hlae_index: i32, pose: CameraPose },
-    RemoveKeyframe { hlae_index: i32 },
-    EnableCampath { enabled: bool },
-    DrawCampath { enabled: bool },
-    SaveCampath { path: PathBuf },
-    LoadCampath { path: PathBuf },
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct CameraPose {
-    pub x: f64,
-    pub y: f64,
-    pub z: f64,
-    pub pitch: f64,
-    pub yaw: f64,
-    pub roll: f64,
-    pub fov: f64,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct BridgeState {
-    pub demo_tick: i64,
-    pub demo_time: f64,
-    pub paused: bool,
-    pub camera: CameraPose,
-    pub campath_enabled: bool,
-    pub campath_keys: Vec<CampathKey>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct CampathKey {
-    /// Ephemeral time-sorted index printed and consumed by HLAE.
-    pub hlae_index: i32,
-    pub demo_tick: i64,
-    pub demo_time: f64,
-    pub camera: CameraPose,
 }
 
 #[cfg(test)]
@@ -213,17 +159,6 @@ mod tests {
     }
 
     #[test]
-    fn bridge_requests_round_trip_as_tagged_json() {
-        let request = BridgeRequest::SkipSeconds { seconds: 0.25 };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("skip_seconds"));
-        assert_eq!(
-            serde_json::from_str::<BridgeRequest>(&json).unwrap(),
-            request
-        );
-    }
-
-    #[test]
     fn shortcuts_round_trip_with_the_session() {
         let session = session();
         let json = serde_json::to_string(&session).unwrap();
@@ -253,18 +188,12 @@ mod tests {
     }
 
     #[test]
-    fn local_bridge_requires_loopback_and_a_session_token() {
+    fn cfg_mailbox_round_trips_with_the_session() {
         let mut session = session();
-        session.control = DirectorControl::LocalBridge {
-            endpoint: "127.0.0.1:32145".into(),
-            token: "0123456789abcdef0123456789abcdef".into(),
-        };
+        session.control = DirectorControl::CfgMailbox;
         session.validate().unwrap();
-
-        session.control = DirectorControl::LocalBridge {
-            endpoint: "0.0.0.0:32145".into(),
-            token: "short".into(),
-        };
-        assert!(session.validate().is_err());
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: DirectorSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.control, DirectorControl::CfgMailbox);
     }
 }

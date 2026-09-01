@@ -10,7 +10,7 @@ This keeps the responsibilities clean:
 |---|---|
 | TF2 Frag Demo Helper | Candidate selection, clip window, safe staged seeking, recording profile, capture output, recovery, and restoration |
 | TF2 MIRV Director | Candidate timeline, shot cues, campath key list/editor, preview controls, and warnings |
-| HLAE Source 1 bridge | Local camera/demo/campath telemetry and a small allowlist of commands |
+| HLAE + CFG mailbox | Demo/campath telemetry and acknowledged local commands |
 | TF2 | Demo playback and final rendered camera |
 
 ## What was learned from HOT
@@ -54,24 +54,18 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 - Configurable hide/show-card shortcut in Recording Settings (`S` by default), available while TF2 has focus.
 - Saved shortcut grid, arrow-key reservation notice, keyframe checklist, and custom-key recording order.
 - Automatic launch and lifecycle tied to the manual TF2 session.
-- Typed, allowlisted bridge messages for demo state, small skips, camera pose, keyframe add/replace/remove, campath enable/draw, and save/load.
+- Typed Director actions for demo seeking and keyframe editing, delivered through private per-session CFG slots with TF2 acknowledgements.
 - No arrow-key capture and no replacement of the existing temporary MIRV binds.
 
-## Live bridge milestone
+## Live TF2 control
 
-The staged VDM installs one HLAE `mirv_cmd addCurves tick` command for the selected clip. HLAE evaluates the curve from its Source 1 demo-playback clock whenever the engine tick changes, and the curve writes that real tick to the temporary console log for Director. This avoids the unreliable and oversized approach of putting a separate PlayCommands action at every tick. Stock TF2 still does not offer the richer remote-control path used by the CS2 HOT setup, so camera-pose and keyframe editing remain a separate milestone.
+The temporary manual CFG installs one HLAE `mirv_cmd addCurves tick` command for the practical Source demo range. It writes authoritative demo ticks while playback moves. Director actions remain available while paused because the companion posts the dedicated private bind directly to TF2's verified `Valve001` window using the same `WM_KEYDOWN`/`WM_KEYUP` path implemented by Source's own `Sys_TestSendKey` helper.
 
-The robust implementation is a small MIT-compatible extension in a separate `advancedfx` fork:
+The Director writes one action at a time into a 64-slot ring. The action echoes a unique sequence acknowledgement and advances TF2's in-memory alias to the next slot. Director does not reuse or advance a slot until that acknowledgement appears in the temporary console log. The window-targeted key message cannot be delivered to another foreground application and the existing manual key remains an emergency fallback. This provides automatic control without Source RCON, `mirv_pgl`, additional DLLs, network listeners, or global `SendInput` injection.
 
-- Add a loopback-only WebSocket or named-pipe server to `AfxHookSource`.
-- Default to `127.0.0.1`; require a random per-session token.
-- Expose only the `BridgeRequest` allowlist defined by `tf2-mirv-director`.
-- Publish demo tick/time, pause state, current camera pose/FOV/roll, campath enabled state, and keyframes.
-- Marshal every engine mutation onto the game thread.
-- Keep safe restart in the helper; never perform a large backward `demo_gototick` through the bridge.
-- Ship the custom hook as a clearly versioned optional component with AdvancedFX MIT attribution.
+`mirv_pgl` must not be used for TF2: AdvancedFX documents it as CS:GO-only, and its initialization and command-service loop are installed only by the CS:GO `IBaseClientDLL` wrapper. The Helper validates that TF2 x64 uses an AfxHookSource release with x64 TF2 support and keeps `-insecure +sv_lan 1` under Helper control.
 
-Once connected, the same Director UI can add these live features:
+The Director UI provides these live features:
 
 - Click a cue to move forward safely to that tick.
 - Add, replace, delete, and label keys without opening the console.
@@ -87,4 +81,4 @@ Once connected, the same Director UI can add these live features:
 - Curve editing after the official Source 1 interpolation semantics are represented exactly.
 - Undo/redo and alternate shot versions stored beside each candidate.
 
-Multi-camera extensions should remain out of the initial bridge. HOT notes that its multi-camera/curve paths are incompatible with official HLAE; this project should first preserve portable `mirv_campath` XML files.
+Multi-camera extensions should remain out of the initial control path. HOT notes that its multi-camera/curve paths are incompatible with official HLAE; this project should first preserve portable `mirv_campath` XML files.

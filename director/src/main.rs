@@ -1,10 +1,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-mod bridge;
 mod rcon;
 
 use anyhow::{bail, Context, Result};
-use bridge::{CommandBridge, CommandDelivery as BridgeDelivery, CommandRequest as BridgeRequest};
 use rcon::CommandDelivery as RconDelivery;
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
@@ -42,24 +40,14 @@ fn main() -> Result<()> {
     let session_path = PathBuf::from(path);
     let session = Rc::new(load_session(&session_path)?);
     let telemetry_diagnostic = session_path.with_file_name("director_telemetry.log");
-    // Bind the bridge before waiting for TF2's demo log. mirv_pgl runs inside
-    // HLAE and reconnects automatically, so it can attach while the demo is
-    // still loading and be ready when the overlay appears.
-    let (pending_bridge, bridge_start_error) = match &session.control {
-        DirectorControl::LocalBridge { endpoint, token } => match bridge::spawn(endpoint, token) {
-            Ok(bridge) => (Some(bridge), None),
-            Err(error) => (None, Some(format!("{error:#}"))),
-        },
-        _ => (None, None),
-    };
     let _ = fs::write(
         &telemetry_diagnostic,
         format!(
-            "TF2 MIRV Director telemetry diagnostic\nsession={}\nconsole_log={}\nmarker={}\nbridge={}\nstatus=WAITING_FOR_TF2_LOG\n",
+            "TF2 MIRV Director telemetry diagnostic\nsession={}\nconsole_log={}\nmarker={}\ncontrol={:?}\nstatus=WAITING_FOR_TF2_LOG\n",
             session_path.display(),
             session.telemetry_log.display(),
             session.telemetry_marker_prefix,
-            bridge_start_error.as_deref().unwrap_or("LISTENING"),
+            session.control,
         ),
     );
     wait_for_demo_ready(
@@ -86,16 +74,14 @@ fn main() -> Result<()> {
             .to_owned()
     };
     let execute_action_key = shortcut_key("execute_director_action", "'");
+    let automatic_cfg_mailbox = matches!(&session.control, DirectorControl::CfgMailbox);
     let action_queue = Rc::new(RefCell::new(DirectorActionQueue::new(
         session.command_cfg_directory.clone(),
         execute_action_key.clone(),
+        automatic_cfg_mailbox,
     )));
-    let (direct_action_sender, direct_action_results) = match (&session.control, pending_bridge) {
-        (DirectorControl::LocalBridge { .. }, Some(bridge)) => {
-            let (sender, results) = spawn_bridge_action_worker(bridge);
-            (Some(sender), Some(results))
-        }
-        (DirectorControl::LocalRcon { endpoint, password }, _) => {
+    let (direct_action_sender, direct_action_results) = match &session.control {
+        DirectorControl::LocalRcon { endpoint, password } => {
             let (sender, results) = spawn_direct_action_worker(endpoint.clone(), password.clone());
             (Some(sender), Some(results))
         }
@@ -106,13 +92,10 @@ fn main() -> Result<()> {
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
-    let initial_command_status = if direct_action_sender.is_some() {
+    let initial_command_status = if automatic_cfg_mailbox {
+        SharedString::from("DIRECT CONTROL READY • CLICK AN ACTION")
+    } else if direct_action_sender.is_some() {
         SharedString::from("DIRECT CONTROL LISTENING • CLICK AN ACTION")
-    } else if let Some(error) = bridge_start_error {
-        SharedString::from(
-            format!("DIRECT CONTROL UNAVAILABLE: {error} • USE {execute_action_key} FALLBACK")
-                .to_ascii_uppercase(),
-        )
     } else {
         SharedString::from(format!(
             "READY • CLICK AN ACTION, THEN PRESS {execute_action_key} IN TF2"
@@ -391,9 +374,6 @@ fn main() -> Result<()> {
                     DirectActionResult::Confirmed { label } => {
                         card.set_command_status(format!("COMPLETE • {label}").into());
                     }
-                    DirectActionResult::Delivered { label } => {
-                        card.set_command_status(format!("SENT TO HLAE • {label}").into());
-                    }
                     DirectActionResult::SentUnconfirmed { label, reason } => {
                         card.set_command_status(
                             format!("SENT • {label} • CONFIRMATION LOST: {reason}")
@@ -640,7 +620,7 @@ fn update_playback_state(
         telemetry_active
             || matches!(
                 &session.control,
-                DirectorControl::LocalRcon { .. } | DirectorControl::LocalBridge { .. }
+                DirectorControl::LocalRcon { .. } | DirectorControl::CfgMailbox
             ),
     );
     card.set_current_tick(to_ui_tick(tick));
@@ -790,7 +770,6 @@ struct DirectActionRequest {
 
 enum DirectActionResult {
     Confirmed { label: String },
-    Delivered { label: String },
     SentUnconfirmed { label: String, reason: String },
     Unavailable { label: String, reason: String },
 }
@@ -839,48 +818,6 @@ fn spawn_direct_action_worker(
     (request_sender, result_receiver)
 }
 
-fn spawn_bridge_action_worker(
-    bridge: CommandBridge,
-) -> (Sender<DirectActionRequest>, Receiver<DirectActionResult>) {
-    let (request_sender, request_receiver) = mpsc::channel::<DirectActionRequest>();
-    let (result_sender, result_receiver) = mpsc::channel::<DirectActionResult>();
-    thread::spawn(move || {
-        while let Ok(request) = request_receiver.recv() {
-            let label = request.label;
-            let command = format!("{}; tf2frag_manual_sync_keyframes", request.command);
-            let deadline = Instant::now() + DIRECT_CONTROL_READY_TIMEOUT;
-            if bridge
-                .requests
-                .send(BridgeRequest { command, deadline })
-                .is_err()
-            {
-                let _ = result_sender.send(DirectActionResult::Unavailable {
-                    label,
-                    reason: "HLAE command bridge stopped".into(),
-                });
-                break;
-            }
-            let result = match bridge
-                .deliveries
-                .recv_timeout(DIRECT_CONTROL_READY_TIMEOUT + Duration::from_secs(1))
-            {
-                Ok(BridgeDelivery::Sent) => DirectActionResult::Delivered { label },
-                Ok(BridgeDelivery::Unavailable(reason)) => {
-                    DirectActionResult::Unavailable { label, reason }
-                }
-                Err(error) => DirectActionResult::Unavailable {
-                    label,
-                    reason: format!("HLAE command bridge did not answer: {error}"),
-                },
-            };
-            if result_sender.send(result).is_err() {
-                break;
-            }
-        }
-    });
-    (request_sender, result_receiver)
-}
-
 struct QueuedDirectorAction {
     command: String,
     label: String,
@@ -895,6 +832,7 @@ struct InFlightDirectorAction {
 struct DirectorActionQueue {
     directory: PathBuf,
     execute_key: String,
+    automatic: bool,
     pending: VecDeque<QueuedDirectorAction>,
     in_flight: Option<InFlightDirectorAction>,
     next_slot: u16,
@@ -902,10 +840,11 @@ struct DirectorActionQueue {
 }
 
 impl DirectorActionQueue {
-    fn new(directory: PathBuf, execute_key: String) -> Self {
+    fn new(directory: PathBuf, execute_key: String, automatic: bool) -> Self {
         Self {
             directory,
             execute_key,
+            automatic,
             pending: VecDeque::new(),
             in_flight: None,
             next_slot: 0,
@@ -925,11 +864,15 @@ impl DirectorActionQueue {
         if self.in_flight.is_none() {
             self.start_next()
         } else {
-            Ok(format!(
-                "QUEUED • {} ACTION(S) WAITING • PRESS {} AFTER THE CURRENT ACTION",
-                self.pending.len(),
-                self.execute_key,
-            ))
+            if self.automatic {
+                Ok(format!("QUEUED • {} ACTION(S) WAITING", self.pending.len()))
+            } else {
+                Ok(format!(
+                    "QUEUED • {} ACTION(S) WAITING • PRESS {} AFTER THE CURRENT ACTION",
+                    self.pending.len(),
+                    self.execute_key,
+                ))
+            }
         }
     }
 
@@ -987,16 +930,30 @@ impl DirectorActionQueue {
                 format!("could not write Director action slot {}", path.display())
             });
         }
+        let automatic_trigger = self
+            .automatic
+            .then(|| post_tf2_bound_key(&self.execute_key));
         let label = action.label;
         self.in_flight = Some(InFlightDirectorAction {
             sequence,
             slot,
             label: label.clone(),
         });
-        Ok(format!(
-            "QUEUED • {label} • RETURN TO TF2 + PRESS {}",
-            self.execute_key
-        ))
+        if let Some(trigger) = automatic_trigger {
+            match trigger {
+                Ok(()) => Ok(format!("SENT TO TF2 MAILBOX • {label}")),
+                Err(error) => Ok(format!(
+                    "QUEUED • {label} • AUTOMATIC TF2 TRIGGER FAILED: {error} • PRESS {}",
+                    self.execute_key
+                )
+                .to_ascii_uppercase()),
+            }
+        } else {
+            Ok(format!(
+                "QUEUED • {label} • RETURN TO TF2 + PRESS {}",
+                self.execute_key
+            ))
+        }
     }
 
     fn action_path(&self, slot: u16) -> PathBuf {
@@ -1572,6 +1529,72 @@ fn to_ui_tick(tick: i64) -> i32 {
 }
 
 #[cfg(target_os = "windows")]
+fn post_tf2_bound_key(key: &str) -> Result<()> {
+    const WM_KEYDOWN: u32 = 0x0100;
+    const WM_KEYUP: u32 = 0x0101;
+
+    let virtual_key = virtual_key_code(key)
+        .with_context(|| format!("the configured fallback key '{key}' has no Windows key code"))?;
+    let mut search = Tf2WindowSearch {
+        window: std::ptr::null_mut(),
+    };
+    unsafe {
+        EnumWindows(
+            Some(find_tf2_window),
+            &mut search as *mut Tf2WindowSearch as isize,
+        );
+    }
+    if search.window.is_null() {
+        bail!("TF2 window not found");
+    }
+    let pressed = unsafe {
+        PostMessageW(search.window, WM_KEYDOWN, virtual_key as usize, 0) != 0
+            && PostMessageW(search.window, WM_KEYUP, virtual_key as usize, 0) != 0
+    };
+    if !pressed {
+        bail!("Windows rejected the targeted TF2 key message");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+struct Tf2WindowSearch {
+    window: *mut std::ffi::c_void,
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn find_tf2_window(window: *mut std::ffi::c_void, state: isize) -> i32 {
+    const BUFFER_LENGTH: usize = 128;
+    let mut class_name = [0_u16; BUFFER_LENGTH];
+    let class_length = GetClassNameW(window, class_name.as_mut_ptr(), BUFFER_LENGTH as i32);
+    if class_length <= 0
+        || String::from_utf16_lossy(&class_name[..class_length as usize]) != "Valve001"
+    {
+        return 1;
+    }
+    let mut title = [0_u16; BUFFER_LENGTH];
+    let title_length = GetWindowTextW(window, title.as_mut_ptr(), BUFFER_LENGTH as i32);
+    if title_length <= 0
+        || !String::from_utf16_lossy(&title[..title_length as usize])
+            .to_ascii_lowercase()
+            .contains("team fortress 2")
+    {
+        return 1;
+    }
+    (*(state as *mut Tf2WindowSearch)).window = window;
+    0
+}
+
+#[cfg(not(target_os = "windows"))]
+fn post_tf2_bound_key(_key: &str) -> Result<()> {
+    if cfg!(test) {
+        Ok(())
+    } else {
+        bail!("automatic TF2 input is Windows-only")
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn virtual_key_code(key: &str) -> Option<i32> {
     let key = key.trim().to_ascii_uppercase();
     if key.len() == 1 {
@@ -1622,7 +1645,19 @@ fn global_key_is_down(virtual_key: i32) -> bool {
 #[cfg(target_os = "windows")]
 #[link(name = "user32")]
 unsafe extern "system" {
+    fn EnumWindows(
+        callback: Option<unsafe extern "system" fn(*mut std::ffi::c_void, isize) -> i32>,
+        state: isize,
+    ) -> i32;
+    fn GetClassNameW(window: *mut std::ffi::c_void, class_name: *mut u16, maximum: i32) -> i32;
     fn GetAsyncKeyState(virtual_key: i32) -> i16;
+    fn GetWindowTextW(window: *mut std::ffi::c_void, title: *mut u16, maximum: i32) -> i32;
+    fn PostMessageW(
+        window: *mut std::ffi::c_void,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> i32;
     fn SetWindowPos(
         window: *mut std::ffi::c_void,
         insert_after: *mut std::ffi::c_void,
@@ -1747,7 +1782,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_action_requires_an_explicit_tf2_keypress_without_polling() {
+    fn queued_action_is_written_for_automatic_tf2_delivery() {
         let directory = std::env::temp_dir().join(format!(
             "tf2frag-director-action-test-{}",
             std::process::id()
@@ -1755,11 +1790,12 @@ mod tests {
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
 
-        let mut queue = DirectorActionQueue::new(directory.clone(), "'".into());
+        let mut queue = DirectorActionQueue::new(directory.clone(), "'".into(), true);
         let status = queue
             .enqueue("mirv_campath print".into(), "PRINT KEYFRAMES".into())
             .unwrap();
-        assert!(status.contains("PRESS '"));
+        assert!(status.contains("SENT TO TF2 MAILBOX"));
+        assert!(!status.contains("PRESS"));
 
         let action =
             fs::read_to_string(directory.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_00.cfg")))
@@ -1768,6 +1804,38 @@ mod tests {
         assert!(action.contains("alias tf2frag_director_execute tf2frag_director_execute_01"));
         assert!(!action.contains("wait"));
         assert!(!action.contains("tf2frag_director_poll"));
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn acknowledged_mailbox_actions_advance_exactly_one_slot() {
+        let directory = std::env::temp_dir().join(format!(
+            "tf2frag-director-mailbox-sequence-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+
+        let mut queue = DirectorActionQueue::new(directory.clone(), "'".into(), true);
+        queue.enqueue("echo FIRST".into(), "FIRST".into()).unwrap();
+        let waiting = queue
+            .enqueue("echo SECOND".into(), "SECOND".into())
+            .unwrap();
+        assert!(waiting.contains("1 ACTION(S) WAITING"));
+        assert!(!directory
+            .join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_01.cfg"))
+            .exists());
+
+        let completed = queue.acknowledge(1);
+        assert!(completed.contains("COMPLETE • FIRST"));
+        assert!(completed.contains("SENT TO TF2 MAILBOX • SECOND"));
+        let second =
+            fs::read_to_string(directory.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_01.cfg")))
+                .unwrap();
+        assert!(second.contains("echo SECOND"));
+        assert!(second.contains(&format!("{DIRECTOR_ACTION_ACK_PREFIX} 2")));
+        assert!(second.contains("tf2frag_director_execute_02"));
 
         let _ = fs::remove_dir_all(directory);
     }

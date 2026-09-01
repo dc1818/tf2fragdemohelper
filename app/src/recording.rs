@@ -12,7 +12,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, OnceLock},
@@ -43,9 +42,7 @@ const MANUAL_ONE_SECOND_TICKS: i64 = 67;
 // selected lead-in or after the staged demo is reloaded.
 const DIRECTOR_TELEMETRY_FIRST_TICK: i64 = 1;
 const DIRECTOR_TELEMETRY_LAST_TICK: i64 = i32::MAX as i64 - 1;
-const DIRECTOR_BRIDGE_FIRST_PORT: u16 = 27_115;
-const DIRECTOR_BRIDGE_LAST_PORT: u16 = 27_164;
-const DIRECTOR_BRIDGE_CFG: &str = "tf2fragdemohelper_director_bridge.cfg";
+const MINIMUM_TF2_X64_HOOK_VERSION: (u32, u32, u32) = (1, 134, 0);
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -68,44 +65,6 @@ static DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignatureCacheE
     OnceLock::new();
 static PORTABLE_DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignatureCacheEntry>>> =
     OnceLock::new();
-
-#[derive(Clone, Debug)]
-struct ManualBridgeConfig {
-    port: u16,
-    token: String,
-}
-
-impl ManualBridgeConfig {
-    fn create() -> Result<Self> {
-        // HLAE's mirv_pgl client connects outward to this Director-owned
-        // loopback WebSocket. It does not depend on TF2's game socket, Source
-        // RCON, Windows firewall rules for tf_win64.exe, or net_start timing.
-        let port = (DIRECTOR_BRIDGE_FIRST_PORT..=DIRECTOR_BRIDGE_LAST_PORT)
-            .find(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok())
-            .context("could not reserve a loopback port for Director control")?;
-
-        let mut random_token = [0_u8; 16];
-        getrandom::fill(&mut random_token).map_err(|error| {
-            anyhow::anyhow!("could not create the Director session token: {error}")
-        })?;
-        let token = hex::encode(random_token);
-        Ok(Self { port, token })
-    }
-
-    fn control(&self) -> DirectorControl {
-        DirectorControl::LocalBridge {
-            endpoint: format!("127.0.0.1:{}", self.port),
-            token: self.token.clone(),
-        }
-    }
-
-    fn cfg_text(&self) -> String {
-        format!(
-            "mirv_pgl url \"ws://127.0.0.1:{}/{}\"\nmirv_pgl start\necho TF2FRAG_DIRECTOR_BRIDGE_STARTING\n",
-            self.port, self.token
-        )
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ManualLaunchToken {
@@ -272,7 +231,7 @@ fn manual_hlae_game_arguments(
         )
     };
     Ok(format!(
-        "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf {custom}-w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec {DIRECTOR_BRIDGE_CFG} +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_demo}",
+        "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf {custom}-w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_demo}",
     ))
 }
 
@@ -1552,6 +1511,9 @@ pub fn launch_manual_hlae_candidate(
     if !hook.is_file() {
         bail!("required HLAE hook is missing: {}", hook.display());
     }
+    if x64 {
+        validate_hlae_tf2_x64_support(hlae_root)?;
+    }
     let tf_process_name = settings
         .tf2_executable
         .file_name()
@@ -1621,7 +1583,6 @@ pub fn launch_manual_hlae_candidate(
     let campath_file = output_path.join(format!("{recording_identifier}__camera_path.xml"));
     let telemetry_log = game.join("tf2fragdemohelper_recording.log");
     let cfg_root = game.join("cfg");
-    let bridge = ManualBridgeConfig::create()?;
     let _ = fs::remove_file(&telemetry_log);
     let director_session = write_director_session(
         candidate,
@@ -1633,7 +1594,7 @@ pub fn launch_manual_hlae_candidate(
         &telemetry_log,
         &cfg_root,
         settings,
-        bridge.control(),
+        DirectorControl::CfgMailbox,
     )?;
     let launch_log = session.join("hlae_launch.log");
     let launch_log_file = File::create(&launch_log)?;
@@ -1647,7 +1608,6 @@ pub fn launch_manual_hlae_candidate(
     .context("could not stage the temporary TF2/HLAE profile")?;
 
     let cfg_result = (|| -> Result<()> {
-        fs::write(cfg_root.join(DIRECTOR_BRIDGE_CFG), bridge.cfg_text())?;
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual.cfg"),
             manual_hotkey_cfg(
@@ -1702,9 +1662,8 @@ pub fn launch_manual_hlae_candidate(
     log_recording_diagnostic(
         &diagnostic_log,
         format!(
-            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; HLAE command bridge ws://127.0.0.1:{}/<session-token>; command line: {diagnostic_arguments}",
+            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; TF2 CFG mailbox direct control; command line: {diagnostic_arguments}",
             output_path.display(),
-            bridge.port,
         ),
     );
     let launch_log_stdout = match launch_log_file.try_clone() {
@@ -3233,6 +3192,44 @@ fn validate_named_executable(executable: &Path, expected: &[&str], label: &str) 
     )
 }
 
+fn validate_hlae_tf2_x64_support(hlae_root: &Path) -> Result<(u32, u32, u32)> {
+    let changelog = hlae_root.join("resources/AfxHookSource_changelog.xml");
+    let text = fs::read_to_string(&changelog).with_context(|| {
+        format!(
+            "could not verify the HLAE version from {}; install HLAE 2.189.0 or newer",
+            changelog.display()
+        )
+    })?;
+    let start = text
+        .find("<version>")
+        .map(|index| index + "<version>".len())
+        .context("HLAE's AfxHookSource changelog has no version entry")?;
+    let end = text[start..]
+        .find("</version>")
+        .map(|index| start + index)
+        .context("HLAE's AfxHookSource changelog has an invalid version entry")?;
+    let raw = text[start..end].trim();
+    let mut components = raw.split('.');
+    let version = (
+        components.next().and_then(|value| value.parse().ok()),
+        components.next().and_then(|value| value.parse().ok()),
+        components.next().and_then(|value| value.parse().ok()),
+    );
+    let (Some(major), Some(minor), Some(patch)) = version else {
+        bail!("could not parse HLAE AfxHookSource version '{raw}'");
+    };
+    if components.next().is_some() {
+        bail!("could not parse HLAE AfxHookSource version '{raw}'");
+    }
+    let version = (major, minor, patch);
+    if version < MINIMUM_TF2_X64_HOOK_VERSION {
+        bail!(
+            "HLAE is too old for TF2 x64 (AfxHookSource {raw}); install HLAE 2.189.0 or newer"
+        );
+    }
+    Ok(version)
+}
+
 fn log_recording_diagnostic(path: &Path, message: impl AsRef<str>) {
     let result = (|| -> io::Result<()> {
         let mut log = OpenOptions::new().create(true).append(true).open(path)?;
@@ -3457,6 +3454,7 @@ fn manual_hotkey_cfg(
         ));
     }
     lines.push("alias tf2frag_director_execute tf2frag_director_execute_00".into());
+    lines.push("echo TF2FRAG_DIRECTOR_MAILBOX_READY".into());
     for (index, tick) in kill_ticks.iter().enumerate() {
         let current = index + 1;
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
@@ -6124,19 +6122,47 @@ mod recording_tests {
     }
 
     #[test]
-    fn manual_director_uses_hlaes_authenticated_loopback_bridge() {
-        let bridge = ManualBridgeConfig {
-            port: 32_145,
-            token: "0123456789abcdef0123456789abcdef".into(),
-        };
-        let cfg = bridge.cfg_text();
-        assert!(cfg.contains(
-            "mirv_pgl url \"ws://127.0.0.1:32145/0123456789abcdef0123456789abcdef\""
+    fn hlae_tf2_x64_version_check_accepts_supported_hook() {
+        let root = std::env::temp_dir().join(format!(
+            "tf2frag-hlae-version-supported-{}",
+            std::process::id()
         ));
-        assert!(cfg.contains("mirv_pgl start"));
-        assert!(!cfg.contains("rcon_password"));
-        assert!(!cfg.contains("net_start"));
+        let resources = root.join("resources");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(
+            resources.join("AfxHookSource_changelog.xml"),
+            "<changelog><release><version>1.135.1</version></release></changelog>",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_hlae_tf2_x64_support(&root).unwrap(),
+            (1, 135, 1)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
+    #[test]
+    fn hlae_tf2_x64_version_check_rejects_unsupported_hook() {
+        let root = std::env::temp_dir().join(format!(
+            "tf2frag-hlae-version-old-{}",
+            std::process::id()
+        ));
+        let resources = root.join("resources");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(
+            resources.join("AfxHookSource_changelog.xml"),
+            "<changelog><release><version>1.133.0</version></release></changelog>",
+        )
+        .unwrap();
+        let error = validate_hlae_tf2_x64_support(&root).unwrap_err().to_string();
+        assert!(error.contains("HLAE 2.189.0 or newer"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manual_director_uses_tf2_supported_automatic_cfg_mailbox() {
         let mut settings = AppSettings::default();
         settings.manual_hlae_launch_options = "-high -nojoy".into();
         let arguments = manual_hlae_game_arguments(
@@ -6149,14 +6175,26 @@ mod recording_tests {
         assert!(arguments.contains("-insecure"));
         assert!(!arguments.contains("-usercon"));
         assert!(arguments.contains("-high -nojoy"));
-        assert!(arguments.contains(&format!("+exec {DIRECTOR_BRIDGE_CFG}")));
-        assert!(arguments.find(&format!("+exec {DIRECTOR_BRIDGE_CFG}")).unwrap()
-            < arguments.find("+exec tf2fragdemohelper_manual.cfg").unwrap());
-        assert!(!arguments.contains(&bridge.token));
+        assert!(!arguments.contains("mirv_pgl"));
+        assert!(!arguments.contains("director_bridge"));
+
+        let cfg = manual_hotkey_cfg(
+            &Candidate::default(),
+            500,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+            &settings,
+        );
+        assert!(cfg.contains("echo TF2FRAG_DIRECTOR_TICK {0}"));
+        assert!(cfg.contains("alias tf2frag_director_execute tf2frag_director_execute_00"));
+        assert!(cfg.contains("echo TF2FRAG_DIRECTOR_MAILBOX_READY"));
+        assert!(!cfg.contains("mirv_pgl"));
+        assert!(!cfg.contains("rcon_password"));
+        assert!(!cfg.contains("net_start"));
+        assert!(!cfg.contains("wait"));
     }
 
     #[test]
-    fn custom_manual_launch_options_cannot_override_session_safety_or_bridge() {
+    fn custom_manual_launch_options_cannot_override_session_safety_or_control() {
         for managed in [
             "-steam",
             "-insecure",

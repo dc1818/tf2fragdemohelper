@@ -245,7 +245,7 @@ pub struct AppSettings {
     pub recording_output_directory: PathBuf,
     /// Additional safe command-line switches used only for Helper-launched
     /// manual HLAE sessions. Session ownership, offline safety, demo loading,
-    /// and Director RCON arguments remain managed by the Helper.
+    /// and the authenticated HLAE Director bridge remain managed by the Helper.
     pub manual_hlae_launch_options: String,
     pub performance_profile: String,
     pub lead_seconds: u32,

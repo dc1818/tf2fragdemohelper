@@ -1,8 +1,11 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod bridge;
 mod rcon;
 
 use anyhow::{bail, Context, Result};
+use bridge::{CommandBridge, CommandDelivery as BridgeDelivery, CommandRequest as BridgeRequest};
+use rcon::CommandDelivery as RconDelivery;
 use slint::winit_030::{winit, WinitWindowAccessor};
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::{
@@ -18,17 +21,16 @@ use std::{
     time::{Duration, Instant},
 };
 use tf2_mirv_director::{
-    DirectorControl, DirectorSession, DIRECTOR_ACTION_ACK_PREFIX,
-    DIRECTOR_ACTION_FILE_PREFIX, DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX,
-    DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_TICK_OFFSET_PREFIX,
+    DirectorControl, DirectorSession, DIRECTOR_ACTION_ACK_PREFIX, DIRECTOR_ACTION_FILE_PREFIX,
+    DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_END_PREFIX,
+    DIRECTOR_TICK_OFFSET_PREFIX,
 };
-use rcon::CommandDelivery;
 
 const ONE_SECOND_TICKS: i64 = 67;
 const DEMO_READY_MARKER: &str = "TF2FRAG_MANUAL_PAUSED_AT_START";
 const DEMO_RELOAD_MARKER: &str = "TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO";
 const DEMO_READY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-const RCON_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const DIRECT_CONTROL_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const RCON_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 slint::include_modules!();
@@ -40,13 +42,24 @@ fn main() -> Result<()> {
     let session_path = PathBuf::from(path);
     let session = Rc::new(load_session(&session_path)?);
     let telemetry_diagnostic = session_path.with_file_name("director_telemetry.log");
+    // Bind the bridge before waiting for TF2's demo log. mirv_pgl runs inside
+    // HLAE and reconnects automatically, so it can attach while the demo is
+    // still loading and be ready when the overlay appears.
+    let (pending_bridge, bridge_start_error) = match &session.control {
+        DirectorControl::LocalBridge { endpoint, token } => match bridge::spawn(endpoint, token) {
+            Ok(bridge) => (Some(bridge), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        },
+        _ => (None, None),
+    };
     let _ = fs::write(
         &telemetry_diagnostic,
         format!(
-            "TF2 MIRV Director telemetry diagnostic\nsession={}\nconsole_log={}\nmarker={}\nstatus=WAITING_FOR_TF2_LOG\n",
+            "TF2 MIRV Director telemetry diagnostic\nsession={}\nconsole_log={}\nmarker={}\nbridge={}\nstatus=WAITING_FOR_TF2_LOG\n",
             session_path.display(),
             session.telemetry_log.display(),
             session.telemetry_marker_prefix,
+            bridge_start_error.as_deref().unwrap_or("LISTENING"),
         ),
     );
     wait_for_demo_ready(
@@ -77,8 +90,12 @@ fn main() -> Result<()> {
         session.command_cfg_directory.clone(),
         execute_action_key.clone(),
     )));
-    let (direct_action_sender, direct_action_results) = match &session.control {
-        DirectorControl::LocalRcon { endpoint, password } => {
+    let (direct_action_sender, direct_action_results) = match (&session.control, pending_bridge) {
+        (DirectorControl::LocalBridge { .. }, Some(bridge)) => {
+            let (sender, results) = spawn_bridge_action_worker(bridge);
+            (Some(sender), Some(results))
+        }
+        (DirectorControl::LocalRcon { endpoint, password }, _) => {
             let (sender, results) = spawn_direct_action_worker(endpoint.clone(), password.clone());
             (Some(sender), Some(results))
         }
@@ -90,7 +107,12 @@ fn main() -> Result<()> {
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
     let initial_command_status = if direct_action_sender.is_some() {
-        SharedString::from("DIRECT CONTROL READY • CLICK AN ACTION")
+        SharedString::from("DIRECT CONTROL LISTENING • CLICK AN ACTION")
+    } else if let Some(error) = bridge_start_error {
+        SharedString::from(
+            format!("DIRECT CONTROL UNAVAILABLE: {error} • USE {execute_action_key} FALLBACK")
+                .to_ascii_uppercase(),
+        )
     } else {
         SharedString::from(format!(
             "READY • CLICK AN ACTION, THEN PRESS {execute_action_key} IN TF2"
@@ -225,14 +247,7 @@ fn main() -> Result<()> {
                 return;
             };
             strip.set_selected_cue_index(index.min(i32::MAX as usize) as i32);
-            update_playback_state(
-                &strip,
-                &card,
-                &session,
-                last_tick.get(),
-                true,
-                Some(index),
-            );
+            update_playback_state(&strip, &card, &session, last_tick.get(), true, Some(index));
             set_panel_visibility(&strip, &card, &panel_visible, true);
         });
     }
@@ -251,11 +266,8 @@ fn main() -> Result<()> {
             let Some(card) = weak_card.upgrade() else {
                 return;
             };
-            let Some(index) = displayed_cue_index(
-                &session,
-                last_tick.get(),
-                highlighted_cue.get(),
-            ) else {
+            let Some(index) = displayed_cue_index(&session, last_tick.get(), highlighted_cue.get())
+            else {
                 card.set_command_status("NO FRAG IS AVAILABLE TO SEEK".into());
                 return;
             };
@@ -301,17 +313,17 @@ fn main() -> Result<()> {
                 &session.telemetry_marker_prefix,
                 session.start_tick,
             ) {
-                Ok((command, label)) => {
-                    dispatch_director_action(
-                        direct_action_sender.as_ref(),
-                        &action_queue,
-                        &card,
-                        command,
-                        label,
-                    )
-                }
+                Ok((command, label)) => dispatch_director_action(
+                    direct_action_sender.as_ref(),
+                    &action_queue,
+                    &card,
+                    command,
+                    label,
+                ),
                 Err(error) => card.set_command_status(
-                    format!("ACTION NOT SENT: {error}").to_ascii_uppercase().into(),
+                    format!("ACTION NOT SENT: {error}")
+                        .to_ascii_uppercase()
+                        .into(),
                 ),
             }
         });
@@ -378,6 +390,9 @@ fn main() -> Result<()> {
                 match result {
                     DirectActionResult::Confirmed { label } => {
                         card.set_command_status(format!("COMPLETE • {label}").into());
+                    }
+                    DirectActionResult::Delivered { label } => {
+                        card.set_command_status(format!("SENT TO HLAE • {label}").into());
                     }
                     DirectActionResult::SentUnconfirmed { label, reason } => {
                         card.set_command_status(
@@ -606,11 +621,7 @@ fn wait_for_demo_ready(log_path: &Path, prefix: &str, diagnostic_path: &Path) ->
     }
 }
 
-fn set_demo_actions_enabled(
-    strip: &DirectorStripWindow,
-    card: &DirectorCardWindow,
-    enabled: bool,
-) {
+fn set_demo_actions_enabled(strip: &DirectorStripWindow, card: &DirectorCardWindow, enabled: bool) {
     strip.set_actions_enabled(enabled);
     card.set_actions_enabled(enabled);
 }
@@ -729,12 +740,9 @@ fn displayed_cue_index(
     tick: i64,
     highlighted: Option<usize>,
 ) -> Option<usize> {
-    highlighted.filter(|index| *index < session.cues.len()).or_else(|| {
-        session
-            .cues
-            .iter()
-            .position(|cue| cue.tick >= tick)
-    })
+    highlighted
+        .filter(|index| *index < session.cues.len())
+        .or_else(|| session.cues.iter().position(|cue| cue.tick >= tick))
 }
 
 fn dispatch_director_action(
@@ -754,9 +762,12 @@ fn dispatch_director_action(
             Err(error) => {
                 let request = error.0;
                 card.set_command_status(
-                    format!("NOT SENT • {} • DIRECT CONTROL WORKER STOPPED", request.label)
-                        .to_ascii_uppercase()
-                        .into(),
+                    format!(
+                        "NOT SENT • {} • DIRECT CONTROL WORKER STOPPED",
+                        request.label
+                    )
+                    .to_ascii_uppercase()
+                    .into(),
                 );
                 return;
             }
@@ -778,17 +789,10 @@ struct DirectActionRequest {
 }
 
 enum DirectActionResult {
-    Confirmed {
-        label: String,
-    },
-    SentUnconfirmed {
-        label: String,
-        reason: String,
-    },
-    Unavailable {
-        label: String,
-        reason: String,
-    },
+    Confirmed { label: String },
+    Delivered { label: String },
+    SentUnconfirmed { label: String, reason: String },
+    Unavailable { label: String, reason: String },
 }
 
 fn spawn_direct_action_worker(
@@ -800,15 +804,15 @@ fn spawn_direct_action_worker(
     thread::spawn(move || {
         while let Ok(request) = request_receiver.recv() {
             let rcon_command = format!("{}; tf2frag_manual_sync_keyframes", request.command);
-            let deadline = Instant::now() + RCON_READY_TIMEOUT;
+            let deadline = Instant::now() + DIRECT_CONTROL_READY_TIMEOUT;
             let result = loop {
                 match rcon::execute_once(&endpoint, &password, &rcon_command) {
-                    Ok(CommandDelivery::Confirmed(_)) => {
+                    Ok(RconDelivery::Confirmed(_)) => {
                         break DirectActionResult::Confirmed {
                             label: request.label,
                         };
                     }
-                    Ok(CommandDelivery::SentUnconfirmed(reason)) => {
+                    Ok(RconDelivery::SentUnconfirmed(reason)) => {
                         // The command may already have reached TF2. Retrying it
                         // could duplicate a destructive keyframe edit.
                         break DirectActionResult::SentUnconfirmed {
@@ -826,6 +830,48 @@ fn spawn_direct_action_worker(
                         };
                     }
                 }
+            };
+            if result_sender.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    (request_sender, result_receiver)
+}
+
+fn spawn_bridge_action_worker(
+    bridge: CommandBridge,
+) -> (Sender<DirectActionRequest>, Receiver<DirectActionResult>) {
+    let (request_sender, request_receiver) = mpsc::channel::<DirectActionRequest>();
+    let (result_sender, result_receiver) = mpsc::channel::<DirectActionResult>();
+    thread::spawn(move || {
+        while let Ok(request) = request_receiver.recv() {
+            let label = request.label;
+            let command = format!("{}; tf2frag_manual_sync_keyframes", request.command);
+            let deadline = Instant::now() + DIRECT_CONTROL_READY_TIMEOUT;
+            if bridge
+                .requests
+                .send(BridgeRequest { command, deadline })
+                .is_err()
+            {
+                let _ = result_sender.send(DirectActionResult::Unavailable {
+                    label,
+                    reason: "HLAE command bridge stopped".into(),
+                });
+                break;
+            }
+            let result = match bridge
+                .deliveries
+                .recv_timeout(DIRECT_CONTROL_READY_TIMEOUT + Duration::from_secs(1))
+            {
+                Ok(BridgeDelivery::Sent) => DirectActionResult::Delivered { label },
+                Ok(BridgeDelivery::Unavailable(reason)) => {
+                    DirectActionResult::Unavailable { label, reason }
+                }
+                Err(error) => DirectActionResult::Unavailable {
+                    label,
+                    reason: format!("HLAE command bridge did not answer: {error}"),
+                },
             };
             if result_sender.send(result).is_err() {
                 break;
@@ -868,7 +914,10 @@ impl DirectorActionQueue {
     }
 
     fn enqueue(&mut self, command: String, label: String) -> Result<String> {
-        if command.chars().any(|character| matches!(character, '\r' | '\n')) {
+        if command
+            .chars()
+            .any(|character| matches!(character, '\r' | '\n'))
+        {
             bail!("an internal command contained an unsafe line break");
         }
         self.pending
@@ -890,7 +939,10 @@ impl DirectorActionQueue {
         };
         if in_flight.sequence != sequence {
             self.in_flight = Some(in_flight);
-            return format!("WAITING FOR TF2 ACK {}", self.in_flight.as_ref().unwrap().sequence);
+            return format!(
+                "WAITING FOR TF2 ACK {}",
+                self.in_flight.as_ref().unwrap().sequence
+            );
         }
 
         let consumed = self.action_path(in_flight.slot);
@@ -983,9 +1035,7 @@ fn build_keyframe_action(
     let select = format!("mirv_campath select #{id} #{id}");
     let command = match action {
         "Edit keyframe" => build_keyframe_edit(id, &select, setting, value)?,
-        "Go to keyframe" => format!(
-            "demo_gototick {tick} 0 1; echo {tick_marker_prefix} {tick}"
-        ),
+        "Go to keyframe" => format!("demo_gototick {tick} 0 1; echo {tick_marker_prefix} {tick}"),
         "Go to 1 sec before" => {
             let target = tick
                 .saturating_sub(ONE_SECOND_TICKS)
@@ -1253,18 +1303,16 @@ fn dock_overlay_windows(
     strip.set_narrow_layout(logical_width < 800.0);
 
     let _ = strip.window().with_winit_window(|native| {
-        let _ = native.request_inner_size(winit::dpi::LogicalSize::new(
-            logical_width,
-            STRIP_HEIGHT,
-        ));
+        let _ =
+            native.request_inner_size(winit::dpi::LogicalSize::new(logical_width, STRIP_HEIGHT));
         native.set_outer_position(geometry.position);
         force_topmost(native);
     });
     let _ = card.window().with_winit_window(|native| {
         let _ = native.request_inner_size(winit::dpi::LogicalSize::new(card_width, card_height));
         let physical_card_width = (card_width * geometry.scale).round() as u32;
-        let x = geometry.position.x
-            + geometry.size.width.saturating_sub(physical_card_width) as i32;
+        let x =
+            geometry.position.x + geometry.size.width.saturating_sub(physical_card_width) as i32;
         let y = geometry.position.y + (STRIP_HEIGHT * geometry.scale).round() as i32;
         native.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
         force_topmost(native);
@@ -1380,9 +1428,7 @@ impl TickLogTail {
                 self.keyframe_capture = Some(Vec::new());
                 continue;
             }
-            if line.trim_end().ends_with("----")
-                || line.contains(DIRECTOR_KEYFRAME_END_PREFIX)
-            {
+            if line.trim_end().ends_with("----") || line.contains(DIRECTOR_KEYFRAME_END_PREFIX) {
                 if let Some(snapshot) = self.keyframe_capture.take() {
                     poll.keyframe_snapshot = Some(snapshot);
                 }
@@ -1617,19 +1663,16 @@ mod tests {
             ),
             Some(88_476)
         );
-        assert_eq!(parse_tick_marker("unrelated", "TF2FRAG_DIRECTOR_TICK"), None);
         assert_eq!(
-            parse_tick_update(
-                "TF2FRAG_DIRECTOR_TICK_OFFSET -67",
-                "TF2FRAG_DIRECTOR_TICK"
-            ),
+            parse_tick_marker("unrelated", "TF2FRAG_DIRECTOR_TICK"),
+            None
+        );
+        assert_eq!(
+            parse_tick_update("TF2FRAG_DIRECTOR_TICK_OFFSET -67", "TF2FRAG_DIRECTOR_TICK"),
             Some(TickUpdate::Relative(-67))
         );
         assert_eq!(
-            parse_tick_update(
-                "TF2FRAG_DIRECTOR_TICK 12000",
-                "TF2FRAG_DIRECTOR_TICK"
-            ),
+            parse_tick_update("TF2FRAG_DIRECTOR_TICK 12000", "TF2FRAG_DIRECTOR_TICK"),
             Some(TickUpdate::Absolute(12_000))
         );
         assert_eq!(
@@ -1718,14 +1761,11 @@ mod tests {
             .unwrap();
         assert!(status.contains("PRESS '"));
 
-        let action = fs::read_to_string(
-            directory.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_00.cfg")),
-        )
-        .unwrap();
+        let action =
+            fs::read_to_string(directory.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_00.cfg")))
+                .unwrap();
         assert!(action.contains("mirv_campath print"));
-        assert!(action.contains(
-            "alias tf2frag_director_execute tf2frag_director_execute_01"
-        ));
+        assert!(action.contains("alias tf2frag_director_execute tf2frag_director_execute_01"));
         assert!(!action.contains("wait"));
         assert!(!action.contains("tf2frag_director_poll"));
 
@@ -1801,10 +1841,7 @@ mod tests {
             10_000,
         )
         .unwrap();
-        assert_eq!(
-            fov,
-            "mirv_campath select #4 #4; mirv_campath edit fov 90"
-        );
+        assert_eq!(fov, "mirv_campath select #4 #4; mirv_campath edit fov 90");
 
         let (rotation_interp, _) = build_keyframe_action(
             4,
@@ -1816,10 +1853,7 @@ mod tests {
             10_000,
         )
         .unwrap();
-        assert_eq!(
-            rotation_interp,
-            "mirv_campath edit interp rotation sCubic"
-        );
+        assert_eq!(rotation_interp, "mirv_campath edit interp rotation sCubic");
     }
 
     #[cfg(target_os = "windows")]

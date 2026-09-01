@@ -12,12 +12,12 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    net::{TcpListener, UdpSocket},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, OnceLock},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 use tf2_mirv_director::{
     DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_ACTION_FILE_PREFIX,
@@ -43,9 +43,9 @@ const MANUAL_ONE_SECOND_TICKS: i64 = 67;
 // selected lead-in or after the staged demo is reloaded.
 const DIRECTOR_TELEMETRY_FIRST_TICK: i64 = 1;
 const DIRECTOR_TELEMETRY_LAST_TICK: i64 = i32::MAX as i64 - 1;
-const DIRECTOR_RCON_FIRST_PORT: u16 = 27_115;
-const DIRECTOR_RCON_LAST_PORT: u16 = 27_164;
-const DIRECTOR_RCON_CFG: &str = "tf2fragdemohelper_director_rcon.cfg";
+const DIRECTOR_BRIDGE_FIRST_PORT: u16 = 27_115;
+const DIRECTOR_BRIDGE_LAST_PORT: u16 = 27_164;
+const DIRECTOR_BRIDGE_CFG: &str = "tf2fragdemohelper_director_bridge.cfg";
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -70,62 +70,38 @@ static PORTABLE_DEMO_SIGNATURE_CACHE: OnceLock<Mutex<HashMap<PathBuf, DemoSignat
     OnceLock::new();
 
 #[derive(Clone, Debug)]
-struct ManualRconConfig {
+struct ManualBridgeConfig {
     port: u16,
-    password: String,
+    token: String,
 }
 
-impl ManualRconConfig {
-    fn create(session: &Path) -> Result<Self> {
-        // Source uses the same host port for its game socket and TCP RCON
-        // listener. Checking only an OS-selected TCP ephemeral port can pick a
-        // number whose UDP side is already occupied, leaving -usercon unable
-        // to create the RCON endpoint. Use a conventional Source port range
-        // and require both loopback transports to be available.
-        let port = (DIRECTOR_RCON_FIRST_PORT..=DIRECTOR_RCON_LAST_PORT)
-            .find(|port| {
-                let Ok(tcp) = TcpListener::bind(("0.0.0.0", *port)) else {
-                    return false;
-                };
-                let Ok(udp) = UdpSocket::bind(("0.0.0.0", *port)) else {
-                    return false;
-                };
-                drop((tcp, udp));
-                true
-            })
-            .context("could not reserve a loopback TCP/UDP port for Director control")?;
+impl ManualBridgeConfig {
+    fn create() -> Result<Self> {
+        // HLAE's mirv_pgl client connects outward to this Director-owned
+        // loopback WebSocket. It does not depend on TF2's game socket, Source
+        // RCON, Windows firewall rules for tf_win64.exe, or net_start timing.
+        let port = (DIRECTOR_BRIDGE_FIRST_PORT..=DIRECTOR_BRIDGE_LAST_PORT)
+            .find(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok())
+            .context("could not reserve a loopback port for Director control")?;
 
-        let mut digest = Sha256::new();
-        digest.update(session.as_os_str().to_string_lossy().as_bytes());
-        digest.update(std::process::id().to_le_bytes());
-        digest.update(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-                .to_le_bytes(),
-        );
-        // Keep the session secret comfortably inside legacy Source command
-        // and ConVar buffers while retaining 128 bits of entropy.
-        let password = format!("{:x}", digest.finalize())[..32].to_owned();
-        Ok(Self { port, password })
+        let mut random_token = [0_u8; 16];
+        getrandom::fill(&mut random_token)
+            .context("could not create the Director session token")?;
+        let token = hex::encode(random_token);
+        Ok(Self { port, token })
     }
 
     fn control(&self) -> DirectorControl {
-        DirectorControl::LocalRcon {
+        DirectorControl::LocalBridge {
             endpoint: format!("127.0.0.1:{}", self.port),
-            password: self.password.clone(),
+            token: self.token.clone(),
         }
     }
 
     fn cfg_text(&self) -> String {
-        // TF2's documented -usercon setup initializes the listener from a CFG
-        // with these commands. The engine requires the wildcard `ip` value,
-        // while Director itself still connects only through 127.0.0.1 with a
-        // fresh random password for every isolated recording session.
         format!(
-            "ip 0.0.0.0\nhostport {}\nrcon_password \"{}\"\nsv_rcon_whitelist_address 127.0.0.1\nnet_start\necho TF2FRAG_DIRECTOR_RCON_READY\n",
-            self.port, self.password
+            "mirv_pgl url \"ws://127.0.0.1:{}/{}\"\nmirv_pgl start\necho TF2FRAG_DIRECTOR_BRIDGE_STARTING\n",
+            self.port, self.token
         )
     }
 }
@@ -231,9 +207,6 @@ fn validated_manual_launch_options(value: &str) -> Result<&str> {
         "-insecure",
         "-secure",
         "-enablefakeip",
-        "-usercon",
-        "-port",
-        "-hostport",
         "-game",
         "-afxgame",
         "-novid",
@@ -255,11 +228,7 @@ fn validated_manual_launch_options(value: &str) -> Result<&str> {
         "+map",
         "+playdemo",
         "+sv_lan",
-        "+ip",
-        "+hostport",
-        "+rcon_password",
-        "+sv_rcon_whitelist_address",
-        "+net_start",
+        "+mirv_pgl",
         "+exec",
         "+tf_delete_temp_files",
     ];
@@ -302,7 +271,7 @@ fn manual_hlae_game_arguments(
         )
     };
     Ok(format!(
-        "-steam -insecure -usercon +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf {custom}-w {width} -h {height} {dx_argument}+exec {DIRECTOR_RCON_CFG} +tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_demo}",
+        "-steam -insecure +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf {custom}-w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec {DIRECTOR_BRIDGE_CFG} +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_demo}",
     ))
 }
 
@@ -1651,7 +1620,7 @@ pub fn launch_manual_hlae_candidate(
     let campath_file = output_path.join(format!("{recording_identifier}__camera_path.xml"));
     let telemetry_log = game.join("tf2fragdemohelper_recording.log");
     let cfg_root = game.join("cfg");
-    let rcon = ManualRconConfig::create(&session)?;
+    let bridge = ManualBridgeConfig::create()?;
     let _ = fs::remove_file(&telemetry_log);
     let director_session = write_director_session(
         candidate,
@@ -1663,7 +1632,7 @@ pub fn launch_manual_hlae_candidate(
         &telemetry_log,
         &cfg_root,
         settings,
-        rcon.control(),
+        bridge.control(),
     )?;
     let launch_log = session.join("hlae_launch.log");
     let launch_log_file = File::create(&launch_log)?;
@@ -1677,7 +1646,7 @@ pub fn launch_manual_hlae_candidate(
     .context("could not stage the temporary TF2/HLAE profile")?;
 
     let cfg_result = (|| -> Result<()> {
-        fs::write(cfg_root.join(DIRECTOR_RCON_CFG), rcon.cfg_text())?;
+        fs::write(cfg_root.join(DIRECTOR_BRIDGE_CFG), bridge.cfg_text())?;
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual.cfg"),
             manual_hotkey_cfg(
@@ -1732,9 +1701,9 @@ pub fn launch_manual_hlae_candidate(
     log_recording_diagnostic(
         &diagnostic_log,
         format!(
-            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; Director control 127.0.0.1:{}; command line: {diagnostic_arguments}",
+            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; HLAE command bridge ws://127.0.0.1:{}/<session-token>; command line: {diagnostic_arguments}",
             output_path.display(),
-            rcon.port,
+            bridge.port,
         ),
     );
     let launch_log_stdout = match launch_log_file.try_clone() {
@@ -6141,7 +6110,7 @@ mod recording_tests {
     }
 
     #[test]
-    fn manual_cfg_does_not_restart_the_launch_initialized_network_stack() {
+    fn manual_cfg_does_not_initialize_source_rcon() {
         let cfg = manual_hotkey_cfg(
             &Candidate::default(),
             500,
@@ -6154,19 +6123,18 @@ mod recording_tests {
     }
 
     #[test]
-    fn manual_rcon_uses_the_proven_tf2_usercon_cfg_sequence() {
-        let rcon = ManualRconConfig {
+    fn manual_director_uses_hlaes_authenticated_loopback_bridge() {
+        let bridge = ManualBridgeConfig {
             port: 32_145,
-            password: "0123456789abcdef0123456789abcdef".into(),
+            token: "0123456789abcdef0123456789abcdef".into(),
         };
-        let cfg = rcon.cfg_text();
-        assert!(cfg.contains("ip 0.0.0.0"));
-        assert!(cfg.contains("hostport 32145"));
+        let cfg = bridge.cfg_text();
         assert!(cfg.contains(
-            "rcon_password \"0123456789abcdef0123456789abcdef\""
+            "mirv_pgl url \"ws://127.0.0.1:32145/0123456789abcdef0123456789abcdef\""
         ));
-        assert!(cfg.contains("sv_rcon_whitelist_address 127.0.0.1"));
-        assert!(cfg.contains("net_start"));
+        assert!(cfg.contains("mirv_pgl start"));
+        assert!(!cfg.contains("rcon_password"));
+        assert!(!cfg.contains("net_start"));
 
         let mut settings = AppSettings::default();
         settings.manual_hlae_launch_options = "-high -nojoy".into();
@@ -6177,24 +6145,22 @@ mod recording_tests {
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
         )
         .unwrap();
-        assert!(arguments.contains("-insecure -usercon"));
+        assert!(arguments.contains("-insecure"));
+        assert!(!arguments.contains("-usercon"));
         assert!(arguments.contains("-high -nojoy"));
-        assert!(arguments.contains(&format!("+exec {DIRECTOR_RCON_CFG}")));
-        assert!(arguments.find(&format!("+exec {DIRECTOR_RCON_CFG}")).unwrap()
+        assert!(arguments.contains(&format!("+exec {DIRECTOR_BRIDGE_CFG}")));
+        assert!(arguments.find(&format!("+exec {DIRECTOR_BRIDGE_CFG}")).unwrap()
             < arguments.find("+exec tf2fragdemohelper_manual.cfg").unwrap());
-        assert!(!arguments.contains(&rcon.password));
+        assert!(!arguments.contains(&bridge.token));
     }
 
     #[test]
-    fn custom_manual_launch_options_cannot_override_session_safety_or_rcon() {
+    fn custom_manual_launch_options_cannot_override_session_safety_or_bridge() {
         for managed in [
             "-steam",
             "-insecure",
             "-secure",
             "-enablefakeip",
-            "-usercon",
-            "-port 27115",
-            "-hostport=27115",
             "-game tf",
             "-afxGame tf",
             "-novid",
@@ -6212,9 +6178,7 @@ mod recording_tests {
             "+map itemtest",
             "+playdemo other",
             "+sv_lan 0",
-            "+hostport 27015",
-            "+rcon_password unsafe",
-            "+net_start",
+            "+mirv_pgl start",
             "+exec autoexec",
             "+tf_delete_temp_files 1",
         ] {
@@ -6241,6 +6205,7 @@ mod recording_tests {
             "+example_negative_value -1",
             "-custom_name \"value with spaces\"",
             "+custom_command \"-quoted value\"",
+            "-usercon +ip 0.0.0.0 +hostport 27015 +rcon_password local +net_start",
         ] {
             assert!(
                 validate_manual_launch_options(valid).is_ok(),

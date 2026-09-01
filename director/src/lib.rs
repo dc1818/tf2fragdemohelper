@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-pub const DIRECTOR_SESSION_SCHEMA: u32 = 5;
+pub const DIRECTOR_SESSION_SCHEMA: u32 = 6;
 pub const DIRECTOR_TICK_MARKER_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK";
 pub const DIRECTOR_TICK_OFFSET_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK_OFFSET";
 pub const DIRECTOR_KEYFRAME_BEGIN_PREFIX: &str = "TF2FRAG_DIRECTOR_KEYFRAMES_BEGIN";
@@ -65,6 +65,17 @@ impl DirectorSession {
                 bail!("Director RCON password must be a session-generated hex secret");
             }
         }
+        if let DirectorControl::LocalBridge { endpoint, token } = &self.control {
+            let address = endpoint
+                .parse::<std::net::SocketAddr>()
+                .map_err(|_| anyhow::anyhow!("Director bridge endpoint is invalid"))?;
+            if !address.ip().is_loopback() {
+                bail!("Director bridge endpoint must use the loopback interface");
+            }
+            if token.len() < 16 || !token.chars().all(|character| character.is_ascii_hexdigit()) {
+                bail!("Director bridge token must be a session-generated hex secret");
+            }
+        }
         if self
             .cues
             .iter()
@@ -121,10 +132,7 @@ pub enum BridgeRequest {
     SkipSeconds { seconds: f64 },
     SetCamera { pose: CameraPose },
     AddKeyframe,
-    ReplaceKeyframe {
-        hlae_index: i32,
-        pose: CameraPose,
-    },
+    ReplaceKeyframe { hlae_index: i32, pose: CameraPose },
     RemoveKeyframe { hlae_index: i32 },
     EnableCampath { enabled: bool },
     DrawCampath { enabled: bool },
@@ -209,7 +217,10 @@ mod tests {
         let request = BridgeRequest::SkipSeconds { seconds: 0.25 };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("skip_seconds"));
-        assert_eq!(serde_json::from_str::<BridgeRequest>(&json).unwrap(), request);
+        assert_eq!(
+            serde_json::from_str::<BridgeRequest>(&json).unwrap(),
+            request
+        );
     }
 
     #[test]
@@ -237,6 +248,22 @@ mod tests {
         session.control = DirectorControl::LocalRcon {
             endpoint: "192.168.1.10:32145".into(),
             password: "0123456789abcdef0123456789abcdef".into(),
+        };
+        assert!(session.validate().is_err());
+    }
+
+    #[test]
+    fn local_bridge_requires_loopback_and_a_session_token() {
+        let mut session = session();
+        session.control = DirectorControl::LocalBridge {
+            endpoint: "127.0.0.1:32145".into(),
+            token: "0123456789abcdef0123456789abcdef".into(),
+        };
+        session.validate().unwrap();
+
+        session.control = DirectorControl::LocalBridge {
+            endpoint: "0.0.0.0:32145".into(),
+            token: "short".into(),
         };
         assert!(session.validate().is_err());
     }

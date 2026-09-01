@@ -130,63 +130,154 @@ impl ManualRconConfig {
     }
 }
 
-fn validated_manual_launch_options(value: &str) -> Result<&str> {
-    let value = value.trim();
-    if value.len() > 1024 {
-        bail!("custom manual HLAE launch options must be 1024 characters or fewer");
-    }
-    if value.chars().any(|character| character.is_control()) || value.contains(';') {
-        bail!("custom manual HLAE launch options cannot contain control characters or semicolons");
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManualLaunchToken {
+    text: String,
+    starts_quoted: bool,
+}
 
+fn tokenize_manual_launch_options(value: &str) -> Result<Vec<ManualLaunchToken>> {
     let mut quoted = false;
     let mut token = String::new();
+    let mut token_started = false;
+    let mut token_starts_quoted = false;
     let mut tokens = Vec::new();
     for character in value.chars() {
         match character {
-            '"' => quoted = !quoted,
+            '"' => {
+                if !token_started {
+                    token_starts_quoted = true;
+                }
+                token_started = true;
+                quoted = !quoted;
+            }
             character if character.is_whitespace() && !quoted => {
-                if !token.is_empty() {
-                    tokens.push(std::mem::take(&mut token));
+                if token_started {
+                    tokens.push(ManualLaunchToken {
+                        text: std::mem::take(&mut token),
+                        starts_quoted: token_starts_quoted,
+                    });
+                    token_started = false;
+                    token_starts_quoted = false;
                 }
             }
-            character => token.push(character),
+            character => {
+                token_started = true;
+                token.push(character);
+            }
         }
     }
     if quoted {
-        bail!("custom manual HLAE launch options contain an unmatched quote");
+        bail!("contains an unmatched double quote");
     }
-    if !token.is_empty() {
-        tokens.push(token);
+    if token_started {
+        tokens.push(ManualLaunchToken {
+            text: token,
+            starts_quoted: token_starts_quoted,
+        });
+    }
+    Ok(tokens)
+}
+
+fn is_negative_number(token: &str) -> bool {
+    token.starts_with('-') && token.len() > 1 && token.parse::<f64>().is_ok()
+}
+
+fn manual_launch_option_name(token: &str) -> &str {
+    token.split_once('=').map(|(name, _)| name).unwrap_or(token)
+}
+
+fn validated_manual_launch_options(value: &str) -> Result<&str> {
+    let value = value.trim();
+    if value.len() > 1024 {
+        bail!("must be 1024 characters or fewer");
+    }
+    if value.chars().any(|character| character.is_control()) || value.contains(';') {
+        bail!("cannot contain control characters or semicolons");
+    }
+
+    let tokens = tokenize_manual_launch_options(value)?;
+    let mut saw_option = false;
+    for token in &tokens {
+        let prefixed = !token.starts_quoted
+            && !is_negative_number(&token.text)
+            && (token.text.starts_with('-') || token.text.starts_with('+'));
+        if prefixed {
+            let name = manual_launch_option_name(&token.text);
+            if name.starts_with("--") {
+                bail!(
+                    "'{name}' uses GNU-style '--'; Source launch options use one '-' or '+'"
+                );
+            }
+            let option_name = &name[1..];
+            if option_name.is_empty()
+                || !option_name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+            {
+                bail!("'{name}' is not a valid Source launch option or startup command");
+            }
+            saw_option = true;
+        } else if !saw_option {
+            bail!(
+                "'{}' must begin with -option or +command; bare words are only allowed as values",
+                token.text
+            );
+        }
     }
 
     const MANAGED_OPTIONS: &[&str] = &[
+        "-steam",
+        "-insecure",
         "-secure",
         "-enablefakeip",
         "-usercon",
         "-port",
+        "-hostport",
         "-game",
         "-afxgame",
+        "-novid",
+        "-window",
+        "-windowed",
+        "-sw",
+        "-startwindowed",
+        "-noborder",
+        "-fullscreen",
+        "-full",
+        "-console",
+        "-no_texture_stream",
+        "-w",
+        "-width",
+        "-h",
+        "-height",
+        "-dxlevel",
         "+connect",
         "+map",
         "+playdemo",
+        "+sv_lan",
         "+ip",
         "+hostport",
         "+rcon_password",
         "+sv_rcon_whitelist_address",
         "+net_start",
         "+exec",
+        "+tf_delete_temp_files",
     ];
     if let Some(option) = tokens
         .iter()
-        .map(|token| token.to_ascii_lowercase())
+        .filter(|token| !token.starts_quoted)
+        .map(|token| manual_launch_option_name(&token.text).to_ascii_lowercase())
         .find(|token| MANAGED_OPTIONS.contains(&token.as_str()))
     {
         bail!(
-            "'{option}' is managed by the Helper and cannot be overridden in custom launch options"
+            "'{option}' is managed by the Helper and cannot be overridden"
         );
     }
     Ok(value)
+}
+
+pub fn validate_manual_launch_options(value: &str) -> Result<()> {
+    validated_manual_launch_options(value).map(|_| ())
 }
 
 fn manual_hlae_game_arguments(
@@ -6097,13 +6188,35 @@ mod recording_tests {
     #[test]
     fn custom_manual_launch_options_cannot_override_session_safety_or_rcon() {
         for managed in [
+            "-steam",
+            "-insecure",
             "-secure",
             "-enablefakeip",
+            "-usercon",
+            "-port 27115",
+            "-hostport=27115",
+            "-game tf",
+            "-afxGame tf",
+            "-novid",
+            "-window",
+            "-noborder",
+            "-fullscreen",
+            "-console",
+            "-no_texture_stream",
+            "-w 1920",
+            "-width=1920",
+            "-h 1080",
+            "-height=1080",
+            "-dxlevel 98",
             "+connect 1.2.3.4",
+            "+map itemtest",
             "+playdemo other",
+            "+sv_lan 0",
             "+hostport 27015",
             "+rcon_password unsafe",
+            "+net_start",
             "+exec autoexec",
+            "+tf_delete_temp_files 1",
         ] {
             let mut settings = AppSettings::default();
             settings.manual_hlae_launch_options = managed.into();
@@ -6114,6 +6227,43 @@ mod recording_tests {
                 "candidate.dem",
             )
             .is_err());
+        }
+    }
+
+    #[test]
+    fn manual_launch_options_accept_source_parameters_commands_and_values() {
+        for valid in [
+            "",
+            "-high -nojoy",
+            "-threads 8 -language english",
+            "-foo=bar",
+            "+mat_queue_mode 2",
+            "+example_negative_value -1",
+            "-custom_name \"value with spaces\"",
+            "+custom_command \"-quoted value\"",
+        ] {
+            assert!(
+                validate_manual_launch_options(valid).is_ok(),
+                "expected valid manual launch options: {valid}"
+            );
+        }
+    }
+
+    #[test]
+    fn manual_launch_options_reject_malformed_source_syntax() {
+        for invalid in [
+            "high -nojoy",
+            "--high",
+            "-high; +quit",
+            "-high \"unterminated",
+            "-bad$name",
+            "+",
+            "-",
+        ] {
+            assert!(
+                validate_manual_launch_options(invalid).is_err(),
+                "expected invalid manual launch options: {invalid}"
+            );
         }
     }
 

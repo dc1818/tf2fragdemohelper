@@ -971,6 +971,7 @@ fn main() -> Result<()> {
             .into(),
     );
     ui.set_manual_hlae_launch_options(settings.manual_hlae_launch_options.clone().into());
+    update_manual_launch_options_validation(&ui);
     ui.set_lead_seconds(settings.lead_seconds.min(60) as i32);
     ui.set_outro_seconds(settings.outro_seconds.min(60) as i32);
     ui.set_capture_fps(settings.capture_fps.to_string().into());
@@ -2612,6 +2613,7 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_hud(settings.hud.clone().into());
     ui.set_viewmodels(settings.viewmodels.clone().into());
     ui.set_manual_hlae_launch_options(settings.manual_hlae_launch_options.clone().into());
+    update_manual_launch_options_validation(ui);
     ui.set_mirv_advance_time(settings.mirv_shortcuts.advance_time.clone().into());
     ui.set_mirv_toggle_hud(settings.mirv_shortcuts.toggle_hud.clone().into());
     ui.set_mirv_show_help(settings.mirv_shortcuts.show_help.clone().into());
@@ -2636,7 +2638,30 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_recording_settings_syncing(false);
 }
 
+fn update_manual_launch_options_validation(ui: &AppWindow) -> bool {
+    let value = ui.get_manual_hlae_launch_options().to_string();
+    match recording::validate_manual_launch_options(&value) {
+        Ok(()) => {
+            ui.set_manual_hlae_launch_options_valid(true);
+            ui.set_manual_hlae_launch_options_status(
+                if value.trim().is_empty() { "OPTIONAL" } else { "VALID" }.into(),
+            );
+            true
+        }
+        Err(error) => {
+            ui.set_manual_hlae_launch_options_valid(false);
+            ui.set_manual_hlae_launch_options_status("INVALID".into());
+            ui.set_status_text(format!("Manual Launch Options: {error}").into());
+            false
+        }
+    }
+}
+
 fn persist_recording_settings(ui: &AppWindow, state: &Arc<Mutex<State>>, report_manual_save: bool) {
+    if !update_manual_launch_options_validation(ui) {
+        ui.set_recording_save_status("OPTIONS INVALID".into());
+        return;
+    }
     let (save_result, normalized) = {
         let mut state = state.lock();
         state.settings.output_directory = PathBuf::from(ui.get_export_directory().to_string());

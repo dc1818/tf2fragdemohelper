@@ -42,7 +42,6 @@ const MANUAL_ONE_SECOND_TICKS: i64 = 67;
 // selected lead-in or after the staged demo is reloaded.
 const DIRECTOR_TELEMETRY_FIRST_TICK: i64 = 1;
 const DIRECTOR_TELEMETRY_LAST_TICK: i64 = i32::MAX as i64 - 1;
-const MINIMUM_TF2_X64_HOOK_VERSION: (u32, u32, u32) = (1, 134, 0);
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -1510,9 +1509,6 @@ pub fn launch_manual_hlae_candidate(
     };
     if !hook.is_file() {
         bail!("required HLAE hook is missing: {}", hook.display());
-    }
-    if x64 {
-        validate_hlae_tf2_x64_support(hlae_root)?;
     }
     let tf_process_name = settings
         .tf2_executable
@@ -3190,44 +3186,6 @@ fn validate_named_executable(executable: &Path, expected: &[&str], label: &str) 
         expected.join(" or "),
         executable.display()
     )
-}
-
-fn validate_hlae_tf2_x64_support(hlae_root: &Path) -> Result<(u32, u32, u32)> {
-    let changelog = hlae_root.join("resources/AfxHookSource_changelog.xml");
-    let text = fs::read_to_string(&changelog).with_context(|| {
-        format!(
-            "could not verify the HLAE version from {}; install HLAE 2.189.0 or newer",
-            changelog.display()
-        )
-    })?;
-    let start = text
-        .find("<version>")
-        .map(|index| index + "<version>".len())
-        .context("HLAE's AfxHookSource changelog has no version entry")?;
-    let end = text[start..]
-        .find("</version>")
-        .map(|index| start + index)
-        .context("HLAE's AfxHookSource changelog has an invalid version entry")?;
-    let raw = text[start..end].trim();
-    let mut components = raw.split('.');
-    let version = (
-        components.next().and_then(|value| value.parse().ok()),
-        components.next().and_then(|value| value.parse().ok()),
-        components.next().and_then(|value| value.parse().ok()),
-    );
-    let (Some(major), Some(minor), Some(patch)) = version else {
-        bail!("could not parse HLAE AfxHookSource version '{raw}'");
-    };
-    if components.next().is_some() {
-        bail!("could not parse HLAE AfxHookSource version '{raw}'");
-    }
-    let version = (major, minor, patch);
-    if version < MINIMUM_TF2_X64_HOOK_VERSION {
-        bail!(
-            "HLAE is too old for TF2 x64 (AfxHookSource {raw}); install HLAE 2.189.0 or newer"
-        );
-    }
-    Ok(version)
 }
 
 fn log_recording_diagnostic(path: &Path, message: impl AsRef<str>) {
@@ -6119,46 +6077,6 @@ mod recording_tests {
         assert!(!cfg.contains("net_start"));
         assert!(!cfg.contains("rcon_password"));
         assert!(!cfg.contains("hostport"));
-    }
-
-    #[test]
-    fn hlae_tf2_x64_version_check_accepts_supported_hook() {
-        let root = std::env::temp_dir().join(format!(
-            "tf2frag-hlae-version-supported-{}",
-            std::process::id()
-        ));
-        let resources = root.join("resources");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&resources).unwrap();
-        fs::write(
-            resources.join("AfxHookSource_changelog.xml"),
-            "<changelog><release><version>1.135.1</version></release></changelog>",
-        )
-        .unwrap();
-        assert_eq!(
-            validate_hlae_tf2_x64_support(&root).unwrap(),
-            (1, 135, 1)
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn hlae_tf2_x64_version_check_rejects_unsupported_hook() {
-        let root = std::env::temp_dir().join(format!(
-            "tf2frag-hlae-version-old-{}",
-            std::process::id()
-        ));
-        let resources = root.join("resources");
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&resources).unwrap();
-        fs::write(
-            resources.join("AfxHookSource_changelog.xml"),
-            "<changelog><release><version>1.133.0</version></release></changelog>",
-        )
-        .unwrap();
-        let error = validate_hlae_tf2_x64_support(&root).unwrap_err().to_string();
-        assert!(error.contains("HLAE 2.189.0 or newer"));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

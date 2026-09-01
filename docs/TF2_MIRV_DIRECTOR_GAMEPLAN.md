@@ -63,7 +63,7 @@ The temporary manual CFG installs one HLAE `mirv_cmd addCurves tick` command for
 
 The Director writes one action at a time into a 64-slot ring. The action echoes a unique sequence acknowledgement and advances TF2's in-memory alias to the next slot. Director does not reuse or advance a slot until that acknowledgement appears in the temporary console log. The window-targeted key message cannot be delivered to another foreground application and the existing manual key remains an emergency fallback. This provides automatic control without Source RCON, `mirv_pgl`, additional DLLs, network listeners, or global `SendInput` injection.
 
-`mirv_pgl` must not be used for TF2: AdvancedFX documents it as CS:GO-only, and its initialization and command-service loop are installed only by the CS:GO `IBaseClientDLL` wrapper. The Helper validates that TF2 x64 uses an AfxHookSource release with x64 TF2 support and keeps `-insecure +sv_lan 1` under Helper control.
+`mirv_pgl` must not be used for TF2: AdvancedFX documents it as CS:GO-only, and its initialization and command-service loop are installed only by the CS:GO `IBaseClientDLL` wrapper. The Helper verifies the selected HLAE launcher and matching AfxHookSource hook file without imposing a package-version or changelog requirement, and keeps `-insecure +sv_lan 1` under Helper control.
 
 The Director UI provides these live features:
 

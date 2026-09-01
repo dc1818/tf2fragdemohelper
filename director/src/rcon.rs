@@ -10,8 +10,8 @@ const SERVERDATA_EXECCOMMAND: i32 = 2;
 const SERVERDATA_AUTH_RESPONSE: i32 = 2;
 const SERVERDATA_AUTH: i32 = 3;
 const MAX_PACKET_BYTES: usize = 4 * 1024 * 1024;
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
-const IO_TIMEOUT: Duration = Duration::from_millis(1500);
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq)]
 struct Packet {

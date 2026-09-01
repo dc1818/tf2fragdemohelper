@@ -28,6 +28,8 @@ const ONE_SECOND_TICKS: i64 = 67;
 const DEMO_READY_MARKER: &str = "TF2FRAG_MANUAL_PAUSED_AT_START";
 const DEMO_RELOAD_MARKER: &str = "TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO";
 const DEMO_READY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const RCON_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const RCON_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 slint::include_modules!();
 
@@ -268,7 +270,7 @@ fn main() -> Result<()> {
                 &action_queue,
                 &card,
                 format!(
-                    "demo_gototick {target}; echo {} {target}",
+                    "demo_gototick {target} 0 1; echo {} {target}",
                     session.telemetry_marker_prefix
                 ),
                 format!("GO TO FRAG {} AT TICK {target}", index + 1),
@@ -368,7 +370,6 @@ fn main() -> Result<()> {
     let direct_action_timer = Timer::default();
     if let Some(results) = direct_action_results {
         let weak_card = card.as_weak();
-        let action_queue = action_queue.clone();
         direct_action_timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
             let Some(card) = weak_card.upgrade() else {
                 return;
@@ -385,22 +386,15 @@ fn main() -> Result<()> {
                                 .into(),
                         );
                     }
-                    DirectActionResult::Unavailable {
-                        command,
-                        label,
-                        reason,
-                    } => match action_queue.borrow_mut().enqueue(command, label) {
-                        Ok(status) => card.set_command_status(
-                            format!("DIRECT CONTROL UNAVAILABLE: {reason} • {status}")
-                                .to_ascii_uppercase()
-                                .into(),
-                        ),
-                        Err(error) => card.set_command_status(
-                            format!("DIRECT CONTROL AND FALLBACK FAILED: {error}")
-                                .to_ascii_uppercase()
-                                .into(),
-                        ),
-                    },
+                    DirectActionResult::Unavailable { label, reason } => {
+                        card.set_command_status(
+                            format!(
+                                "NOT SENT • {label} • TF2 DIRECT CONTROL UNAVAILABLE: {reason}"
+                            )
+                            .to_ascii_uppercase()
+                            .into(),
+                        );
+                    }
                 }
             }
         });
@@ -759,16 +753,11 @@ fn dispatch_director_action(
             }
             Err(error) => {
                 let request = error.0;
-                match queue.borrow_mut().enqueue(request.command, request.label) {
-                    Ok(status) => card.set_command_status(
-                        format!("DIRECT CONTROL STOPPED • {status}").into(),
-                    ),
-                    Err(error) => card.set_command_status(
-                        format!("DIRECTOR COMMAND FAILED: {error}")
-                            .to_ascii_uppercase()
-                            .into(),
-                    ),
-                }
+                card.set_command_status(
+                    format!("NOT SENT • {} • DIRECT CONTROL WORKER STOPPED", request.label)
+                        .to_ascii_uppercase()
+                        .into(),
+                );
                 return;
             }
         }
@@ -797,7 +786,6 @@ enum DirectActionResult {
         reason: String,
     },
     Unavailable {
-        command: String,
         label: String,
         reason: String,
     },
@@ -812,21 +800,32 @@ fn spawn_direct_action_worker(
     thread::spawn(move || {
         while let Ok(request) = request_receiver.recv() {
             let rcon_command = format!("{}; tf2frag_manual_sync_keyframes", request.command);
-            let result = match rcon::execute_once(&endpoint, &password, &rcon_command) {
-                Ok(CommandDelivery::Confirmed(_)) => DirectActionResult::Confirmed {
-                    label: request.label,
-                },
-                Ok(CommandDelivery::SentUnconfirmed(reason)) => {
-                    DirectActionResult::SentUnconfirmed {
-                        label: request.label,
-                        reason,
+            let deadline = Instant::now() + RCON_READY_TIMEOUT;
+            let result = loop {
+                match rcon::execute_once(&endpoint, &password, &rcon_command) {
+                    Ok(CommandDelivery::Confirmed(_)) => {
+                        break DirectActionResult::Confirmed {
+                            label: request.label,
+                        };
+                    }
+                    Ok(CommandDelivery::SentUnconfirmed(reason)) => {
+                        // The command may already have reached TF2. Retrying it
+                        // could duplicate a destructive keyframe edit.
+                        break DirectActionResult::SentUnconfirmed {
+                            label: request.label,
+                            reason,
+                        };
+                    }
+                    Err(_) if Instant::now() < deadline => {
+                        thread::sleep(RCON_RETRY_DELAY);
+                    }
+                    Err(error) => {
+                        break DirectActionResult::Unavailable {
+                            label: request.label,
+                            reason: format!("{error:#}"),
+                        };
                     }
                 }
-                Err(error) => DirectActionResult::Unavailable {
-                    command: request.command,
-                    label: request.label,
-                    reason: error.to_string(),
-                },
             };
             if result_sender.send(result).is_err() {
                 break;
@@ -985,14 +984,14 @@ fn build_keyframe_action(
     let command = match action {
         "Edit keyframe" => build_keyframe_edit(id, &select, setting, value)?,
         "Go to keyframe" => format!(
-            "demo_gototick {tick}; echo {tick_marker_prefix} {tick}"
+            "demo_gototick {tick} 0 1; echo {tick_marker_prefix} {tick}"
         ),
         "Go to 1 sec before" => {
             let target = tick
                 .saturating_sub(ONE_SECOND_TICKS)
                 .max(clip_start_tick)
                 .max(0);
-            format!("demo_gototick {target}; echo {tick_marker_prefix} {target}")
+            format!("demo_gototick {target} 0 1; echo {tick_marker_prefix} {target}")
         }
         "Select only" => select,
         "Add to selection" => format!("mirv_campath select add #{id} #{id}"),
@@ -1735,6 +1734,36 @@ mod tests {
 
     #[test]
     fn builds_exact_hlae_id_actions_without_persistent_ids() {
+        let (goto, _) = build_keyframe_action(
+            4,
+            12_345,
+            "Go to keyframe",
+            "",
+            "",
+            "TF2FRAG_DIRECTOR_TICK",
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(
+            goto,
+            "demo_gototick 12345 0 1; echo TF2FRAG_DIRECTOR_TICK 12345"
+        );
+
+        let (move_to_current, _) = build_keyframe_action(
+            4,
+            12_345,
+            "Edit keyframe",
+            "Time — Move to current",
+            "",
+            "TF2FRAG_DIRECTOR_TICK",
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(
+            move_to_current,
+            "mirv_campath select #4 #4; mirv_campath edit start"
+        );
+
         let (delete, _) = build_keyframe_action(
             4,
             12_345,

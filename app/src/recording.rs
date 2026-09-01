@@ -12,7 +12,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
-    net::TcpListener,
+    net::{TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, OnceLock},
@@ -43,6 +43,9 @@ const MANUAL_ONE_SECOND_TICKS: i64 = 67;
 // selected lead-in or after the staged demo is reloaded.
 const DIRECTOR_TELEMETRY_FIRST_TICK: i64 = 1;
 const DIRECTOR_TELEMETRY_LAST_TICK: i64 = i32::MAX as i64 - 1;
+const DIRECTOR_RCON_FIRST_PORT: u16 = 27_115;
+const DIRECTOR_RCON_LAST_PORT: u16 = 27_164;
+const DIRECTOR_RCON_CFG: &str = "tf2fragdemohelper_director_rcon.cfg";
 const TF2_ABSENT_CONFIRMATIONS: u8 = 8;
 const MAX_RECOVERY_DIRECTORY_ENTRIES: usize = 512;
 const MAX_RECOVERY_SESSIONS_PER_STARTUP: usize = 32;
@@ -74,10 +77,23 @@ struct ManualRconConfig {
 
 impl ManualRconConfig {
     fn create(session: &Path) -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .context("could not reserve a local port for Director control")?;
-        let port = listener.local_addr()?.port();
-        drop(listener);
+        // Source uses the same host port for its game socket and TCP RCON
+        // listener. Checking only an OS-selected TCP ephemeral port can pick a
+        // number whose UDP side is already occupied, leaving -usercon unable
+        // to create the RCON endpoint. Use a conventional Source port range
+        // and require both loopback transports to be available.
+        let port = (DIRECTOR_RCON_FIRST_PORT..=DIRECTOR_RCON_LAST_PORT)
+            .find(|port| {
+                let Ok(tcp) = TcpListener::bind(("0.0.0.0", *port)) else {
+                    return false;
+                };
+                let Ok(udp) = UdpSocket::bind(("0.0.0.0", *port)) else {
+                    return false;
+                };
+                drop((tcp, udp));
+                true
+            })
+            .context("could not reserve a loopback TCP/UDP port for Director control")?;
 
         let mut digest = Sha256::new();
         digest.update(session.as_os_str().to_string_lossy().as_bytes());
@@ -89,7 +105,9 @@ impl ManualRconConfig {
                 .as_nanos()
                 .to_le_bytes(),
         );
-        let password = format!("{:x}", digest.finalize());
+        // Keep the session secret comfortably inside legacy Source command
+        // and ConVar buffers while retaining 128 bits of entropy.
+        let password = format!("{:x}", digest.finalize())[..32].to_owned();
         Ok(Self { port, password })
     }
 
@@ -98,6 +116,17 @@ impl ManualRconConfig {
             endpoint: format!("127.0.0.1:{}", self.port),
             password: self.password.clone(),
         }
+    }
+
+    fn cfg_text(&self) -> String {
+        // TF2's documented -usercon setup initializes the listener from a CFG
+        // with these commands. The engine requires the wildcard `ip` value,
+        // while Director itself still connects only through 127.0.0.1 with a
+        // fresh random password for every isolated recording session.
+        format!(
+            "ip 0.0.0.0\nhostport {}\nrcon_password \"{}\"\nsv_rcon_whitelist_address 127.0.0.1\nnet_start\necho TF2FRAG_DIRECTOR_RCON_READY\n",
+            self.port, self.password
+        )
     }
 }
 
@@ -133,6 +162,7 @@ fn validated_manual_launch_options(value: &str) -> Result<&str> {
 
     const MANAGED_OPTIONS: &[&str] = &[
         "-secure",
+        "-enablefakeip",
         "-usercon",
         "-port",
         "-game",
@@ -161,7 +191,6 @@ fn validated_manual_launch_options(value: &str) -> Result<&str> {
 
 fn manual_hlae_game_arguments(
     settings: &AppSettings,
-    rcon: &ManualRconConfig,
     width: u32,
     height: u32,
     staged_demo: &str,
@@ -181,10 +210,8 @@ fn manual_hlae_game_arguments(
             settings.dx_level.split_whitespace().next().unwrap_or("98")
         )
     };
-    let password = &rcon.password;
     Ok(format!(
-        "-steam -insecure -usercon +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf {custom}-w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +ip 0.0.0.0 +hostport {} +rcon_password \"{password}\" +sv_rcon_whitelist_address 127.0.0.1 +net_start +playdemo {staged_demo}",
-        rcon.port,
+        "-steam -insecure -usercon +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf {custom}-w {width} -h {height} {dx_argument}+exec {DIRECTOR_RCON_CFG} +tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_demo}",
     ))
 }
 
@@ -1559,6 +1586,7 @@ pub fn launch_manual_hlae_candidate(
     .context("could not stage the temporary TF2/HLAE profile")?;
 
     let cfg_result = (|| -> Result<()> {
+        fs::write(cfg_root.join(DIRECTOR_RCON_CFG), rcon.cfg_text())?;
         fs::write(
             cfg_root.join("tf2fragdemohelper_manual.cfg"),
             manual_hotkey_cfg(
@@ -1566,7 +1594,6 @@ pub fn launch_manual_hlae_candidate(
                 target_tick,
                 &staged_relative,
                 settings,
-                Some(&rcon),
             ),
         )?;
         fs::write(
@@ -1600,7 +1627,6 @@ pub fn launch_manual_hlae_candidate(
     let (width, height) = parse_resolution(&settings.resolution);
     let game_arguments = match manual_hlae_game_arguments(
         settings,
-        &rcon,
         width,
         height,
         &staged_relative,
@@ -1611,7 +1637,7 @@ pub fn launch_manual_hlae_candidate(
             return Err(error).context("invalid custom manual HLAE launch options");
         }
     };
-    let diagnostic_arguments = game_arguments.replace(&rcon.password, "<redacted>");
+    let diagnostic_arguments = &game_arguments;
     log_recording_diagnostic(
         &diagnostic_log,
         format!(
@@ -3326,7 +3352,6 @@ fn manual_hotkey_cfg(
     target_tick: i64,
     staged_demo: &str,
     settings: &AppSettings,
-    rcon: Option<&ManualRconConfig>,
 ) -> String {
     let mut shortcuts = settings.mirv_shortcuts.clone();
     shortcuts.normalize();
@@ -3365,18 +3390,6 @@ fn manual_hotkey_cfg(
         ),
         format!("alias tf2frag_manual_clip_start \"playdemo {staged_demo}; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}\""),
     ];
-    if let Some(rcon) = rcon {
-        lines.splice(
-            1..1,
-            [
-                "ip 0.0.0.0".into(),
-                format!("hostport {}", rcon.port),
-                format!("rcon_password \"{}\"", rcon.password),
-                "sv_rcon_whitelist_address 127.0.0.1".into(),
-                "net_start".into(),
-            ],
-        );
-    }
     for slot in 0..DIRECTOR_ACTION_SLOTS {
         lines.push(format!(
             "alias tf2frag_director_execute_{slot:02} \"exec {DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}\""
@@ -3388,7 +3401,7 @@ fn manual_hotkey_cfg(
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
         let cue_tick = (tick - MANUAL_ONE_SECOND_TICKS).max(target_tick).max(0);
         lines.push(format!(
-            "alias tf2frag_manual_kill_{current} \"demo_gototick {cue_tick}; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; tf2frag_manual_sync_keyframes; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}\"",
+            "alias tf2frag_manual_kill_{current} \"demo_gototick {cue_tick} 0 1; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; tf2frag_manual_sync_keyframes; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}\"",
             kill_ticks.len()
         ));
     }
@@ -5954,13 +5967,12 @@ mod recording_tests {
             500,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &AppSettings::default(),
-            None,
         );
         assert!(cfg.contains(
             "playdemo demos/tf2fragdemohelper_manual/session/candidate.dem"
         ));
         assert!(!cfg.contains("demo_gototick 500"));
-        assert!(cfg.contains("demo_gototick 833"));
+        assert!(cfg.contains("demo_gototick 833 0 1"));
         assert!(cfg.contains("TF2FRAG_DIRECTOR_TICK 833"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 FRAG_TICK 900 CUE_TICK 833"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 FRAG_TICK 925 CUE_TICK 858"));
@@ -6025,7 +6037,6 @@ mod recording_tests {
             500,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &settings,
-            None,
         );
         assert!(cfg.contains(
             "bind \"q\" \"mirv_skip time 0.25; tf2frag_manual_sync_keyframes\""
@@ -6039,18 +6050,25 @@ mod recording_tests {
     }
 
     #[test]
-    fn manual_rcon_is_session_scoped_and_loopback_whitelisted() {
-        let rcon = ManualRconConfig {
-            port: 32_145,
-            password: "0123456789abcdef0123456789abcdef".into(),
-        };
+    fn manual_cfg_does_not_restart_the_launch_initialized_network_stack() {
         let cfg = manual_hotkey_cfg(
             &Candidate::default(),
             500,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
             &AppSettings::default(),
-            Some(&rcon),
         );
+        assert!(!cfg.contains("net_start"));
+        assert!(!cfg.contains("rcon_password"));
+        assert!(!cfg.contains("hostport"));
+    }
+
+    #[test]
+    fn manual_rcon_uses_the_proven_tf2_usercon_cfg_sequence() {
+        let rcon = ManualRconConfig {
+            port: 32_145,
+            password: "0123456789abcdef0123456789abcdef".into(),
+        };
+        let cfg = rcon.cfg_text();
         assert!(cfg.contains("ip 0.0.0.0"));
         assert!(cfg.contains("hostport 32145"));
         assert!(cfg.contains(
@@ -6058,20 +6076,11 @@ mod recording_tests {
         ));
         assert!(cfg.contains("sv_rcon_whitelist_address 127.0.0.1"));
         assert!(cfg.contains("net_start"));
-        assert!(cfg.find("net_start").unwrap() < cfg.find("mirv_cmd enabled 1").unwrap());
-    }
 
-    #[test]
-    fn manual_rcon_is_initialized_on_the_recording_launch_command_line() {
-        let rcon = ManualRconConfig {
-            port: 32_145,
-            password: "0123456789abcdef0123456789abcdef".into(),
-        };
         let mut settings = AppSettings::default();
         settings.manual_hlae_launch_options = "-high -nojoy".into();
         let arguments = manual_hlae_game_arguments(
             &settings,
-            &rcon,
             2560,
             1440,
             "demos/tf2fragdemohelper_manual/session/candidate.dem",
@@ -6079,25 +6088,17 @@ mod recording_tests {
         .unwrap();
         assert!(arguments.contains("-insecure -usercon"));
         assert!(arguments.contains("-high -nojoy"));
-        assert!(arguments.contains("+ip 0.0.0.0"));
-        assert!(arguments.contains("+hostport 32145"));
-        assert!(arguments.contains(
-            "+rcon_password \"0123456789abcdef0123456789abcdef\""
-        ));
-        assert!(arguments.contains("+sv_rcon_whitelist_address 127.0.0.1"));
-        assert!(arguments.contains("+net_start +playdemo"));
-        assert!(arguments.find("+exec tf2fragdemohelper_manual.cfg").unwrap()
-            < arguments.find("+net_start").unwrap());
+        assert!(arguments.contains(&format!("+exec {DIRECTOR_RCON_CFG}")));
+        assert!(arguments.find(&format!("+exec {DIRECTOR_RCON_CFG}")).unwrap()
+            < arguments.find("+exec tf2fragdemohelper_manual.cfg").unwrap());
+        assert!(!arguments.contains(&rcon.password));
     }
 
     #[test]
     fn custom_manual_launch_options_cannot_override_session_safety_or_rcon() {
-        let rcon = ManualRconConfig {
-            port: 32_145,
-            password: "0123456789abcdef0123456789abcdef".into(),
-        };
         for managed in [
             "-secure",
+            "-enablefakeip",
             "+connect 1.2.3.4",
             "+playdemo other",
             "+hostport 27015",
@@ -6108,7 +6109,6 @@ mod recording_tests {
             settings.manual_hlae_launch_options = managed.into();
             assert!(manual_hlae_game_arguments(
                 &settings,
-                &rcon,
                 1920,
                 1080,
                 "candidate.dem",

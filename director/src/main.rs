@@ -281,7 +281,7 @@ fn main() -> Result<()> {
         let action_queue = action_queue.clone();
         let direct_action_sender = direct_action_sender.clone();
         let demo_ready = demo_ready.clone();
-        card.on_keyframe_action_requested(move |id, action, argument| {
+        card.on_keyframe_action_requested(move |id, action, setting, value| {
             let Some(card) = weak_card.upgrade() else {
                 return;
             };
@@ -294,7 +294,8 @@ fn main() -> Result<()> {
                 id,
                 tick,
                 action.as_str(),
-                argument.as_str(),
+                setting.as_str(),
+                value.as_str(),
                 &session.telemetry_marker_prefix,
                 session.start_tick,
             ) {
@@ -972,7 +973,8 @@ fn build_keyframe_action(
     id: i32,
     tick: i64,
     action: &str,
-    argument: &str,
+    setting: &str,
+    value: &str,
     tick_marker_prefix: &str,
     clip_start_tick: i64,
 ) -> Result<(String, String)> {
@@ -981,6 +983,7 @@ fn build_keyframe_action(
     }
     let select = format!("mirv_campath select #{id} #{id}");
     let command = match action {
+        "Edit keyframe" => build_keyframe_edit(id, &select, setting, value)?,
         "Go to keyframe" => format!(
             "demo_gototick {tick}; echo {tick_marker_prefix} {tick}"
         ),
@@ -994,82 +997,98 @@ fn build_keyframe_action(
         "Select only" => select,
         "Add to selection" => format!("mirv_campath select add #{id} #{id}"),
         "Select range through ID" => {
-            let end = normalized_nonnegative_id(argument)?;
+            let end = normalized_nonnegative_id(value)?;
             format!("mirv_campath select #{id} #{end}")
         }
         "Add range through ID" => {
-            let end = normalized_nonnegative_id(argument)?;
+            let end = normalized_nonnegative_id(value)?;
             format!("mirv_campath select add #{id} #{end}")
         }
         "Delete keyframe" => format!("mirv_campath remove {id}"),
-        "Move time to current" => format!("{select}; mirv_campath edit start"),
-        "Shift time by seconds" => {
-            let value = normalized_number(argument, "time shift")?;
-            format!("{select}; mirv_campath edit start delta{value}")
-        }
-        "Set absolute time" => {
-            let value = normalized_number(argument, "absolute time")?;
-            format!("{select}; mirv_campath edit start abs {value}")
-        }
-        "Position from current camera" => {
-            format!("{select}; mirv_campath edit position current")
-        }
-        "Set position X Y Z" => {
-            let values = normalized_triplet(argument, true, "position")?;
-            format!("{select}; mirv_campath edit position {values}")
-        }
-        "Angles from current camera" => {
-            format!("{select}; mirv_campath edit angles current")
-        }
-        "Set angles P Y R" => {
-            let values = normalized_triplet(argument, true, "angles")?;
-            format!("{select}; mirv_campath edit angles {values}")
-        }
-        "FOV from current camera" => format!("{select}; mirv_campath edit fov current"),
-        "Set FOV" => {
-            let value = parse_finite_number(argument, "FOV")?;
-            if !(1.0..=179.0).contains(&value) {
-                bail!("FOV must be between 1 and 179");
-            }
-            format!("{select}; mirv_campath edit fov {}", format_number(value))
-        }
-        "Rotate P Y R" => {
-            let values = normalized_triplet(argument, false, "rotation")?;
-            format!("{select}; mirv_campath edit rotate {values}")
-        }
-        "Anchor to current camera" => format!(
-            "mirv_campath select all; mirv_campath edit anchor #{id} current; mirv_campath select none"
-        ),
-        "Align path to keyframe" => format!("mirv_campath offset current#{id}"),
-        "Align path with offset" => {
-            let value = normalized_number(argument, "path offset")?;
-            format!("mirv_campath offset current#{id}{value}")
-        }
-        "Set selected duration" => {
-            let value = parse_finite_number(argument, "duration")?;
-            if value <= 0.0 {
-                bail!("duration must be greater than zero");
-            }
-            format!("mirv_campath edit duration {}", format_number(value))
-        }
-        "Interpolation position" => format!(
-            "mirv_campath edit interp position {}",
-            normalized_interpolation(argument, false)?
-        ),
-        "Interpolation rotation" => format!(
-            "mirv_campath edit interp rotation {}",
-            normalized_interpolation(argument, true)?
-        ),
-        "Interpolation FOV" => format!(
-            "mirv_campath edit interp fov {}",
-            normalized_interpolation(argument, false)?
-        ),
         "Select all" => "mirv_campath select all".into(),
         "Deselect all" => "mirv_campath select none".into(),
         "Invert selection" => "mirv_campath select invert".into(),
         _ => bail!("unknown keyframe action '{action}'"),
     };
-    Ok((command, format!("KEYFRAME {id} • {action}")))
+    let label = if action == "Edit keyframe" {
+        format!("KEYFRAME {id} • {setting}")
+    } else {
+        format!("KEYFRAME {id} • {action}")
+    };
+    Ok((command, label))
+}
+
+fn build_keyframe_edit(id: i32, select: &str, setting: &str, value: &str) -> Result<String> {
+    Ok(match setting {
+        "Time — Move to current" => format!("{select}; mirv_campath edit start"),
+        "Time — Shift by seconds" => {
+            let value = normalized_number(value, "time shift")?;
+            format!("{select}; mirv_campath edit start delta{value}")
+        }
+        "Time — Set absolute seconds" => {
+            let value = parse_finite_number(value, "absolute time")?;
+            format!("{select}; mirv_campath edit start abs {}", format_number(value))
+        }
+        "Position — Current camera" => {
+            format!("{select}; mirv_campath edit position current")
+        }
+        "Position — Set X Y Z" => {
+            let values = normalized_triplet(value, true, "position")?;
+            format!("{select}; mirv_campath edit position {values}")
+        }
+        "Angles — Current camera" => {
+            format!("{select}; mirv_campath edit angles current")
+        }
+        "Angles — Set Pitch Yaw Roll" => {
+            let values = normalized_triplet(value, true, "angles")?;
+            format!("{select}; mirv_campath edit angles {values}")
+        }
+        "FOV — Current camera" => format!("{select}; mirv_campath edit fov current"),
+        "FOV — Set value" => {
+            let value = parse_finite_number(value, "FOV")?;
+            if !(1.0..=179.0).contains(&value) {
+                bail!("FOV must be between 1 and 179");
+            }
+            format!("{select}; mirv_campath edit fov {}", format_number(value))
+        }
+        "Rotate — Pitch Yaw Roll" => {
+            let values = normalized_triplet(value, false, "rotation")?;
+            format!("{select}; mirv_campath edit rotate {values}")
+        }
+        "Anchor — Current camera" => format!(
+            "mirv_campath select all; mirv_campath edit anchor #{id} current; mirv_campath select none"
+        ),
+        "Path offset — Align keyframe to current" => {
+            format!("mirv_campath offset current#{id}")
+        }
+        "Path offset — Add seconds" => {
+            let value = normalized_number(value, "path offset")?;
+            format!("mirv_campath offset current#{id}{value}")
+        }
+        "Duration — Set seconds" => {
+            let value = parse_finite_number(value, "duration")?;
+            if value <= 0.0 {
+                bail!("duration must be greater than zero");
+            }
+            format!(
+                "mirv_campath select all; mirv_campath edit duration {}; mirv_campath select none",
+                format_number(value)
+            )
+        }
+        "Interpolation — Position" => format!(
+            "mirv_campath edit interp position {}",
+            normalized_interpolation(value, false)?
+        ),
+        "Interpolation — Rotation" => format!(
+            "mirv_campath edit interp rotation {}",
+            normalized_interpolation(value, true)?
+        ),
+        "Interpolation — FOV" => format!(
+            "mirv_campath edit interp fov {}",
+            normalized_interpolation(value, false)?
+        ),
+        _ => bail!("unknown keyframe edit setting '{setting}'"),
+    })
 }
 
 fn normalized_nonnegative_id(value: &str) -> Result<i32> {
@@ -1721,6 +1740,7 @@ mod tests {
             12_345,
             "Delete keyframe",
             "",
+            "",
             "TF2FRAG_DIRECTOR_TICK",
             10_000,
         )
@@ -1730,7 +1750,8 @@ mod tests {
         let (position, _) = build_keyframe_action(
             4,
             12_345,
-            "Position from current camera",
+            "Edit keyframe",
+            "Position — Current camera",
             "",
             "TF2FRAG_DIRECTOR_TICK",
             10_000,
@@ -1739,6 +1760,36 @@ mod tests {
         assert_eq!(
             position,
             "mirv_campath select #4 #4; mirv_campath edit position current"
+        );
+
+        let (fov, _) = build_keyframe_action(
+            4,
+            12_345,
+            "Edit keyframe",
+            "FOV — Set value",
+            "90",
+            "TF2FRAG_DIRECTOR_TICK",
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(
+            fov,
+            "mirv_campath select #4 #4; mirv_campath edit fov 90"
+        );
+
+        let (rotation_interp, _) = build_keyframe_action(
+            4,
+            12_345,
+            "Edit keyframe",
+            "Interpolation — Rotation",
+            "sCubic",
+            "TF2FRAG_DIRECTOR_TICK",
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(
+            rotation_interp,
+            "mirv_campath edit interp rotation sCubic"
         );
     }
 

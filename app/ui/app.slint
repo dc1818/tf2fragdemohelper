@@ -687,6 +687,7 @@ export component AppWindow inherits Window {
     in-out property <string> hlae-path;
     in-out property <string> ffmpeg-path;
     in-out property <string> recording-directory;
+    in-out property <string> manual-hlae-launch-options;
     in-out property <string> resolution: "2560x1440";
     in-out property <string> dx-level: "98";
     in-out property <string> skybox: "Default";
@@ -737,6 +738,7 @@ export component AppWindow inherits Window {
     changed hlae-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed ffmpeg-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed recording-directory => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed manual-hlae-launch-options => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed capture-fps => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed recording-format => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed jpg-quality => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
@@ -1012,12 +1014,12 @@ export component AppWindow inherits Window {
             width: recording-settings-scroll.width - (root.compact ? 30px : 42px);
             height: Math.max(
                 recording-settings-scroll.height - (root.compact ? 18px : 28px),
-                root.compact ? (822px + root.recording-advanced-panel-height) : (880px + root.recording-advanced-panel-height)
+                root.compact ? (862px + root.recording-advanced-panel-height) : (920px + root.recording-advanced-panel-height)
             );
             spacing: root.compact ? 7px : 10px;
             if !root.compact : HorizontalLayout { height: 26px; Tf2Heading { font-size: 21px; text: "HLAE RECORDING SETTINGS"; } Rectangle { horizontal-stretch: 1; } }
             HorizontalLayout {
-                height: root.compact ? 226px : 266px;
+                height: root.compact ? 266px : 306px;
                 spacing: root.compact ? 7px : 11px;
                 Tf2Panel {
                     width: 50%;
@@ -1030,6 +1032,7 @@ export component AppWindow inherits Window {
                             Row { Tf2Label { width: root.compact ? 80px : 125px; font-size: root.compact ? 14px : 15px; text: "HLAE"; } Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.hlae-path; } Tf2Button { width: root.compact ? 80px : 100px; height: root.compact ? 32px : 36px; label-font-size: root.compact ? 14px : 16px; text: "BROWSE"; clicked => { root.choose-setting-path("hlae"); } } }
                             Row { Tf2Label { width: root.compact ? 80px : 125px; font-size: root.compact ? 14px : 15px; text: "FFMPEG"; } Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.ffmpeg-path; } Tf2Button { width: root.compact ? 80px : 100px; height: root.compact ? 32px : 36px; label-font-size: root.compact ? 14px : 16px; text: "BROWSE"; clicked => { root.choose-setting-path("ffmpeg"); } } }
                             Row { Tf2Label { width: root.compact ? 80px : 125px; font-size: root.compact ? 14px : 15px; text: "OUTPUT"; } Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.recording-directory; } Tf2Button { width: root.compact ? 80px : 100px; height: root.compact ? 32px : 36px; label-font-size: root.compact ? 14px : 16px; text: "BROWSE"; clicked => { root.choose-setting-path("recording-output"); } } }
+                            Row { Tf2Label { width: root.compact ? 80px : 125px; font-size: root.compact ? 14px : 15px; text: root.compact ? "LAUNCH" : "MANUAL OPTIONS"; } Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.manual-hlae-launch-options; placeholder-text: "Optional safe TF2 switches, e.g. -high -nojoy"; } }
                             if root.compact : Row { Tf2Label { width: 80px; font-size: 14px; text: "FPS"; } ComboBox { width: 90px; height: 32px; model: ["120", "60", "240", "480"]; current-value <=> root.capture-fps; } }
                             if !root.compact : Row { Tf2Label { width: 125px; font-size: 15px; text: "FORMAT"; } ComboBox { height: 36px; model: ["MP4 - Standard", "MP4 - Compatible", "MP4 - Lossless", "MOV - DNxHR", "TGA Image Sequence", "JPG Image Sequence", "AVI - Raw"]; current-value <=> root.recording-format; } Rectangle { width: 18px; } Tf2Label { width: 32px; font-size: 15px; text: "FPS"; horizontal-alignment: right; } ComboBox { width: 90px; height: 36px; model: ["120", "60", "240", "480"]; current-value <=> root.capture-fps; } if root.recording-format == "JPG Image Sequence" : Tf2Label { width: 72px; font-size: 15px; text: "JPG"; } if root.recording-format == "JPG Image Sequence" : SpinBox { width: 82px; height: 36px; value <=> root.jpg-quality; minimum: 1; maximum: 100; } }
                         }
@@ -1172,13 +1175,14 @@ export component AppWindow inherits Window {
                     clicked => { root.recording-settings-section = root.recording-settings-section == 0 ? -1 : 0; }
                 }
                 if root.recording-settings-section == 0 : Tf2Panel {
-                    height: 190px;
+                    height: 224px;
                     GridLayout {
                         padding: 7px; spacing: 4px;
                         Row { Tf2Label { width: 92px; text: "TF2 EXE"; } Tf2LineEdit { height: 30px; text <=> root.tf2-path; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("tf2"); } } }
                         Row { Tf2Label { width: 92px; text: "HLAE"; } Tf2LineEdit { height: 30px; text <=> root.hlae-path; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("hlae"); } } }
                         Row { Tf2Label { width: 92px; text: "FFMPEG"; } Tf2LineEdit { height: 30px; text <=> root.ffmpeg-path; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("ffmpeg"); } } }
                         Row { Tf2Label { width: 92px; text: "OUTPUT"; } Tf2LineEdit { height: 30px; text <=> root.recording-directory; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("recording-output"); } } }
+                        Row { Tf2Label { width: 92px; text: "MANUAL OPTS"; } Tf2LineEdit { height: 30px; text <=> root.manual-hlae-launch-options; placeholder-text: "Optional safe TF2 switches"; } }
                         Row { Tf2Label { width: 92px; text: "FORMAT"; } ComboBox { height: 30px; model: ["MP4 - Standard", "MP4 - Compatible", "MP4 - Lossless", "MOV - DNxHR", "TGA Image Sequence", "JPG Image Sequence", "AVI - Raw"]; current-value <=> root.recording-format; } Tf2Label { width: 32px; text: "FPS"; horizontal-alignment: right; } ComboBox { width: 82px; height: 30px; model: ["120", "60", "240", "480"]; current-value <=> root.capture-fps; } if root.recording-format == "JPG Image Sequence" : SpinBox { width: 70px; height: 30px; value <=> root.jpg-quality; minimum: 1; maximum: 100; } }
                     }
                 }

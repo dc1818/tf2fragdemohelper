@@ -282,13 +282,27 @@ export component DirectorCardWindow inherits Window {
     in property <int> selected-keyframe-id;
     in property <int> selected-keyframe-tick;
     in property <bool> actions-enabled: true;
-    in-out property <string> keyframe-action: "Go to keyframe";
-    in-out property <string> keyframe-argument;
+    in-out property <string> keyframe-action: "Edit keyframe";
+    in-out property <string> keyframe-setting: "FOV — Set value";
+    in-out property <string> keyframe-value;
+    in-out property <string> keyframe-choice: "Default";
+    private property <bool> editing-keyframe: root.keyframe-action == "Edit keyframe";
+    private property <bool> range-action: root.keyframe-action == "Select range through ID" || root.keyframe-action == "Add range through ID";
+    private property <bool> interpolation-setting: root.keyframe-setting == "Interpolation — Position" || root.keyframe-setting == "Interpolation — Rotation" || root.keyframe-setting == "Interpolation — FOV";
+    private property <bool> setting-needs-value: root.keyframe-setting == "Time — Shift by seconds" || root.keyframe-setting == "Time — Set absolute seconds" || root.keyframe-setting == "Position — Set X Y Z" || root.keyframe-setting == "Angles — Set Pitch Yaw Roll" || root.keyframe-setting == "FOV — Set value" || root.keyframe-setting == "Rotate — Pitch Yaw Roll" || root.keyframe-setting == "Path offset — Add seconds" || root.keyframe-setting == "Duration — Set seconds";
     in property <string> command-status: "DIRECTOR COMMAND QUEUE READY";
     callback hide-requested();
     callback frag-goto-requested();
     callback keyframe-activated(int, int);
-    callback keyframe-action-requested(int, string, string);
+    callback keyframe-action-requested(int, string, string, string);
+
+    changed keyframe-setting => {
+        if root.keyframe-setting == "Interpolation — Rotation" {
+            root.keyframe-choice = "sLinear";
+        } else if root.interpolation-setting {
+            root.keyframe-choice = "Linear";
+        }
+    }
 
     Rectangle {
         background: Colors.app;
@@ -351,7 +365,7 @@ export component DirectorCardWindow inherits Window {
                 VerticalLayout {
                     spacing: 2px;
                     if root.has-selected-keyframe : Rectangle {
-                        height: 190px;
+                        height: root.editing-keyframe ? 235px : (root.range-action ? 190px : 155px);
                         background: Colors.panel;
                         border-width: 1px;
                         border-color: Colors.green;
@@ -363,19 +377,38 @@ export component DirectorCardWindow inherits Window {
                                 height: 32px;
                                 enabled: root.actions-enabled;
                                 model: [
-                                    "Go to keyframe", "Go to 1 sec before", "Select only", "Add to selection",
-                                    "Select range through ID", "Add range through ID", "Delete keyframe",
-                                    "Move time to current", "Shift time by seconds", "Set absolute time", "Position from current camera",
-                                    "Set position X Y Z", "Angles from current camera", "Set angles P Y R", "FOV from current camera",
-                                    "Set FOV", "Rotate P Y R", "Anchor to current camera", "Align path to keyframe",
-                                    "Align path with offset", "Set selected duration", "Interpolation position", "Interpolation rotation",
-                                    "Interpolation FOV", "Select all", "Deselect all", "Invert selection"
+                                    "Edit keyframe", "Go to keyframe", "Go to 1 sec before", "Delete keyframe",
+                                    "Select only", "Add to selection", "Select range through ID", "Add range through ID",
+                                    "Select all", "Deselect all", "Invert selection"
                                 ];
                                 current-value <=> root.keyframe-action;
                             }
-                            LineEdit { height: 30px; enabled: root.actions-enabled; text <=> root.keyframe-argument; placeholder-text: "Optional value: seconds, X Y Z, P Y R, FOV, interpolation"; }
+                            if root.editing-keyframe : ComboBox {
+                                height: 32px;
+                                enabled: root.actions-enabled;
+                                model: [
+                                    "Time — Move to current", "Time — Shift by seconds", "Time — Set absolute seconds",
+                                    "Position — Current camera", "Position — Set X Y Z",
+                                    "Angles — Current camera", "Angles — Set Pitch Yaw Roll",
+                                    "FOV — Current camera", "FOV — Set value", "Rotate — Pitch Yaw Roll",
+                                    "Anchor — Current camera", "Path offset — Align keyframe to current",
+                                    "Path offset — Add seconds", "Duration — Set seconds",
+                                    "Interpolation — Position", "Interpolation — Rotation", "Interpolation — FOV"
+                                ];
+                                current-value <=> root.keyframe-setting;
+                            }
+                            if root.editing-keyframe && root.setting-needs-value : LineEdit {
+                                height: 30px;
+                                enabled: root.actions-enabled;
+                                text <=> root.keyframe-value;
+                                placeholder-text: root.keyframe-setting == "Position — Set X Y Z" ? "X Y Z (use * to preserve an axis)" : (root.keyframe-setting == "Angles — Set Pitch Yaw Roll" || root.keyframe-setting == "Rotate — Pitch Yaw Roll" ? "Pitch Yaw Roll" : (root.keyframe-setting == "FOV — Set value" ? "FOV from 1 to 179" : "Seconds"));
+                            }
+                            if root.range-action : LineEdit { height: 30px; enabled: root.actions-enabled; text <=> root.keyframe-value; placeholder-text: "Ending HLAE keyframe ID"; }
+                            if root.editing-keyframe && root.keyframe-setting == "Interpolation — Position" : ComboBox { height: 30px; enabled: root.actions-enabled; model: ["Default", "Linear", "Cubic"]; current-value <=> root.keyframe-choice; }
+                            if root.editing-keyframe && root.keyframe-setting == "Interpolation — Rotation" : ComboBox { height: 30px; enabled: root.actions-enabled; model: ["Default", "sLinear", "sCubic"]; current-value <=> root.keyframe-choice; }
+                            if root.editing-keyframe && root.keyframe-setting == "Interpolation — FOV" : ComboBox { height: 30px; enabled: root.actions-enabled; model: ["Default", "Linear", "Cubic"]; current-value <=> root.keyframe-choice; }
                             Caption { height: 28px; text: "Single-key edits select this exact HLAE ID first. IDs refresh from mirv_campath print after execution."; color: Colors.muted; font-size: 9px; wrap: word-wrap; }
-                            DirectorButton { text: "EXECUTE HLAE ACTION"; enabled: root.actions-enabled; tone: #34542e; clicked => { root.keyframe-action-requested(root.selected-keyframe-id, root.keyframe-action, root.keyframe-argument); } }
+                            DirectorButton { text: "EXECUTE HLAE ACTION"; enabled: root.actions-enabled; tone: #34542e; clicked => { root.keyframe-action-requested(root.selected-keyframe-id, root.keyframe-action, root.keyframe-setting, root.interpolation-setting ? root.keyframe-choice : root.keyframe-value); } }
                         }
                     }
                     Caption { height: 22px; text: root.command-status; color: Colors.blue-text; font-size: 9px; wrap: word-wrap; }

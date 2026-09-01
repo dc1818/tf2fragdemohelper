@@ -101,6 +101,93 @@ impl ManualRconConfig {
     }
 }
 
+fn validated_manual_launch_options(value: &str) -> Result<&str> {
+    let value = value.trim();
+    if value.len() > 1024 {
+        bail!("custom manual HLAE launch options must be 1024 characters or fewer");
+    }
+    if value.chars().any(|character| character.is_control()) || value.contains(';') {
+        bail!("custom manual HLAE launch options cannot contain control characters or semicolons");
+    }
+
+    let mut quoted = false;
+    let mut token = String::new();
+    let mut tokens = Vec::new();
+    for character in value.chars() {
+        match character {
+            '"' => quoted = !quoted,
+            character if character.is_whitespace() && !quoted => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            character => token.push(character),
+        }
+    }
+    if quoted {
+        bail!("custom manual HLAE launch options contain an unmatched quote");
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+
+    const MANAGED_OPTIONS: &[&str] = &[
+        "-secure",
+        "-usercon",
+        "-port",
+        "-game",
+        "-afxgame",
+        "+connect",
+        "+map",
+        "+playdemo",
+        "+ip",
+        "+hostport",
+        "+rcon_password",
+        "+sv_rcon_whitelist_address",
+        "+net_start",
+        "+exec",
+    ];
+    if let Some(option) = tokens
+        .iter()
+        .map(|token| token.to_ascii_lowercase())
+        .find(|token| MANAGED_OPTIONS.contains(&token.as_str()))
+    {
+        bail!(
+            "'{option}' is managed by the Helper and cannot be overridden in custom launch options"
+        );
+    }
+    Ok(value)
+}
+
+fn manual_hlae_game_arguments(
+    settings: &AppSettings,
+    rcon: &ManualRconConfig,
+    width: u32,
+    height: u32,
+    staged_demo: &str,
+) -> Result<String> {
+    let custom = validated_manual_launch_options(&settings.manual_hlae_launch_options)?;
+    let custom = (!custom.is_empty()).then(|| format!("{custom} ")).unwrap_or_default();
+    let dx_argument = if settings
+        .dx_level
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("default")
+    {
+        String::new()
+    } else {
+        format!(
+            "-dxlevel {} ",
+            settings.dx_level.split_whitespace().next().unwrap_or("98")
+        )
+    };
+    let password = &rcon.password;
+    Ok(format!(
+        "-steam -insecure -usercon +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf {custom}-w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +ip 0.0.0.0 +hostport {} +rcon_password \"{password}\" +sv_rcon_whitelist_address 127.0.0.1 +net_start +playdemo {staged_demo}",
+        rcon.port,
+    ))
+}
+
 #[derive(Clone, Debug)]
 pub enum RecordingProgress {
     Status(String),
@@ -1511,26 +1598,24 @@ pub fn launch_manual_hlae_candidate(
     }
 
     let (width, height) = parse_resolution(&settings.resolution);
-    let dx_argument = if settings
-        .dx_level
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("default")
-    {
-        String::new()
-    } else {
-        format!(
-            "-dxlevel {} ",
-            settings.dx_level.split_whitespace().next().unwrap_or("98")
-        )
+    let game_arguments = match manual_hlae_game_arguments(
+        settings,
+        &rcon,
+        width,
+        height,
+        &staged_relative,
+    ) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            let _ = restore_recording_profile(&profile);
+            return Err(error).context("invalid custom manual HLAE launch options");
+        }
     };
-    let game_arguments = format!(
-        "-steam -insecure -usercon +sv_lan 1 -novid -window -noborder -console -no_texture_stream -afxGame tf -w {width} -h {height} {dx_argument}+tf_delete_temp_files 0 +exec tf2fragdemohelper_offline.cfg +exec tf2fragdemohelper_recording_profile.cfg +exec tf2fragdemohelper_manual.cfg +playdemo {staged_relative}"
-    );
+    let diagnostic_arguments = game_arguments.replace(&rcon.password, "<redacted>");
     log_recording_diagnostic(
         &diagnostic_log,
         format!(
-            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; Director control 127.0.0.1:{}; command line: {game_arguments}",
+            "Manual HLAE session prepared; target tick {target_tick}; last requested tick {end_tick}; output {}; Director control 127.0.0.1:{}; command line: {diagnostic_arguments}",
             output_path.display(),
             rcon.port,
         ),
@@ -5974,6 +6059,62 @@ mod recording_tests {
         assert!(cfg.contains("sv_rcon_whitelist_address 127.0.0.1"));
         assert!(cfg.contains("net_start"));
         assert!(cfg.find("net_start").unwrap() < cfg.find("mirv_cmd enabled 1").unwrap());
+    }
+
+    #[test]
+    fn manual_rcon_is_initialized_on_the_recording_launch_command_line() {
+        let rcon = ManualRconConfig {
+            port: 32_145,
+            password: "0123456789abcdef0123456789abcdef".into(),
+        };
+        let mut settings = AppSettings::default();
+        settings.manual_hlae_launch_options = "-high -nojoy".into();
+        let arguments = manual_hlae_game_arguments(
+            &settings,
+            &rcon,
+            2560,
+            1440,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+        )
+        .unwrap();
+        assert!(arguments.contains("-insecure -usercon"));
+        assert!(arguments.contains("-high -nojoy"));
+        assert!(arguments.contains("+ip 0.0.0.0"));
+        assert!(arguments.contains("+hostport 32145"));
+        assert!(arguments.contains(
+            "+rcon_password \"0123456789abcdef0123456789abcdef\""
+        ));
+        assert!(arguments.contains("+sv_rcon_whitelist_address 127.0.0.1"));
+        assert!(arguments.contains("+net_start +playdemo"));
+        assert!(arguments.find("+exec tf2fragdemohelper_manual.cfg").unwrap()
+            < arguments.find("+net_start").unwrap());
+    }
+
+    #[test]
+    fn custom_manual_launch_options_cannot_override_session_safety_or_rcon() {
+        let rcon = ManualRconConfig {
+            port: 32_145,
+            password: "0123456789abcdef0123456789abcdef".into(),
+        };
+        for managed in [
+            "-secure",
+            "+connect 1.2.3.4",
+            "+playdemo other",
+            "+hostport 27015",
+            "+rcon_password unsafe",
+            "+exec autoexec",
+        ] {
+            let mut settings = AppSettings::default();
+            settings.manual_hlae_launch_options = managed.into();
+            assert!(manual_hlae_game_arguments(
+                &settings,
+                &rcon,
+                1920,
+                1080,
+                "candidate.dem",
+            )
+            .is_err());
+        }
     }
 
     #[test]

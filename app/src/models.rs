@@ -243,6 +243,10 @@ pub struct AppSettings {
     pub hlae_executable: PathBuf,
     pub ffmpeg_executable: PathBuf,
     pub recording_output_directory: PathBuf,
+    /// Additional safe command-line switches used only for Helper-launched
+    /// manual HLAE sessions. Session ownership, offline safety, demo loading,
+    /// and Director RCON arguments remain managed by the Helper.
+    pub manual_hlae_launch_options: String,
     pub performance_profile: String,
     pub lead_seconds: u32,
     pub outro_seconds: u32,
@@ -429,7 +433,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             output_directory: PathBuf::new(), item_schema: PathBuf::new(), tf2_executable: PathBuf::new(),
-            hlae_executable: PathBuf::new(), ffmpeg_executable: PathBuf::new(), recording_output_directory: PathBuf::new(), performance_profile: "High".into(),
+            hlae_executable: PathBuf::new(), ffmpeg_executable: PathBuf::new(), recording_output_directory: PathBuf::new(), manual_hlae_launch_options: String::new(), performance_profile: "High".into(),
             lead_seconds: 8, outro_seconds: 3,
             capture_fps: 120, jpg_quality: 90, recording_format: "MP4 - Standard".into(), resolution: "2560x1440".into(),
             mp4_compatibility: "DaVinci Resolve / Universal".into(), mp4_video_codec: "H.264 / libx264".into(),

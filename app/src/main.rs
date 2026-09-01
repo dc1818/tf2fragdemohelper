@@ -970,6 +970,7 @@ fn main() -> Result<()> {
             .to_string()
             .into(),
     );
+    ui.set_manual_hlae_launch_options(settings.manual_hlae_launch_options.clone().into());
     ui.set_lead_seconds(settings.lead_seconds.min(60) as i32);
     ui.set_outro_seconds(settings.outro_seconds.min(60) as i32);
     ui.set_capture_fps(settings.capture_fps.to_string().into());
@@ -2538,6 +2539,7 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.hlae_executable = PathBuf::from(ui.get_hlae_path().to_string());
     settings.ffmpeg_executable = PathBuf::from(ui.get_ffmpeg_path().to_string());
     settings.recording_output_directory = PathBuf::from(ui.get_recording_directory().to_string());
+    settings.manual_hlae_launch_options = ui.get_manual_hlae_launch_options().to_string();
     settings.lead_seconds = ui.get_lead_seconds().clamp(0, 60) as u32;
     settings.outro_seconds = ui.get_outro_seconds().clamp(0, 60) as u32;
     settings.capture_fps = ui.get_capture_fps().parse().unwrap_or(120);
@@ -2609,6 +2611,7 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_skybox(settings.skybox.clone().into());
     ui.set_hud(settings.hud.clone().into());
     ui.set_viewmodels(settings.viewmodels.clone().into());
+    ui.set_manual_hlae_launch_options(settings.manual_hlae_launch_options.clone().into());
     ui.set_mirv_advance_time(settings.mirv_shortcuts.advance_time.clone().into());
     ui.set_mirv_toggle_hud(settings.mirv_shortcuts.toggle_hud.clone().into());
     ui.set_mirv_show_help(settings.mirv_shortcuts.show_help.clone().into());

@@ -245,7 +245,7 @@ pub struct AppSettings {
     pub recording_output_directory: PathBuf,
     /// Additional safe command-line switches used only for Helper-launched
     /// manual HLAE sessions. Session ownership, offline safety, demo loading,
-    /// and the automatic TF2 CFG mailbox remain managed by the Helper.
+    /// and the automatic TF2 CFG polling queue remain managed by the Helper.
     pub manual_hlae_launch_options: String,
     pub performance_profile: String,
     pub lead_seconds: u32,

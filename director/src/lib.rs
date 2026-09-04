@@ -8,6 +8,8 @@ pub const DIRECTOR_TICK_OFFSET_PREFIX: &str = "TF2FRAG_DIRECTOR_TICK_OFFSET";
 pub const DIRECTOR_KEYFRAME_BEGIN_PREFIX: &str = "TF2FRAG_DIRECTOR_KEYFRAMES_BEGIN";
 pub const DIRECTOR_KEYFRAME_END_PREFIX: &str = "TF2FRAG_DIRECTOR_KEYFRAMES_END";
 pub const DIRECTOR_ACTION_ACK_PREFIX: &str = "TF2FRAG_DIRECTOR_ACTION_ACK";
+pub const DIRECTOR_POLL_READY_MARKER: &str = "TF2FRAG_DIRECTOR_POLL_READY";
+pub const DIRECTOR_POLL_UNAVAILABLE_MARKER: &str = "TF2FRAG_DIRECTOR_POLL_UNAVAILABLE";
 pub const DIRECTOR_ACTION_FILE_PREFIX: &str = "tf2fragdemohelper_director_action";
 pub const DIRECTOR_ACTION_SLOTS: u16 = 64;
 
@@ -104,9 +106,10 @@ pub struct DirectorShortcut {
 pub enum DirectorControl {
     HotkeysOnly,
     LocalRcon { endpoint: String, password: String },
-    /// Director writes a private CFG action slot and posts its dedicated bind
-    /// only to TF2's Valve001 window. The slot advances only after TF2 echoes
-    /// the action sequence acknowledgement.
+    /// Director writes a private CFG action slot that TF2 polls from its own
+    /// command buffer. The slot advances only after TF2 echoes the action
+    /// sequence acknowledgement. A dedicated bind remains available only when
+    /// TF2 reports that its `wait` command is unavailable.
     CfgMailbox,
 }
 

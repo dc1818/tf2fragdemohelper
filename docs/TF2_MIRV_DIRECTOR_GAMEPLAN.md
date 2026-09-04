@@ -10,7 +10,7 @@ This keeps the responsibilities clean:
 |---|---|
 | TF2 Frag Demo Helper | Candidate selection, clip window, safe staged seeking, recording profile, capture output, recovery, and restoration |
 | TF2 MIRV Director | Candidate timeline, shot cues, campath key list/editor, preview controls, and warnings |
-| HLAE + CFG mailbox | Demo/campath telemetry and acknowledged local commands |
+| HLAE + CFG polling queue | Demo/campath telemetry and acknowledged local commands |
 | TF2 | Demo playback and final rendered camera |
 
 ## What was learned from HOT
@@ -33,7 +33,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 1. Select one candidate and set the before/after window in TF2 Frag Demo Helper.
 2. Launch the manual MIRV session.
 3. The helper stages the demo, writes `director_session.json`, starts HLAE, safely seeks in steps no larger than 15,000 ticks, pauses, and opens Director.
-4. Director opens in Option C: a click-through live timeline strip docked across the monitor's top edge plus an interactive cue card docked beneath it at the right edge. One HLAE `mirv_cmd` curve follows the engine's real demo-playback tick and drives the current-tick playhead. The saved `S` shortcut hides or restores only the right card.
+4. Director opens in Option C: a live timeline strip docked across the monitor's top edge plus an interactive cue card docked beneath it at the right edge. The windows do not activate when clicked, so TF2 keeps keyboard focus. One HLAE `mirv_cmd` curve follows the engine's real demo-playback tick and drives the current-tick playhead. The saved `C` shortcut hides or restores only the right card.
 5. In TF2, enter the MIRV camera and compose an establishing frame. Add the first key.
 6. Advance time in small increments or move to the next cue. Reframe and add a key for each intentional camera beat. Simultaneous victims remain one cue and can be framed together.
 7. Use safe restart, enable campath playback, and preview the complete move. Director remains visible beside a smaller TF2 window as the shot checklist.
@@ -51,7 +51,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 - Real current-tick progress from an engine-scheduled VDM marker on every playback tick in the existing TF2 console log.
 - Reasserted Windows `HWND_TOPMOST` state so clicking TF2 does not bury the overlay.
 - Click-through strip plus an interactive card, preserving TF2 input outside the card.
-- Configurable hide/show-card shortcut in Recording Settings (`S` by default), available while TF2 has focus.
+- Configurable hide/show-card shortcut in Recording Settings (`C` by default), available while TF2 has focus.
 - Saved shortcut grid, arrow-key reservation notice, keyframe checklist, and custom-key recording order.
 - Automatic launch and lifecycle tied to the manual TF2 session.
 - Typed Director actions for demo seeking and keyframe editing, delivered through private per-session CFG slots with TF2 acknowledgements.
@@ -59,9 +59,9 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 
 ## Live TF2 control
 
-The temporary manual CFG installs one HLAE `mirv_cmd addCurves tick` command for the practical Source demo range. It writes authoritative demo ticks while playback moves. Director actions remain available while paused because the companion posts the dedicated private bind directly to TF2's verified `Valve001` window using the same `WM_KEYDOWN`/`WM_KEYUP` path implemented by Source's own `Sys_TestSendKey` helper.
+The temporary manual CFG installs one HLAE `mirv_cmd addCurves tick` command for the practical Source demo range. It writes authoritative demo ticks while playback moves. Director actions remain available while paused because TF2 itself runs a guarded polling alias in its normal command buffer. HLAE's own campath workflow explicitly supports adding, seeking, and printing keyframes in a paused demo, so routine Director actions do not resume playback or change the selected tick.
 
-The Director writes one action at a time into a 64-slot ring. The action echoes a unique sequence acknowledgement and advances TF2's in-memory alias to the next slot. Director does not reuse or advance a slot until that acknowledgement appears in the temporary console log. The window-targeted key message cannot be delivered to another foreground application and the existing manual key remains an emergency fallback. This provides automatic control without Source RCON, `mirv_pgl`, additional DLLs, network listeners, or global `SendInput` injection.
+The Director writes one action at a time into a 64-slot ring using an atomic same-directory replacement. The action advances TF2's in-memory alias before executing, then echoes a unique sequence acknowledgement and requests an authoritative `mirv_campath print`. Director does not reuse a slot or report completion until that acknowledgement appears in the temporary console log. A standard TF2 `wait` capability test starts the poller only when the command works; otherwise the existing manual key remains the emergency fallback and the non-activating Windows overlay can send that scan code while TF2 stays foreground. This provides automatic control without Source RCON, `mirv_pgl`, additional DLLs, or network listeners.
 
 `mirv_pgl` must not be used for TF2: AdvancedFX documents it as CS:GO-only, and its initialization and command-service loop are installed only by the CS:GO `IBaseClientDLL` wrapper. The Helper verifies the selected HLAE launcher and matching AfxHookSource hook file without imposing a package-version or changelog requirement, and keeps `-insecure +sv_lan 1` under Helper control.
 

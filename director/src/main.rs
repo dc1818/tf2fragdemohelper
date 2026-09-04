@@ -21,7 +21,7 @@ use std::{
 use tf2_mirv_director::{
     DirectorControl, DirectorSession, DIRECTOR_ACTION_ACK_PREFIX, DIRECTOR_ACTION_FILE_PREFIX,
     DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_END_PREFIX,
-    DIRECTOR_TICK_OFFSET_PREFIX,
+    DIRECTOR_POLL_READY_MARKER, DIRECTOR_POLL_UNAVAILABLE_MARKER, DIRECTOR_TICK_OFFSET_PREFIX,
 };
 
 const ONE_SECOND_TICKS: i64 = 67;
@@ -29,6 +29,7 @@ const DEMO_READY_MARKER: &str = "TF2FRAG_MANUAL_PAUSED_AT_START";
 const DEMO_RELOAD_MARKER: &str = "TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO";
 const DEMO_READY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const DIRECT_CONTROL_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const DIRECTOR_ACTION_ACK_TIMEOUT: Duration = Duration::from_secs(8);
 const RCON_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 slint::include_modules!();
@@ -93,7 +94,7 @@ fn main() -> Result<()> {
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
     let initial_command_status = if automatic_cfg_mailbox {
-        SharedString::from("DIRECT CONTROL READY • CLICK AN ACTION")
+        SharedString::from("CHECKING TF2 COMMAND QUEUE • CLICK AN ACTION")
     } else if direct_action_sender.is_some() {
         SharedString::from("DIRECT CONTROL LISTENING • CLICK AN ACTION")
     } else {
@@ -448,6 +449,22 @@ fn main() -> Result<()> {
                             "status=DEMO_READY_ACTIONS_ENABLED",
                         );
                     }
+                    if poll.director_poll_ready {
+                        let status = action_queue.borrow_mut().set_poll_available(true);
+                        card.set_command_status(status.into());
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            "status=TF2_CFG_POLLER_READY",
+                        );
+                    }
+                    if poll.director_poll_unavailable {
+                        let status = action_queue.borrow_mut().set_poll_available(false);
+                        card.set_command_status(status.into());
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            "status=TF2_CFG_POLLER_UNAVAILABLE_INPUT_FALLBACK_ENABLED",
+                        );
+                    }
                     if !demo_ready.get() {
                         return;
                     }
@@ -495,6 +512,9 @@ fn main() -> Result<()> {
                     }
                     for sequence in poll.action_acks {
                         let status = action_queue.borrow_mut().acknowledge(sequence);
+                        card.set_command_status(status.into());
+                    }
+                    if let Some(status) = action_queue.borrow_mut().take_timeout_status() {
                         card.set_command_status(status.into());
                     }
                     if !poll.tick_updates.is_empty() {
@@ -827,12 +847,22 @@ struct InFlightDirectorAction {
     sequence: u64,
     slot: u16,
     label: String,
+    started_at: Instant,
+    timeout_reported: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DirectorQueueTransport {
+    ManualKey,
+    PollPending,
+    Polling,
+    InputFallback,
 }
 
 struct DirectorActionQueue {
     directory: PathBuf,
     execute_key: String,
-    automatic: bool,
+    transport: DirectorQueueTransport,
     pending: VecDeque<QueuedDirectorAction>,
     in_flight: Option<InFlightDirectorAction>,
     next_slot: u16,
@@ -844,7 +874,11 @@ impl DirectorActionQueue {
         Self {
             directory,
             execute_key,
-            automatic,
+            transport: if automatic {
+                DirectorQueueTransport::PollPending
+            } else {
+                DirectorQueueTransport::ManualKey
+            },
             pending: VecDeque::new(),
             in_flight: None,
             next_slot: 0,
@@ -864,7 +898,7 @@ impl DirectorActionQueue {
         if self.in_flight.is_none() {
             self.start_next()
         } else {
-            if self.automatic {
+            if self.transport != DirectorQueueTransport::ManualKey {
                 Ok(format!("QUEUED • {} ACTION(S) WAITING", self.pending.len()))
             } else {
                 Ok(format!(
@@ -874,6 +908,43 @@ impl DirectorActionQueue {
                 ))
             }
         }
+    }
+
+    fn set_poll_available(&mut self, available: bool) -> String {
+        if self.transport == DirectorQueueTransport::ManualKey {
+            return "DIRECTOR MANUAL ACTION KEY READY".into();
+        }
+        if available {
+            self.transport = DirectorQueueTransport::Polling;
+            if let Some(in_flight) = &self.in_flight {
+                format!("WAITING FOR TF2 • {}", in_flight.label)
+            } else {
+                "TF2 COMMAND QUEUE READY • CLICK AN ACTION".into()
+            }
+        } else {
+            self.transport = DirectorQueueTransport::InputFallback;
+            if self.in_flight.is_some() {
+                self.trigger_input_fallback()
+            } else {
+                format!(
+                    "TF2 WAIT IS UNAVAILABLE • INPUT FALLBACK READY • EMERGENCY KEY {}",
+                    self.execute_key
+                )
+            }
+        }
+    }
+
+    fn take_timeout_status(&mut self) -> Option<String> {
+        let in_flight = self.in_flight.as_mut()?;
+        if in_flight.timeout_reported || in_flight.started_at.elapsed() < DIRECTOR_ACTION_ACK_TIMEOUT
+        {
+            return None;
+        }
+        in_flight.timeout_reported = true;
+        Some(format!(
+            "TF2 DID NOT ACKNOWLEDGE • {} • EMERGENCY KEY {}",
+            in_flight.label, self.execute_key
+        ))
     }
 
     fn acknowledge(&mut self, sequence: u64) -> String {
@@ -920,7 +991,7 @@ impl DirectorActionQueue {
         let slot = self.next_slot;
         let next_slot = (slot + 1) % DIRECTOR_ACTION_SLOTS;
         let contents = format!(
-            "{}\ntf2frag_manual_sync_keyframes\necho {DIRECTOR_ACTION_ACK_PREFIX} {sequence}\nalias tf2frag_director_execute tf2frag_director_execute_{next_slot:02}\n",
+            "alias tf2frag_director_poll_action tf2frag_director_execute_{next_slot:02}\n{}\ntf2frag_manual_sync_keyframes\necho {DIRECTOR_ACTION_ACK_PREFIX} {sequence}\n",
             action.command
         );
         let path = self.action_path(slot);
@@ -930,29 +1001,39 @@ impl DirectorActionQueue {
                 format!("could not write Director action slot {}", path.display())
             });
         }
-        let automatic_trigger = self
-            .automatic
-            .then(|| post_tf2_bound_key(&self.execute_key));
         let label = action.label;
         self.in_flight = Some(InFlightDirectorAction {
             sequence,
             slot,
             label: label.clone(),
+            started_at: Instant::now(),
+            timeout_reported: false,
         });
-        if let Some(trigger) = automatic_trigger {
-            match trigger {
-                Ok(()) => Ok(format!("SENT TO TF2 MAILBOX • {label}")),
-                Err(error) => Ok(format!(
-                    "QUEUED • {label} • AUTOMATIC TF2 TRIGGER FAILED: {error} • PRESS {}",
-                    self.execute_key
-                )
-                .to_ascii_uppercase()),
-            }
-        } else {
-            Ok(format!(
+        Ok(match self.transport {
+            DirectorQueueTransport::ManualKey => format!(
                 "QUEUED • {label} • RETURN TO TF2 + PRESS {}",
                 self.execute_key
-            ))
+            ),
+            DirectorQueueTransport::PollPending | DirectorQueueTransport::Polling => {
+                format!("WAITING FOR TF2 • {label}")
+            }
+            DirectorQueueTransport::InputFallback => self.trigger_input_fallback(),
+        })
+    }
+
+    fn trigger_input_fallback(&self) -> String {
+        let label = self
+            .in_flight
+            .as_ref()
+            .map(|action| action.label.as_str())
+            .unwrap_or("DIRECTOR ACTION");
+        match send_tf2_bound_key(&self.execute_key) {
+            Ok(()) => format!("WAITING FOR TF2 • {label} • INPUT FALLBACK SENT"),
+            Err(error) => format!(
+                "QUEUED • {label} • INPUT FALLBACK FAILED: {error} • PRESS {} IN TF2",
+                self.execute_key
+            )
+            .to_ascii_uppercase(),
         }
     }
 
@@ -965,16 +1046,50 @@ impl DirectorActionQueue {
 fn replace_action_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let temp = path.with_extension("cfg.tmp");
     fs::write(&temp, contents)?;
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-    if let Err(error) = fs::rename(&temp, path) {
+    if let Err(error) = replace_temp_file(&temp, path) {
         let _ = fs::remove_file(&temp);
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_temp_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temp, destination)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_temp_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    let from = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let to = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut last_error = None;
+    for _ in 0..20 {
+        if unsafe {
+            MoveFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } != 0
+        {
+            return Ok(());
+        }
+        last_error = Some(std::io::Error::last_os_error());
+        thread::sleep(Duration::from_millis(5));
+    }
+    Err(last_error.unwrap_or_else(std::io::Error::last_os_error))
 }
 
 fn build_keyframe_action(
@@ -1202,6 +1317,8 @@ fn configure_overlay_windows(
             // The narrow strip accepts clicks only over its own top-of-screen
             // area so timeline markers can select their matching cue-card row.
             let _ = native.set_cursor_hittest(true);
+            #[cfg(target_os = "windows")]
+            make_nonactivating_windows(native);
             force_topmost(native);
         });
 
@@ -1210,6 +1327,8 @@ fn configure_overlay_windows(
             native.set_decorations(false);
             native.set_resizable(false);
             let _ = native.set_cursor_hittest(true);
+            #[cfg(target_os = "windows")]
+            make_nonactivating_windows(native);
             force_topmost(native);
         });
         refresh_overlay_dock(&strip, &card, &initial_docked_monitor, true);
@@ -1312,6 +1431,41 @@ fn force_topmost_windows(native: &winit::window::Window) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn make_nonactivating_windows(native: &winit::window::Window) {
+    use std::ffi::c_void;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    let Ok(handle) = native.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let window = handle.hwnd.get() as *mut c_void;
+    unsafe {
+        let styles = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        SetWindowLongPtrW(window, GWL_EXSTYLE, styles | WS_EX_NOACTIVATE);
+        SetWindowPos(
+            window,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
 struct TickLogTail {
     path: PathBuf,
     file: Option<File>,
@@ -1379,6 +1533,12 @@ impl TickLogTail {
             if let Some(sequence) = parse_action_ack(line) {
                 poll.action_acks.push(sequence);
             }
+            if line.contains(DIRECTOR_POLL_READY_MARKER) {
+                poll.director_poll_ready = true;
+            }
+            if line.contains(DIRECTOR_POLL_UNAVAILABLE_MARKER) {
+                poll.director_poll_unavailable = true;
+            }
             if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX)
                 || line.contains("passed? selected? id : tick[offset]")
             {
@@ -1428,6 +1588,8 @@ struct TelemetryPoll {
     keyframe_snapshot: Option<Vec<ParsedCampathKey>>,
     keyframes_invalidated: bool,
     action_acks: Vec<u64>,
+    director_poll_ready: bool,
+    director_poll_unavailable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1529,12 +1691,14 @@ fn to_ui_tick(tick: i64) -> i32 {
 }
 
 #[cfg(target_os = "windows")]
-fn post_tf2_bound_key(key: &str) -> Result<()> {
-    const WM_KEYDOWN: u32 = 0x0100;
-    const WM_KEYUP: u32 = 0x0101;
+fn send_tf2_bound_key(key: &str) -> Result<()> {
+    const INPUT_KEYBOARD: u32 = 1;
+    const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const KEYEVENTF_SCANCODE: u32 = 0x0008;
+    const MAPVK_VK_TO_VSC_EX: u32 = 4;
 
-    // Unit tests exercise mailbox sequencing without a running TF2 process.
-    // The non-test Windows build still compiles and uses the real user32 path.
+    // Unit tests exercise queue sequencing without a running TF2 process.
     if cfg!(test) {
         return Ok(());
     }
@@ -1553,14 +1717,103 @@ fn post_tf2_bound_key(key: &str) -> Result<()> {
     if search.window.is_null() {
         bail!("TF2 window not found");
     }
-    let pressed = unsafe {
-        PostMessageW(search.window, WM_KEYDOWN, virtual_key as usize, 0) != 0
-            && PostMessageW(search.window, WM_KEYUP, virtual_key as usize, 0) != 0
+    if unsafe { GetForegroundWindow() } != search.window {
+        bail!("TF2 is not the foreground window");
+    }
+    let mapped = unsafe { MapVirtualKeyW(virtual_key as u32, MAPVK_VK_TO_VSC_EX) };
+    let scan_code = (mapped & 0xff) as u16;
+    if scan_code == 0 {
+        bail!("Windows could not map the fallback key to a scan code");
+    }
+    let extended = if mapped & 0xff00 != 0 {
+        KEYEVENTF_EXTENDEDKEY
+    } else {
+        0
     };
-    if !pressed {
-        bail!("Windows rejected the targeted TF2 key message");
+    let inputs = [
+        WindowsInput {
+            kind: INPUT_KEYBOARD,
+            data: WindowsInputData {
+                keyboard: WindowsKeyboardInput {
+                    virtual_key: 0,
+                    scan_code,
+                    flags: KEYEVENTF_SCANCODE | extended,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        },
+        WindowsInput {
+            kind: INPUT_KEYBOARD,
+            data: WindowsInputData {
+                keyboard: WindowsKeyboardInput {
+                    virtual_key: 0,
+                    scan_code,
+                    flags: KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP | extended,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        },
+    ];
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<WindowsInput>() as i32,
+        )
+    };
+    if sent != inputs.len() as u32 {
+        bail!("Windows did not deliver the fallback key to TF2");
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct WindowsInput {
+    kind: u32,
+    data: WindowsInputData,
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+union WindowsInputData {
+    mouse: WindowsMouseInput,
+    keyboard: WindowsKeyboardInput,
+    hardware: WindowsHardwareInput,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct WindowsMouseInput {
+    x: i32,
+    y: i32,
+    mouse_data: u32,
+    flags: u32,
+    time: u32,
+    extra_info: usize,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct WindowsKeyboardInput {
+    virtual_key: u16,
+    scan_code: u16,
+    flags: u32,
+    time: u32,
+    extra_info: usize,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct WindowsHardwareInput {
+    message: u32,
+    low: u16,
+    high: u16,
 }
 
 #[cfg(target_os = "windows")]
@@ -1592,7 +1845,7 @@ unsafe extern "system" fn find_tf2_window(window: *mut std::ffi::c_void, state: 
 }
 
 #[cfg(not(target_os = "windows"))]
-fn post_tf2_bound_key(_key: &str) -> Result<()> {
+fn send_tf2_bound_key(_key: &str) -> Result<()> {
     if cfg!(test) {
         Ok(())
     } else {
@@ -1657,13 +1910,11 @@ unsafe extern "system" {
     ) -> i32;
     fn GetClassNameW(window: *mut std::ffi::c_void, class_name: *mut u16, maximum: i32) -> i32;
     fn GetAsyncKeyState(virtual_key: i32) -> i16;
+    fn GetForegroundWindow() -> *mut std::ffi::c_void;
+    fn GetWindowLongPtrW(window: *mut std::ffi::c_void, index: i32) -> isize;
     fn GetWindowTextW(window: *mut std::ffi::c_void, title: *mut u16, maximum: i32) -> i32;
-    fn PostMessageW(
-        window: *mut std::ffi::c_void,
-        message: u32,
-        wparam: usize,
-        lparam: isize,
-    ) -> i32;
+    fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
+    fn SendInput(count: u32, inputs: *const WindowsInput, size: i32) -> u32;
     fn SetWindowPos(
         window: *mut std::ffi::c_void,
         insert_after: *mut std::ffi::c_void,
@@ -1673,6 +1924,13 @@ unsafe extern "system" {
         height: i32,
         flags: u32,
     ) -> i32;
+    fn SetWindowLongPtrW(window: *mut std::ffi::c_void, index: i32, value: isize) -> isize;
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
 }
 
 fn load_session(path: &Path) -> Result<DirectorSession> {
@@ -1788,7 +2046,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_action_is_written_for_automatic_tf2_delivery() {
+    fn queued_action_is_written_for_tf2_polling_delivery() {
         let directory = std::env::temp_dir().join(format!(
             "tf2frag-director-action-test-{}",
             std::process::id()
@@ -1800,16 +2058,17 @@ mod tests {
         let status = queue
             .enqueue("mirv_campath print".into(), "PRINT KEYFRAMES".into())
             .unwrap();
-        assert!(status.contains("SENT TO TF2 MAILBOX"));
+        assert!(status.contains("WAITING FOR TF2"));
         assert!(!status.contains("PRESS"));
 
         let action =
             fs::read_to_string(directory.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_00.cfg")))
                 .unwrap();
         assert!(action.contains("mirv_campath print"));
-        assert!(action.contains("alias tf2frag_director_execute tf2frag_director_execute_01"));
+        assert!(action.starts_with(
+            "alias tf2frag_director_poll_action tf2frag_director_execute_01"
+        ));
         assert!(!action.contains("wait"));
-        assert!(!action.contains("tf2frag_director_poll"));
 
         let _ = fs::remove_dir_all(directory);
     }
@@ -1835,13 +2094,54 @@ mod tests {
 
         let completed = queue.acknowledge(1);
         assert!(completed.contains("COMPLETE • FIRST"));
-        assert!(completed.contains("SENT TO TF2 MAILBOX • SECOND"));
+        assert!(completed.contains("WAITING FOR TF2 • SECOND"));
         let second =
             fs::read_to_string(directory.join(format!("{DIRECTOR_ACTION_FILE_PREFIX}_01.cfg")))
                 .unwrap();
         assert!(second.contains("echo SECOND"));
         assert!(second.contains(&format!("{DIRECTOR_ACTION_ACK_PREFIX} 2")));
-        assert!(second.contains("tf2frag_director_execute_02"));
+        assert!(second.starts_with(
+            "alias tf2frag_director_poll_action tf2frag_director_execute_02"
+        ));
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn unavailable_wait_switches_only_to_the_verified_input_fallback() {
+        let directory = std::env::temp_dir().join(format!(
+            "tf2frag-director-fallback-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+
+        let mut queue = DirectorActionQueue::new(directory.clone(), "'".into(), true);
+        queue.enqueue("echo FALLBACK".into(), "FALLBACK".into()).unwrap();
+        let status = queue.set_poll_available(false);
+        assert_eq!(queue.transport, DirectorQueueTransport::InputFallback);
+        assert!(status.contains("INPUT FALLBACK SENT"));
+        assert!(queue.in_flight.is_some());
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn unacknowledged_actions_report_a_real_tf2_timeout() {
+        let directory = std::env::temp_dir().join(format!(
+            "tf2frag-director-timeout-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+
+        let mut queue = DirectorActionQueue::new(directory.clone(), "'".into(), true);
+        queue.enqueue("echo TIMEOUT".into(), "TIMEOUT".into()).unwrap();
+        queue.in_flight.as_mut().unwrap().started_at =
+            Instant::now() - DIRECTOR_ACTION_ACK_TIMEOUT - Duration::from_millis(1);
+        let status = queue.take_timeout_status().unwrap();
+        assert!(status.contains("TF2 DID NOT ACKNOWLEDGE"));
+        assert!(queue.take_timeout_status().is_none());
 
         let _ = fs::remove_dir_all(directory);
     }

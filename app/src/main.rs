@@ -1029,6 +1029,9 @@ fn main() -> Result<()> {
     ui.set_mirv_overlay_panel_toggle(
         settings.mirv_shortcuts.overlay_panel_toggle.clone().into(),
     );
+    ui.set_mirv_overlay_interaction_toggle(
+        settings.mirv_shortcuts.overlay_interaction_toggle.clone().into(),
+    );
     ui.set_custom_resources(
         settings
             .custom_resources
@@ -2596,6 +2599,8 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
         ui.get_mirv_execute_director_action().to_string();
     settings.mirv_shortcuts.overlay_panel_toggle =
         ui.get_mirv_overlay_panel_toggle().to_string();
+    settings.mirv_shortcuts.overlay_interaction_toggle =
+        ui.get_mirv_overlay_interaction_toggle().to_string();
     settings.custom_resources = split_paths(&ui.get_custom_resources().to_string());
     settings.normalize_encoding_options();
     settings.normalize_recording_options();
@@ -2634,6 +2639,9 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     );
     ui.set_mirv_overlay_panel_toggle(
         settings.mirv_shortcuts.overlay_panel_toggle.clone().into(),
+    );
+    ui.set_mirv_overlay_interaction_toggle(
+        settings.mirv_shortcuts.overlay_interaction_toggle.clone().into(),
     );
     ui.set_recording_settings_syncing(false);
 }

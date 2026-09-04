@@ -34,6 +34,7 @@ These binds exist only in the isolated manual session. The helper does not bind 
 | `0` | Stop recording and reset `host_framerate` |
 | `-` | Print all campath keyframes in the console |
 | `=` | Save the path as `camera_path.xml` in the capture folder |
+| `F11` | Focus Director for timeline/side-panel clicks; press again to return to TF2 |
 
 While `mirv_input camera` is active, use the normal MIRV camera controls to position the shot. Manual input is suspended while the console is open.
 

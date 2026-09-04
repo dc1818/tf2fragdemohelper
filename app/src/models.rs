@@ -307,6 +307,7 @@ pub struct MirvShortcuts {
     pub save_campath: String,
     pub execute_director_action: String,
     pub overlay_panel_toggle: String,
+    pub overlay_interaction_toggle: String,
     #[serde(default)]
     pub overlay_panel_toggle_default_version: u8,
 }
@@ -331,6 +332,7 @@ impl Default for MirvShortcuts {
             save_campath: "=".into(),
             execute_director_action: "'".into(),
             overlay_panel_toggle: "C".into(),
+            overlay_interaction_toggle: "F11".into(),
             overlay_panel_toggle_default_version: 3,
         }
     }
@@ -412,6 +414,10 @@ impl MirvShortcuts {
             &self.overlay_panel_toggle,
             &defaults.overlay_panel_toggle,
         );
+        self.overlay_interaction_toggle = Self::normalized_key(
+            &self.overlay_interaction_toggle,
+            &defaults.overlay_interaction_toggle,
+        );
 
         let mut seen = BTreeSet::new();
         let keys = [
@@ -422,6 +428,7 @@ impl MirvShortcuts {
             &self.print_keyframes, &self.save_campath,
             &self.execute_director_action,
             &self.overlay_panel_toggle,
+            &self.overlay_interaction_toggle,
         ];
         if keys.iter().any(|key| !seen.insert(key.to_ascii_lowercase())) {
             *self = defaults;
@@ -624,6 +631,7 @@ mod settings_tests {
         assert_eq!(shortcuts.draw_campath, "/");
         assert_eq!(shortcuts.execute_director_action, "'");
         assert_eq!(shortcuts.overlay_panel_toggle, "C");
+        assert_eq!(shortcuts.overlay_interaction_toggle, "F11");
         assert_eq!(shortcuts.overlay_panel_toggle_default_version, 3);
     }
 

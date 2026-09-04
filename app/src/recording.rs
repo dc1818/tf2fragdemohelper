@@ -1365,6 +1365,11 @@ fn build_director_session(
             &shortcuts.overlay_panel_toggle,
             "Hide / show cue panel",
         ),
+        (
+            "overlay_interaction_toggle",
+            &shortcuts.overlay_interaction_toggle,
+            "Focus Director / return to TF2",
+        ),
     ]
     .into_iter()
     .map(|(id, key, label)| DirectorShortcut {
@@ -5880,7 +5885,7 @@ mod recording_tests {
         assert_eq!(session.cues[0].victims, vec!["Alice"]);
         assert!(session.cues[1].victims.is_empty());
         assert_eq!(session.whole_candidate_tags, vec!["multi kill"]);
-        assert_eq!(session.shortcuts.len(), 17);
+        assert_eq!(session.shortcuts.len(), 18);
         assert_eq!(session.shortcuts[0].key, "[");
         assert_eq!(session.shortcuts[7].label, "MIRV camera");
         assert_eq!(session.campath_file, campath);
@@ -5889,6 +5894,11 @@ mod recording_tests {
         assert_eq!(session.shortcuts[15].key, "'");
         assert_eq!(session.shortcuts[15].label, "Emergency action fallback");
         assert_eq!(session.shortcuts[16].key, "C");
+        assert_eq!(session.shortcuts[17].key, "F11");
+        assert_eq!(
+            session.shortcuts[17].label,
+            "Focus Director / return to TF2"
+        );
         assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
     }
 

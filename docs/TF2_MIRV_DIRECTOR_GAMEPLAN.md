@@ -33,7 +33,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 1. Select one candidate and set the before/after window in TF2 Frag Demo Helper.
 2. Launch the manual MIRV session.
 3. The helper stages the demo, writes `director_session.json`, starts HLAE, safely seeks in steps no larger than 15,000 ticks, pauses, and opens Director.
-4. Director opens in Option C: a live timeline strip docked across the monitor's top edge plus an interactive cue card docked beneath it at the right edge. The windows do not activate when clicked, so TF2 keeps keyboard focus. One HLAE `mirv_cmd` curve follows the engine's real demo-playback tick and drives the current-tick playhead. The saved `C` shortcut hides or restores only the right card.
+4. Director opens in Option C: a live timeline strip docked across the monitor's top edge plus an interactive cue card docked beneath it at the right edge. The windows normally do not activate, so TF2 keeps keyboard focus. The saved `F11` shortcut temporarily focuses Director and releases TF2's captured mouse for timeline and side-panel clicks; pressing it again restores TF2 focus. One HLAE `mirv_cmd` curve follows the engine's real demo-playback tick and drives the current-tick playhead. The saved `C` shortcut hides or restores only the right card.
 5. In TF2, enter the MIRV camera and compose an establishing frame. Add the first key.
 6. Advance time in small increments or move to the next cue. Reframe and add a key for each intentional camera beat. Simultaneous victims remain one cue and can be framed together.
 7. Use safe restart, enable campath playback, and preview the complete move. Director remains visible beside a smaller TF2 window as the shot checklist.
@@ -52,6 +52,7 @@ Official HLAE already confirms that Source 1 supports smooth campaths and paused
 - Reasserted Windows `HWND_TOPMOST` state so clicking TF2 does not bury the overlay.
 - Click-through strip plus an interactive card, preserving TF2 input outside the card.
 - Configurable hide/show-card shortcut in Recording Settings (`C` by default), available while TF2 has focus.
+- Configurable Director/TF2 focus toggle (`F11` by default) for mouse interaction without an injected UI.
 - Saved shortcut grid, arrow-key reservation notice, keyframe checklist, and custom-key recording order.
 - Automatic launch and lifecycle tied to the manual TF2 session.
 - Typed Director actions for demo seeking and keyframe editing, delivered through private per-session CFG slots with TF2 acknowledgements.

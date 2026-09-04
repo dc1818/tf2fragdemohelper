@@ -125,6 +125,8 @@ export component DirectorStripWindow inherits Window {
     in property <bool> narrow-layout;
     in property <bool> actions-enabled: true;
     in property <string> panel-toggle-key;
+    in property <string> interaction-toggle-key;
+    in property <bool> interaction-mode;
     in property <[CueRow]> cues;
     in property <[KeyframeRow]> keyframes;
     in property <bool> has-selected-keyframe;
@@ -252,7 +254,7 @@ export component DirectorStripWindow inherits Window {
                 alignment: center;
                 Text { text: root.next-frag-tick > 0 ? "NEXT FRAG  " + root.next-frag-tick : "CLIP OUTRO"; color: Colors.gold; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: right; overflow: elide; }
                 Caption { text: root.panel-toggle-key + (root.panel-visible ? "  HIDE PANEL" : "  SHOW PANEL"); color: Colors.blue-text; horizontal-alignment: right; overflow: elide; }
-                Caption { text: "CLICK MARKERS TO INSPECT"; font-size: 9px; horizontal-alignment: right; overflow: elide; }
+                Caption { text: root.interaction-mode ? root.interaction-toggle-key + "  RETURN TO TF2" : root.interaction-toggle-key + "  ENABLE CLICKS"; font-size: 9px; horizontal-alignment: right; overflow: elide; }
             }
         }
     }
@@ -273,6 +275,8 @@ export component DirectorCardWindow inherits Window {
     in property <string> next-frag-victims;
     in property <string> next-frag-tags;
     in property <string> panel-toggle-key;
+    in property <string> interaction-toggle-key;
+    in property <bool> interaction-mode;
     in property <string> record-order;
     in property <[ShortcutRow]> shortcuts;
     in property <[KeyframeRow]> keyframes;
@@ -292,6 +296,7 @@ export component DirectorCardWindow inherits Window {
     private property <bool> setting-needs-value: root.keyframe-setting == "Time — Shift by seconds" || root.keyframe-setting == "Time — Set absolute seconds" || root.keyframe-setting == "Position — Set X Y Z" || root.keyframe-setting == "Angles — Set Pitch Yaw Roll" || root.keyframe-setting == "FOV — Set value" || root.keyframe-setting == "Rotate — Pitch Yaw Roll" || root.keyframe-setting == "Path offset — Add seconds" || root.keyframe-setting == "Duration — Set seconds";
     in property <string> command-status: "DIRECTOR COMMAND QUEUE READY";
     callback hide-requested();
+    callback interaction-toggle-requested();
     callback frag-goto-requested();
     callback keyframe-activated(int, int);
     callback keyframe-action-requested(int, string, string, string);
@@ -430,16 +435,14 @@ export component DirectorCardWindow inherits Window {
                 }
             }
 
-            Rectangle {
+            HorizontalLayout {
                 height: 42px;
-                background: root.actions-enabled ? Colors.blue : #292a28;
-                border-width: 1px;
-                border-color: root.actions-enabled ? Colors.blue-line : Colors.border;
-                Text { text: root.panel-toggle-key + "  HIDE PANEL"; color: root.actions-enabled ? Colors.blue-text : Colors.dim; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: center; vertical-alignment: center; }
-                TouchArea { enabled: root.actions-enabled; clicked => { root.hide-requested(); } }
+                spacing: 6px;
+                DirectorButton { horizontal-stretch: 1; text: root.panel-toggle-key + "  HIDE PANEL"; enabled: root.actions-enabled; clicked => { root.hide-requested(); } }
+                DirectorButton { horizontal-stretch: 1; text: root.interaction-toggle-key + (root.interaction-mode ? "  RETURN TO TF2" : "  ENABLE CLICKS"); enabled: root.actions-enabled; tone: root.interaction-mode ? #34542e : Colors.blue; clicked => { root.interaction-toggle-requested(); } }
             }
             Text { height: 30px; text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
-            Caption { height: 18px; text: "TIMELINE + CARD INTERACTIVE • TF2 REMAINS DIRECTLY USABLE"; color: Colors.muted; font-size: 9px; horizontal-alignment: center; }
+            Caption { height: 18px; text: root.interaction-mode ? "DIRECTOR CLICK MODE • TF2 INPUT RELEASED" : "PRESS " + root.interaction-toggle-key + " TO RELEASE TF2 INPUT AND CLICK DIRECTOR"; color: root.interaction-mode ? Colors.green : Colors.muted; font-size: 9px; horizontal-alignment: center; }
         }
     }
 }

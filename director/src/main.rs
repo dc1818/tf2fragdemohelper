@@ -89,10 +89,15 @@ fn main() -> Result<()> {
         _ => (None, None),
     };
     let panel_toggle_key = shortcut_key("overlay_panel_toggle", "C");
+    let interaction_toggle_key = shortcut_key("overlay_interaction_toggle", "F11");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
+    strip.set_interaction_toggle_key(interaction_toggle_key.clone().into());
+    card.set_interaction_toggle_key(interaction_toggle_key.clone().into());
+    strip.set_interaction_mode(false);
+    card.set_interaction_mode(false);
     let initial_command_status = if automatic_cfg_mailbox {
         SharedString::from("CHECKING TF2 COMMAND QUEUE • CLICK AN ACTION")
     } else if direct_action_sender.is_some() {
@@ -161,10 +166,12 @@ fn main() -> Result<()> {
     strip.set_telemetry_status("WAIT".into());
 
     let panel_visible = Rc::new(Cell::new(true));
+    let interaction_mode = Rc::new(Cell::new(false));
     {
         let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let panel_visible = panel_visible.clone();
+        let interaction_mode = interaction_mode.clone();
         let demo_ready = demo_ready.clone();
         card.on_hide_requested(move || {
             if !demo_ready.get() {
@@ -173,7 +180,21 @@ fn main() -> Result<()> {
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
+            if interaction_mode.get() {
+                toggle_overlay_interaction(&strip, &card, &interaction_mode);
+            }
             set_panel_visibility(&strip, &card, &panel_visible, false);
+        });
+    }
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let interaction_mode = interaction_mode.clone();
+        card.on_interaction_toggle_requested(move || {
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            toggle_overlay_interaction(&strip, &card, &interaction_mode);
         });
     }
     {
@@ -363,6 +384,38 @@ fn main() -> Result<()> {
         });
     }
 
+    // A separate global shortcut temporarily gives the overlay normal focus so
+    // TF2 releases its captured mouse. Pressing it again returns focus to TF2.
+    let interaction_hotkey_timer = Timer::default();
+    #[cfg(target_os = "windows")]
+    if let Some(virtual_key) = virtual_key_code(&interaction_toggle_key) {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let panel_visible = panel_visible.clone();
+        let interaction_mode = interaction_mode.clone();
+        let was_down = Rc::new(Cell::new(false));
+        interaction_hotkey_timer.start(
+            TimerMode::Repeated,
+            Duration::from_millis(30),
+            move || {
+                let down = global_key_is_down(virtual_key);
+                if down && !was_down.replace(down) {
+                    let (Some(strip), Some(card)) =
+                        (weak_strip.upgrade(), weak_card.upgrade())
+                    else {
+                        return;
+                    };
+                    if !panel_visible.get() {
+                        set_panel_visibility(&strip, &card, &panel_visible, true);
+                    }
+                    toggle_overlay_interaction(&strip, &card, &interaction_mode);
+                } else if !down {
+                    was_down.set(false);
+                }
+            },
+        );
+    }
+
     let direct_action_timer = Timer::default();
     if let Some(results) = direct_action_results {
         let weak_card = card.as_weak();
@@ -468,10 +521,12 @@ fn main() -> Result<()> {
                     if !demo_ready.get() {
                         return;
                     }
-                    if poll.keyframes_invalidated {
-                        clear_keyframe_snapshot(&strip, &card, &selected_keyframe);
+                    if poll.keyframes_refreshing {
+                        // Keep the last complete HLAE table visible while the next
+                        // print is still arriving. Clearing it here caused every
+                        // mutation/seek to flash an empty timeline.
                         card.set_command_status(
-                            "KEYFRAME IDS CHANGED — WAITING FOR HLAE PRINT".into(),
+                            "KEYFRAMES REFRESHING — KEEPING LAST VERIFIED MARKERS".into(),
                         );
                     }
                     if let Some(keys) = poll.keyframe_snapshot {
@@ -590,6 +645,7 @@ fn main() -> Result<()> {
     let _timer_lifetime = (
         &topmost_timer,
         &hotkey_timer,
+        &interaction_hotkey_timer,
         &direct_action_timer,
         &telemetry_timer,
     );
@@ -699,6 +755,26 @@ fn set_panel_visibility(
     }
 }
 
+fn toggle_overlay_interaction(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    state: &Cell<bool>,
+) {
+    let enabled = !state.get();
+    state.set(enabled);
+    strip.set_interaction_mode(enabled);
+    card.set_interaction_mode(enabled);
+    set_overlay_interaction_windows(strip, card, enabled);
+    card.set_command_status(
+        if enabled {
+            "DIRECTOR CLICK MODE — PRESS THE FOCUS SHORTCUT AGAIN TO RETURN TO TF2"
+        } else {
+            "TF2 FOCUS RESTORED — DIRECTOR ACTIONS READY"
+        }
+        .into(),
+    );
+}
+
 fn set_selected_keyframe(
     strip: &DirectorStripWindow,
     card: &DirectorCardWindow,
@@ -722,17 +798,6 @@ fn clear_selected_keyframe(
     state.set(None);
     strip.set_has_selected_keyframe(false);
     card.set_has_selected_keyframe(false);
-}
-
-fn clear_keyframe_snapshot(
-    strip: &DirectorStripWindow,
-    card: &DirectorCardWindow,
-    selected: &Cell<Option<(i32, i64)>>,
-) {
-    let empty = ModelRc::new(VecModel::from(Vec::<KeyframeRow>::new()));
-    strip.set_keyframes(empty.clone());
-    card.set_keyframes(empty);
-    clear_selected_keyframe(strip, card, selected);
 }
 
 fn displayed_cue_index(
@@ -1318,7 +1383,7 @@ fn configure_overlay_windows(
             // area so timeline markers can select their matching cue-card row.
             let _ = native.set_cursor_hittest(true);
             #[cfg(target_os = "windows")]
-            make_nonactivating_windows(native);
+            set_window_nonactivating(native, true);
             force_topmost(native);
         });
 
@@ -1328,7 +1393,7 @@ fn configure_overlay_windows(
             native.set_resizable(false);
             let _ = native.set_cursor_hittest(true);
             #[cfg(target_os = "windows")]
-            make_nonactivating_windows(native);
+            set_window_nonactivating(native, true);
             force_topmost(native);
         });
         refresh_overlay_dock(&strip, &card, &initial_docked_monitor, true);
@@ -1432,7 +1497,7 @@ fn force_topmost_windows(native: &winit::window::Window) {
 }
 
 #[cfg(target_os = "windows")]
-fn make_nonactivating_windows(native: &winit::window::Window) {
+fn set_window_nonactivating(native: &winit::window::Window, nonactivating: bool) {
     use std::ffi::c_void;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -1453,7 +1518,12 @@ fn make_nonactivating_windows(native: &winit::window::Window) {
     let window = handle.hwnd.get() as *mut c_void;
     unsafe {
         let styles = GetWindowLongPtrW(window, GWL_EXSTYLE);
-        SetWindowLongPtrW(window, GWL_EXSTYLE, styles | WS_EX_NOACTIVATE);
+        let updated = if nonactivating {
+            styles | WS_EX_NOACTIVATE
+        } else {
+            styles & !WS_EX_NOACTIVATE
+        };
+        SetWindowLongPtrW(window, GWL_EXSTYLE, updated);
         SetWindowPos(
             window,
             std::ptr::null_mut(),
@@ -1463,6 +1533,76 @@ fn make_nonactivating_windows(native: &winit::window::Window) {
             0,
             SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
+    }
+}
+
+fn set_overlay_interaction_windows(
+    strip: &DirectorStripWindow,
+    card: &DirectorCardWindow,
+    enabled: bool,
+) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = strip
+            .window()
+            .with_winit_window(|native| set_window_nonactivating(native, !enabled));
+        let _ = card
+            .window()
+            .with_winit_window(|native| set_window_nonactivating(native, !enabled));
+        if enabled {
+            let _ = card.window().with_winit_window(focus_overlay_window);
+        } else {
+            focus_tf2_window();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (strip, card, enabled);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn focus_overlay_window(native: &winit::window::Window) {
+    use std::ffi::c_void;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = native.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    focus_window_with_foreground_queue(handle.hwnd.get() as *mut c_void);
+}
+
+#[cfg(target_os = "windows")]
+fn focus_tf2_window() {
+    if let Some(window) = find_tf2_window_handle() {
+        focus_window_with_foreground_queue(window);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn focus_window_with_foreground_queue(window: *mut std::ffi::c_void) {
+    if window.is_null() {
+        return;
+    }
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_thread = if foreground.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, std::ptr::null_mut())
+        };
+        let current_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+        SetForegroundWindow(window);
+        SetFocus(window);
+        if attached {
+            AttachThreadInput(current_thread, foreground_thread, 0);
+        }
     }
 }
 
@@ -1521,48 +1661,58 @@ impl TickLogTail {
         self.carry = remainder.to_owned();
         let mut poll = TelemetryPoll::default();
         for line in complete.lines() {
-            if line_starts_demo_load(line) {
-                poll.demo_loading = true;
-            }
-            if line_marks_demo_ready(line) {
-                poll.demo_ready = true;
-            }
-            if let Some(update) = parse_tick_update(line, prefix) {
-                poll.tick_updates.push(update);
-            }
-            if let Some(sequence) = parse_action_ack(line) {
-                poll.action_acks.push(sequence);
-            }
-            if line.contains(DIRECTOR_POLL_READY_MARKER) {
-                poll.director_poll_ready = true;
-            }
-            if line.contains(DIRECTOR_POLL_UNAVAILABLE_MARKER) {
-                poll.director_poll_unavailable = true;
-            }
-            if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX)
-                || line.contains("passed? selected? id : tick[offset]")
-            {
-                self.keyframe_capture = Some(Vec::new());
-                continue;
-            }
-            if line.trim_end().ends_with("----") || line.contains(DIRECTOR_KEYFRAME_END_PREFIX) {
-                if let Some(snapshot) = self.keyframe_capture.take() {
-                    poll.keyframe_snapshot = Some(snapshot);
-                }
-                continue;
-            }
-            if let (Some(capture), Some(key)) =
-                (self.keyframe_capture.as_mut(), parse_campath_key(line))
-            {
-                capture.push(key);
-                continue;
-            }
-            if is_campath_identity_mutation(line) {
-                self.keyframe_capture = None;
-                poll.keyframes_invalidated = true;
-            }
+            self.consume_line(line, prefix, &mut poll);
         }
         Ok(poll)
+    }
+
+    fn consume_line(&mut self, line: &str, prefix: &str, poll: &mut TelemetryPoll) {
+        if line_starts_demo_load(line) {
+            poll.demo_loading = true;
+        }
+        if line_marks_demo_ready(line) {
+            poll.demo_ready = true;
+        }
+        if let Some(update) = parse_tick_update(line, prefix) {
+            poll.tick_updates.push(update);
+        }
+        if let Some(sequence) = parse_action_ack(line) {
+            poll.action_acks.push(sequence);
+        }
+        if line.contains(DIRECTOR_POLL_READY_MARKER) {
+            poll.director_poll_ready = true;
+        }
+        if line.contains(DIRECTOR_POLL_UNAVAILABLE_MARKER) {
+            poll.director_poll_unavailable = true;
+        }
+        if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX) {
+            self.keyframe_capture = Some(Vec::new());
+            return;
+        }
+        if line.contains(DIRECTOR_KEYFRAME_END_PREFIX) {
+            if let Some(snapshot) = self.keyframe_capture.take() {
+                poll.keyframe_snapshot = Some(snapshot);
+            }
+            return;
+        }
+        // HLAE prints a header and dashed separators before its rows. They are
+        // part of the active capture, not an empty snapshot boundary.
+        if self.keyframe_capture.is_some()
+            && (line.contains("passed? selected? id : tick[offset]")
+                || line.trim_end().ends_with("----"))
+        {
+            return;
+        }
+        if let (Some(capture), Some(key)) =
+            (self.keyframe_capture.as_mut(), parse_campath_key(line))
+        {
+            capture.push(key);
+            return;
+        }
+        if is_campath_identity_mutation(line) {
+            self.keyframe_capture = None;
+            poll.keyframes_refreshing = true;
+        }
     }
 }
 
@@ -1571,9 +1721,10 @@ fn line_starts_demo_load(line: &str) -> bool {
         return true;
     }
     let lower = line.to_ascii_lowercase();
+    // "Playing demo from ..." is also printed by demo_gototick seeks. Treating
+    // it as a reload disabled the Director forever because an ordinary seek has
+    // no matching manual-ready marker.
     lower.contains("] playdemo ")
-        || lower.contains("playing demo from ")
-        || lower.contains("demo playback finished")
 }
 
 fn line_marks_demo_ready(line: &str) -> bool {
@@ -1586,7 +1737,7 @@ struct TelemetryPoll {
     demo_ready: bool,
     tick_updates: Vec<TickUpdate>,
     keyframe_snapshot: Option<Vec<ParsedCampathKey>>,
-    keyframes_invalidated: bool,
+    keyframes_refreshing: bool,
     action_acks: Vec<u64>,
     director_poll_ready: bool,
     director_poll_unavailable: bool,
@@ -1705,19 +1856,8 @@ fn send_tf2_bound_key(key: &str) -> Result<()> {
 
     let virtual_key = virtual_key_code(key)
         .with_context(|| format!("the configured fallback key '{key}' has no Windows key code"))?;
-    let mut search = Tf2WindowSearch {
-        window: std::ptr::null_mut(),
-    };
-    unsafe {
-        EnumWindows(
-            Some(find_tf2_window),
-            &mut search as *mut Tf2WindowSearch as isize,
-        );
-    }
-    if search.window.is_null() {
-        bail!("TF2 window not found");
-    }
-    if unsafe { GetForegroundWindow() } != search.window {
+    let tf2_window = find_tf2_window_handle().context("TF2 window not found")?;
+    if unsafe { GetForegroundWindow() } != tf2_window {
         bail!("TF2 is not the foreground window");
     }
     let mapped = unsafe { MapVirtualKeyW(virtual_key as u32, MAPVK_VK_TO_VSC_EX) };
@@ -1767,6 +1907,20 @@ fn send_tf2_bound_key(key: &str) -> Result<()> {
         bail!("Windows did not deliver the fallback key to TF2");
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn find_tf2_window_handle() -> Option<*mut std::ffi::c_void> {
+    let mut search = Tf2WindowSearch {
+        window: std::ptr::null_mut(),
+    };
+    unsafe {
+        EnumWindows(
+            Some(find_tf2_window),
+            &mut search as *mut Tf2WindowSearch as isize,
+        );
+    }
+    (!search.window.is_null()).then_some(search.window)
 }
 
 #[cfg(target_os = "windows")]
@@ -1911,6 +2065,7 @@ unsafe extern "system" {
     fn GetClassNameW(window: *mut std::ffi::c_void, class_name: *mut u16, maximum: i32) -> i32;
     fn GetAsyncKeyState(virtual_key: i32) -> i16;
     fn GetForegroundWindow() -> *mut std::ffi::c_void;
+    fn GetWindowThreadProcessId(window: *mut std::ffi::c_void, process_id: *mut u32) -> u32;
     fn GetWindowLongPtrW(window: *mut std::ffi::c_void, index: i32) -> isize;
     fn GetWindowTextW(window: *mut std::ffi::c_void, title: *mut u16, maximum: i32) -> i32;
     fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
@@ -1925,11 +2080,15 @@ unsafe extern "system" {
         flags: u32,
     ) -> i32;
     fn SetWindowLongPtrW(window: *mut std::ffi::c_void, index: i32, value: isize) -> isize;
+    fn SetForegroundWindow(window: *mut std::ffi::c_void) -> i32;
+    fn SetFocus(window: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn AttachThreadInput(thread: u32, attach_to: u32, attach: i32) -> i32;
 }
 
 #[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn GetCurrentThreadId() -> u32;
     fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
 }
 
@@ -1991,8 +2150,14 @@ mod tests {
         assert!(line_starts_demo_load(
             "08/30 12:30:22 ] playdemo demos/test.dem"
         ));
-        assert!(line_starts_demo_load(
+        assert!(!line_starts_demo_load(
             "08/30 12:30:22 Playing demo from demos/test.dem."
+        ));
+        assert!(!line_starts_demo_load(
+            "08/30 12:30:22 ] demo_gototick 12345 0 1"
+        ));
+        assert!(!line_starts_demo_load(
+            "08/30 12:30:22 Demo playback finished."
         ));
         assert!(!line_marks_demo_ready("Current tick: 12000"));
         assert!(line_marks_demo_ready(
@@ -2019,6 +2184,59 @@ mod tests {
             })
         );
         assert_eq!(parse_campath_tick("12345+10"), Some(12_355));
+    }
+
+    #[test]
+    fn incomplete_hlae_print_never_publishes_an_empty_keyframe_snapshot() {
+        let mut tail = TickLogTail::new(PathBuf::new());
+
+        let mut mutation = TelemetryPoll::default();
+        tail.consume_line(
+            "08/30 12:30:22 ] mirv_campath add",
+            "TF2FRAG_DIRECTOR_TICK",
+            &mut mutation,
+        );
+        assert!(mutation.keyframes_refreshing);
+        assert!(mutation.keyframe_snapshot.is_none());
+
+        let mut partial = TelemetryPoll::default();
+        for line in [
+            DIRECTOR_KEYFRAME_BEGIN_PREFIX,
+            "passed? selected? id : tick[offset] , time [s]",
+            "----------------------------------------------------",
+            "Y n 0 : 12000 , 179.1",
+        ] {
+            tail.consume_line(line, "TF2FRAG_DIRECTOR_TICK", &mut partial);
+        }
+        assert!(partial.keyframe_snapshot.is_none());
+
+        let mut completed = TelemetryPoll::default();
+        tail.consume_line(
+            "Y n 1 : 12100 , 180.6",
+            "TF2FRAG_DIRECTOR_TICK",
+            &mut completed,
+        );
+        assert!(completed.keyframe_snapshot.is_none());
+        tail.consume_line(
+            DIRECTOR_KEYFRAME_END_PREFIX,
+            "TF2FRAG_DIRECTOR_TICK",
+            &mut completed,
+        );
+        assert_eq!(
+            completed.keyframe_snapshot,
+            Some(vec![
+                ParsedCampathKey {
+                    id: 0,
+                    tick: 12_000,
+                    selected: false,
+                },
+                ParsedCampathKey {
+                    id: 1,
+                    tick: 12_100,
+                    selected: false,
+                },
+            ])
+        );
     }
 
     #[test]

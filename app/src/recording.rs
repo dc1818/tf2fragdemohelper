@@ -3320,7 +3320,7 @@ fn manual_seek_targets(target_tick: i64) -> Vec<i64> {
     targets
 }
 
-fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
+fn manual_hlae_vdm_text(_candidate: &Candidate, target_tick: i64) -> String {
     let target_tick = target_tick.max(0);
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
@@ -3330,7 +3330,7 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
         add_vdm_action(
             &mut lines,
             &mut action,
-            "SkipAhead",
+            "PlayCommands",
             &format!(
                 "TF2 Frag Demo Helper safe seek {}/{}",
                 index + 1,
@@ -3341,11 +3341,26 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
             } else {
                 previous_target + 1
             },
-            Some(*seek_target),
-            "",
+            None,
+            &format!("tf2frag_manual_seek_{:03}", index + 1),
         );
         previous_target = *seek_target;
     }
+    add_vdm_action(
+        &mut lines,
+        &mut action,
+        "PlayCommands",
+        "Focus candidate and pause after safe seek",
+        target_tick + 1,
+        None,
+        "tf2frag_manual_ready",
+    );
+    lines.push("}".into());
+    lines.join("\n")
+}
+
+fn manual_seek_control_cfg(candidate: &Candidate, target_tick: i64) -> Vec<String> {
+    let targets = manual_seek_targets(target_tick);
     let focus = if candidate_needs_spectator_focus(candidate) {
         format!(
             "spec_autodirector 0; spec_player #{}; spec_mode 4; ",
@@ -3354,19 +3369,43 @@ fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
     } else {
         String::new()
     };
-    add_vdm_action(
-        &mut lines,
-        &mut action,
-        "PlayCommands",
-        "Focus candidate and pause after safe seek",
-        target_tick + 1,
-        None,
-        &format!(
-            "demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0; mirv_cmd enabled 1; tf2frag_manual_sync_keyframes; tf2frag_director_wait_probe"
-        ),
+    let mut lines = vec!["alias tf2frag_manual_seek_noop \"\"".into()];
+    for (index, target) in targets.iter().enumerate() {
+        let number = index + 1;
+        lines.push(format!(
+            "alias tf2frag_manual_seek_{number:03}_do \"alias tf2frag_manual_seek_{number:03} tf2frag_manual_seek_noop; demo_gototick {target}\""
+        ));
+        lines.push(format!(
+            "alias tf2frag_manual_seek_{number:03} tf2frag_manual_seek_noop"
+        ));
+    }
+    lines.push(format!(
+        "alias tf2frag_manual_ready_do \"alias tf2frag_manual_ready tf2frag_manual_seek_noop; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; {focus}thirdperson; r_drawviewmodel 0; mirv_cmd enabled 1; tf2frag_manual_sync_keyframes; tf2frag_director_wait_probe\""
+    ));
+    lines.push("alias tf2frag_manual_ready tf2frag_manual_seek_noop".into());
+    for index in 0..targets.len() {
+        let number = index + 1;
+        let next = if number < targets.len() {
+            format!("tf2frag_manual_seek_arm_{:03}", number + 1)
+        } else {
+            "tf2frag_manual_seek_arm_ready".into()
+        };
+        lines.push(format!(
+            "alias tf2frag_manual_seek_arm_{number:03} \"alias tf2frag_manual_seek_{number:03} tf2frag_manual_seek_{number:03}_do; {next}\""
+        ));
+    }
+    lines.push(
+        "alias tf2frag_manual_seek_arm_ready \"alias tf2frag_manual_ready tf2frag_manual_ready_do\""
+            .into(),
     );
-    lines.push("}".into());
-    lines.join("\n")
+    let first = if targets.is_empty() {
+        "tf2frag_manual_seek_arm_ready".into()
+    } else {
+        "tf2frag_manual_seek_arm_001".into()
+    };
+    lines.push(format!("alias tf2frag_manual_seek_arm {first}"));
+    lines.push("tf2frag_manual_seek_arm".into());
+    lines
 }
 
 fn manual_hotkey_cfg(
@@ -3411,8 +3450,9 @@ fn manual_hotkey_cfg(
             shortcuts.print_keyframes, shortcuts.save_campath,
             shortcuts.execute_director_action,
         ),
-        format!("alias tf2frag_manual_clip_start \"demo_pause; mirv_input end; mirv_campath enabled 0; mirv_campath draw enabled 0; mirv_cmd enabled 0; alias tf2frag_director_poll tf2frag_director_poll_stop; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}; playdemo {staged_demo}\""),
+        format!("alias tf2frag_manual_clip_start \"demo_pause; mirv_input end; mirv_campath enabled 0; mirv_campath draw enabled 0; mirv_cmd enabled 0; alias tf2frag_director_poll tf2frag_director_poll_stop; tf2frag_manual_seek_arm; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}; playdemo {staged_demo}\""),
     ];
+    lines.extend(manual_seek_control_cfg(candidate, target_tick));
     for slot in 0..DIRECTOR_ACTION_SLOTS {
         lines.push(format!(
             "alias tf2frag_director_execute_{slot:02} \"exec {DIRECTOR_ACTION_FILE_PREFIX}_{slot:02}\""
@@ -6011,7 +6051,12 @@ mod recording_tests {
         assert!(cfg.contains(
             "playdemo demos/tf2fragdemohelper_manual/session/candidate.dem"
         ));
-        assert!(!cfg.contains("demo_gototick 500"));
+        assert!(cfg.contains(
+            "alias tf2frag_manual_seek_001_do \"alias tf2frag_manual_seek_001 tf2frag_manual_seek_noop; demo_gototick 500\""
+        ));
+        assert!(cfg.contains(
+            "tf2frag_manual_seek_arm; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET 500"
+        ));
         assert!(cfg.contains("demo_gototick 833 0 1"));
         assert!(cfg.contains("TF2FRAG_DIRECTOR_TICK 833"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 FRAG_TICK 900 CUE_TICK 833"));
@@ -6231,19 +6276,34 @@ mod recording_tests {
     #[test]
     fn manual_hlae_vdm_pauses_after_seeking_to_selected_start() {
         let vdm = manual_hlae_vdm_text(&Candidate::default(), 500);
-        assert!(vdm.contains("skiptotick \"500\""));
+        assert!(!vdm.contains("skiptotick"));
+        assert!(vdm.contains("commands \"tf2frag_manual_seek_001\""));
         assert!(vdm.contains("starttick \"501\""));
-        assert!(vdm.contains(
-            "commands \"demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0; mirv_cmd enabled 1; tf2frag_manual_sync_keyframes; tf2frag_director_wait_probe\""
-        ));
-        assert!(vdm.contains("mirv_cmd enabled 1"));
+        assert!(vdm.contains("commands \"tf2frag_manual_ready\""));
+        assert!(!vdm.contains("demo_pause"));
+        assert!(!vdm.contains("mirv_cmd"));
         assert!(!vdm.contains("TF2FRAG_DIRECTOR_TICK"));
         assert_eq!(vdm.matches("TF2 MIRV Director live tick").count(), 0);
         assert!(!vdm.contains("exec tf2fragdemohelper_manual"));
-        assert!(vdm.contains("tf2frag_director_wait_probe"));
-        let pause = vdm.find("demo_pause").expect("pause command");
-        let seek = vdm.find("skiptotick \"500\"").expect("safe seek command");
-        assert!(pause > seek);
+
+        let cfg = manual_hotkey_cfg(
+            &Candidate::default(),
+            500,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+            &AppSettings::default(),
+        );
+        assert!(cfg.contains(
+            "alias tf2frag_manual_seek_001_do \"alias tf2frag_manual_seek_001 tf2frag_manual_seek_noop; demo_gototick 500\""
+        ));
+        assert!(cfg.contains(
+            "alias tf2frag_manual_ready_do \"alias tf2frag_manual_ready tf2frag_manual_seek_noop; demo_pause; echo TF2FRAG_MANUAL_PAUSED_AT_START; thirdperson; r_drawviewmodel 0; mirv_cmd enabled 1; tf2frag_manual_sync_keyframes; tf2frag_director_wait_probe\""
+        ));
+        assert!(cfg.contains(
+            "alias tf2frag_manual_seek_arm_001 \"alias tf2frag_manual_seek_001 tf2frag_manual_seek_001_do; tf2frag_manual_seek_arm_ready\""
+        ));
+        assert!(cfg.contains(
+            "alias tf2frag_manual_seek_arm_ready \"alias tf2frag_manual_ready tf2frag_manual_ready_do\""
+        ));
     }
 
     #[test]
@@ -6255,10 +6315,22 @@ mod recording_tests {
         assert_eq!(manual_seek_targets(15_000), vec![15_000]);
         assert!(manual_seek_targets(0).is_empty());
 
-        let vdm = manual_hlae_vdm_text(&Candidate::default(), 46_001);
-        for tick in [15_000, 30_000, 45_000, 46_001] {
-            assert!(vdm.contains(&format!("skiptotick \"{tick}\"")));
+        let candidate = Candidate::default();
+        let vdm = manual_hlae_vdm_text(&candidate, 46_001);
+        let cfg = manual_hotkey_cfg(
+            &candidate,
+            46_001,
+            "demos/tf2fragdemohelper_manual/session/candidate.dem",
+            &AppSettings::default(),
+        );
+        for (index, tick) in [15_000, 30_000, 45_000, 46_001].iter().enumerate() {
+            assert!(vdm.contains(&format!(
+                "commands \"tf2frag_manual_seek_{:03}\"",
+                index + 1
+            )));
+            assert!(cfg.contains(&format!("demo_gototick {tick}")));
         }
+        assert!(!vdm.contains("skiptotick"));
         assert!(vdm.contains("starttick \"46002\""));
     }
 

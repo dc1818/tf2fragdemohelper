@@ -375,6 +375,23 @@ fn main() -> Result<()> {
             }
         });
     }
+    {
+        let weak_card = card.as_weak();
+        let action_queue = action_queue.clone();
+        let direct_action_sender = direct_action_sender.clone();
+        card.on_quit_tf2_requested(move || {
+            let Some(card) = weak_card.upgrade() else {
+                return;
+            };
+            dispatch_director_action(
+                direct_action_sender.as_ref(),
+                &action_queue,
+                &card,
+                "quit".into(),
+                "CLOSE TF2".into(),
+            );
+        });
+    }
 
     card.show()?;
     let docked_monitor = configure_overlay_windows(&strip, &card);

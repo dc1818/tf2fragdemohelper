@@ -300,6 +300,7 @@ export component DirectorCardWindow inherits Window {
     callback hide-requested();
     callback interaction-toggle-requested();
     callback frag-goto-requested();
+    callback quit-tf2-requested();
     callback keyframe-activated(int, int);
     callback keyframe-action-requested(int, string, string, string);
     callback dismiss-selection-requested();
@@ -448,6 +449,13 @@ export component DirectorCardWindow inherits Window {
                 spacing: 6px;
                 DirectorButton { horizontal-stretch: 1; text: root.panel-toggle-key + "  HIDE PANEL"; enabled: root.actions-enabled; clicked => { root.hide-requested(); } }
                 DirectorButton { horizontal-stretch: 1; text: root.interaction-toggle-key + (root.interaction-mode ? "  RETURN TO TF2" : "  ENABLE CLICKS"); enabled: root.actions-enabled; tone: root.interaction-mode ? #34542e : Colors.blue; clicked => { root.interaction-toggle-requested(); } }
+            }
+            // Keep quit in a dedicated full-width row so it never competes
+            // with the two navigation/focus buttons at narrow panel heights.
+            DirectorButton {
+                text: "CLOSE TF2";
+                tone: #652f27;
+                clicked => { root.quit-tf2-requested(); }
             }
             Text { height: 30px; text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
             Caption { height: 18px; text: root.interaction-mode ? "DIRECTOR CLICK MODE • TF2 INPUT RELEASED" : "PRESS " + root.interaction-toggle-key + " TO RELEASE TF2 INPUT AND CLICK DIRECTOR"; color: root.interaction-mode ? Colors.green : Colors.muted; font-size: 9px; horizontal-alignment: center; }

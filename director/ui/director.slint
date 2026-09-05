@@ -1,0 +1,472 @@
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import "../../app/ui/assets/fonts/TF2Build.ttf";
+import "../../app/ui/assets/fonts/RobotoCondensed-Variable.ttf";
+import "../../app/ui/assets/fonts/BebasNeue-Regular.ttf";
+
+export struct CueRow {
+    tick: int,
+    position: float,
+    label: string,
+    tags: string,
+    victims: string,
+}
+
+export struct ShortcutRow {
+    key: string,
+    label: string,
+}
+
+export struct KeyframeRow {
+    id: int,
+    tick: int,
+    position: float,
+}
+
+global Colors {
+    in property <brush> app: #181918;
+    in property <brush> header: #121412;
+    in property <brush> panel: #24231f;
+    in property <brush> panel-alt: #1d1d1b;
+    in property <brush> border: #514b40;
+    in property <brush> cream: #decba9;
+    in property <brush> muted: #a69882;
+    in property <brush> dim: #756d60;
+    in property <brush> blue: #2a4558;
+    in property <brush> blue-line: #4f9bc5;
+    in property <brush> blue-text: #8ab3cd;
+    in property <brush> gold: #c36f25;
+    in property <brush> green: #8fbd60;
+}
+
+component Caption inherits Text {
+    color: Colors.muted;
+    font-family: "Roboto Condensed";
+    font-size: 11px;
+    vertical-alignment: center;
+}
+
+component ShortcutCell inherits Rectangle {
+    in property <string> key-name;
+    in property <string> action-name;
+    in property <length> key-width: 42px;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback activated();
+    height: 26px;
+    background: !root.enabled ? #20211f : (root.selected ? #273b25 : Colors.panel-alt);
+    border-width: 1px;
+    border-color: !root.enabled ? Colors.border : (root.selected ? Colors.green : #343633);
+
+    HorizontalLayout {
+        spacing: 7px;
+        Rectangle {
+            width: root.key-width;
+            background: root.enabled ? Colors.blue : #292a28;
+            Text {
+                text: root.key-name;
+                color: root.enabled ? Colors.blue-text : Colors.dim;
+                font-family: "TF2 Build";
+                font-size: 11px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.action-name;
+            color: root.enabled ? Colors.cream : Colors.dim;
+            font-family: "Roboto Condensed";
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    TouchArea { enabled: root.enabled; clicked => { root.activated(); } }
+}
+
+component DirectorButton inherits Rectangle {
+    in property <string> text;
+    in property <brush> tone: Colors.blue;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 30px;
+    background: root.enabled ? root.tone : #292a28;
+    border-width: 1px;
+    border-color: root.enabled ? Colors.blue-line : Colors.border;
+    Text {
+        text: root.text;
+        color: root.enabled ? Colors.cream : Colors.dim;
+        font-family: "TF2 Build";
+        font-size: 10px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+// Option C: this narrow timeline remains visible even when the cue card is hidden.
+export component DirectorStripWindow inherits Window {
+    title: "TF2 MIRV Director Timeline";
+    preferred-width: 1500px;
+    preferred-height: 108px;
+    min-height: 96px;
+    max-height: 120px;
+    background: Colors.header;
+
+    in property <int> start-tick;
+    in property <int> end-tick;
+    in property <int> current-tick;
+    in property <float> current-position;
+    in property <int> next-frag-tick;
+    in property <bool> telemetry-active;
+    in property <string> telemetry-status: "WAIT";
+    in property <bool> panel-visible: true;
+    in property <bool> compact-layout;
+    in property <bool> narrow-layout;
+    in property <bool> actions-enabled: true;
+    in property <string> panel-toggle-key;
+    in property <string> interaction-toggle-key;
+    in property <bool> interaction-mode;
+    in property <[CueRow]> cues;
+    in property <[KeyframeRow]> keyframes;
+    in property <bool> has-selected-keyframe;
+    in property <int> selected-keyframe-id;
+    in property <int> selected-cue-index: -1;
+    callback keyframe-activated(int, int);
+    callback cue-activated(int);
+    callback dismiss-selection-requested();
+
+    Rectangle {
+        background: Colors.header;
+        border-width: 1px;
+        border-color: Colors.border;
+        TouchArea { clicked => { root.dismiss-selection-requested(); } }
+
+        HorizontalLayout {
+            padding-left: root.narrow-layout ? 6px : 14px;
+            padding-right: root.narrow-layout ? 6px : 14px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            spacing: root.narrow-layout ? 6px : 18px;
+
+            HorizontalLayout {
+                width: root.narrow-layout ? 140px : (root.compact-layout ? 210px : 300px);
+                spacing: 8px;
+                Text {
+                    text: "TF2 MIRV DIRECTOR";
+                    color: Colors.cream;
+                    font-family: "Bebas Neue";
+                    font-size: root.narrow-layout ? 15px : (root.compact-layout ? 19px : 25px);
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if !root.compact-layout : Rectangle {
+                    width: 72px;
+                    height: 25px;
+                    border-width: 1px;
+                    border-color: Colors.blue-line;
+                    background: Colors.blue;
+                    Text { text: "TOPMOST"; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 25px;
+                    border-width: 1px;
+                    border-color: root.telemetry-active ? Colors.green : Colors.border;
+                    background: root.telemetry-active ? #243421 : Colors.panel-alt;
+                    Text { text: root.telemetry-status; color: root.telemetry-active ? Colors.green : Colors.muted; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 3px;
+                HorizontalLayout {
+                    height: 24px;
+                    Caption { text: "CLIP  " + root.start-tick; color: Colors.cream; }
+                    Rectangle { horizontal-stretch: 1; background: #00000000; }
+                    Text { text: "CURRENT TICK  " + root.current-tick; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 13px; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; background: #00000000; }
+                    Caption { text: "OUT  " + root.end-tick; color: Colors.cream; horizontal-alignment: right; }
+                }
+                Rectangle {
+                    height: 48px;
+                    background: Colors.panel-alt;
+                    border-width: 1px;
+                    border-color: #343633;
+                    Rectangle { x: 12px; y: 28px; width: parent.width - 24px; height: 3px; background: Colors.dim; }
+                    Rectangle { x: 12px; y: 28px; width: root.current-position * (parent.width - 24px); height: 3px; background: Colors.blue-line; }
+                    for keyframe in root.keyframes : Rectangle {
+                        background: #00000000;
+                        Rectangle {
+                            x: 12px + keyframe.position * (parent.width - 24px) - 2px;
+                            y: 13px;
+                            width: 5px;
+                            height: 18px;
+                            background: root.has-selected-keyframe && root.selected-keyframe-id == keyframe.id ? #c7f59a : Colors.green;
+                        }
+                        Text {
+                            x: Math.min(parent.width - 94px, Math.max(0px, 12px + keyframe.position * (parent.width - 24px) - 47px));
+                            y: 1px;
+                            width: 94px;
+                            text: "" + keyframe.id;
+                            color: Colors.green;
+                            font-family: "TF2 Build";
+                            font-size: 8px;
+                            horizontal-alignment: center;
+                        }
+                        TouchArea {
+                            enabled: root.actions-enabled;
+                            x: Math.min(parent.width - 24px, Math.max(0px, 12px + keyframe.position * (parent.width - 24px) - 12px));
+                            y: 0px;
+                            width: 24px;
+                            height: 28px;
+                            clicked => { root.keyframe-activated(keyframe.id, keyframe.tick); }
+                        }
+                    }
+                    for cue[index] in root.cues : Rectangle {
+                        x: 12px + cue.position * (parent.width - 24px) - 3px;
+                        y: 28px;
+                        width: 7px;
+                        height: 13px;
+                        background: root.selected-cue-index == index ? #ffad52 : Colors.gold;
+                        border-width: root.selected-cue-index == index ? 1px : 0px;
+                        border-color: Colors.cream;
+                        TouchArea {
+                            enabled: root.actions-enabled;
+                            x: -5px;
+                            y: -4px;
+                            width: 17px;
+                            height: 21px;
+                            clicked => { root.cue-activated(index); }
+                        }
+                    }
+                    Rectangle {
+                        x: 12px + root.current-position * (parent.width - 24px) - 2px;
+                        y: 4px;
+                        width: 4px;
+                        height: 40px;
+                        background: Colors.blue-line;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                width: root.narrow-layout ? 100px : (root.compact-layout ? 130px : 190px);
+                alignment: center;
+                Text { text: root.next-frag-tick > 0 ? "NEXT FRAG  " + root.next-frag-tick : "CLIP OUTRO"; color: Colors.gold; font-family: "TF2 Build"; font-size: 12px; horizontal-alignment: right; overflow: elide; }
+                Caption { text: root.panel-toggle-key + (root.panel-visible ? "  HIDE PANEL" : "  SHOW PANEL"); color: Colors.blue-text; horizontal-alignment: right; overflow: elide; }
+                Caption { text: root.interaction-mode ? root.interaction-toggle-key + "  RETURN TO TF2" : root.interaction-toggle-key + "  ENABLE CLICKS"; font-size: 9px; horizontal-alignment: right; overflow: elide; }
+            }
+        }
+    }
+}
+
+// Only this card accepts mouse input. The rest of TF2 remains directly usable.
+export component DirectorCardWindow inherits Window {
+    title: "TF2 MIRV Director Cue Card";
+    preferred-width: 360px;
+    preferred-height: 650px;
+    min-width: 300px;
+    min-height: 240px;
+    background: Colors.app;
+
+    in property <int> current-tick;
+    in property <int> next-frag-number;
+    in property <int> next-frag-tick;
+    in property <string> next-frag-victims;
+    in property <string> next-frag-tags;
+    in property <string> panel-toggle-key;
+    in property <string> interaction-toggle-key;
+    in property <string> load-campath-key;
+    in property <bool> interaction-mode;
+    in property <string> record-order;
+    in property <[ShortcutRow]> shortcuts;
+    in property <[KeyframeRow]> keyframes;
+    in property <string> frag-heading: "NEXT FRAG";
+    in property <bool> highlighted-frag;
+    in property <bool> has-selected-keyframe;
+    in property <int> selected-keyframe-id;
+    in property <int> selected-keyframe-tick;
+    in property <bool> actions-enabled: true;
+    in-out property <string> keyframe-action: "Edit keyframe";
+    in-out property <string> keyframe-setting: "FOV — Set value";
+    in-out property <string> keyframe-value;
+    in-out property <string> keyframe-choice: "Default";
+    private property <bool> editing-keyframe: root.keyframe-action == "Edit keyframe";
+    private property <bool> range-action: root.keyframe-action == "Select range through ID" || root.keyframe-action == "Add range through ID";
+    private property <bool> interpolation-setting: root.keyframe-setting == "Interpolation — Position" || root.keyframe-setting == "Interpolation — Rotation" || root.keyframe-setting == "Interpolation — FOV";
+    private property <bool> setting-needs-value: root.keyframe-setting == "Time — Shift by seconds" || root.keyframe-setting == "Time — Set absolute seconds" || root.keyframe-setting == "Position — Set X Y Z" || root.keyframe-setting == "Angles — Set Pitch Yaw Roll" || root.keyframe-setting == "FOV — Set value" || root.keyframe-setting == "Rotate — Pitch Yaw Roll" || root.keyframe-setting == "Path offset — Add seconds" || root.keyframe-setting == "Duration — Set seconds";
+    in property <string> command-status: "DIRECTOR COMMAND QUEUE READY";
+    callback hide-requested();
+    callback interaction-toggle-requested();
+    callback frag-goto-requested();
+    callback load-campath-requested();
+    callback quit-tf2-requested();
+    callback keyframe-activated(int, int);
+    callback keyframe-action-requested(int, string, string, string);
+    callback dismiss-selection-requested();
+
+    changed keyframe-setting => {
+        if root.keyframe-setting == "Interpolation — Rotation" {
+            root.keyframe-choice = "sLinear";
+        } else if root.interpolation-setting {
+            root.keyframe-choice = "Linear";
+        }
+    }
+
+    Rectangle {
+        background: Colors.app;
+        border-width: 1px;
+        border-color: Colors.border;
+        TouchArea { clicked => { root.dismiss-selection-requested(); } }
+        VerticalLayout {
+            padding: 10px;
+            spacing: 7px;
+
+            HorizontalLayout {
+                height: 28px;
+                Text { text: root.frag-heading; color: Colors.cream; font-family: "TF2 Build"; font-size: 16px; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; background: #00000000; }
+                Caption { text: "LIVE " + root.current-tick; color: Colors.blue-text; horizontal-alignment: right; }
+            }
+
+            Rectangle {
+                height: 146px;
+                background: Colors.panel;
+                border-width: 1px;
+                border-color: #343633;
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 7px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Rectangle {
+                            width: 66px;
+                            height: 66px;
+                            background: Colors.blue;
+                            border-width: 1px;
+                            border-color: Colors.blue-line;
+                            Text { text: root.next-frag-number; color: Colors.cream; font-family: "TF2 Build"; font-size: 30px; horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                        VerticalLayout {
+                            spacing: 4px;
+                            Text { text: root.next-frag-tick > 0 ? "TICK  " + root.next-frag-tick : "OUTRO"; color: Colors.cream; font-family: "TF2 Build"; font-size: 12px; }
+                            Caption { text: root.next-frag-victims == "" ? "VICTIM: UNKNOWN" : "VICTIM: " + root.next-frag-victims; color: Colors.cream; overflow: elide; }
+                            Caption { text: root.next-frag-tags == "" ? "TAGS: NONE" : "TAGS: " + root.next-frag-tags; color: Colors.cream; wrap: word-wrap; }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        DirectorButton { text: "GO TO FRAG (-1 SEC)"; enabled: root.actions-enabled && root.next-frag-tick > 0; clicked => { root.frag-goto-requested(); } }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                height: 20px;
+                Text { text: "CAMPATH + SHORTCUTS"; color: Colors.cream; font-family: "TF2 Build"; font-size: 12px; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; background: #00000000; }
+                Caption { text: "ARROWS = CAMERA"; color: Colors.blue-text; font-size: 9px; }
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                vertical-scrollbar-policy: as-needed;
+                horizontal-scrollbar-policy: always-off;
+                VerticalLayout {
+                    spacing: 2px;
+                    if root.has-selected-keyframe : Rectangle {
+                        height: root.editing-keyframe ? 235px : (root.range-action ? 190px : 155px);
+                        background: Colors.panel;
+                        border-width: 1px;
+                        border-color: Colors.green;
+                        // Blank space inside the editor keeps it open. Controls
+                        // are layered above this area and remain interactive.
+                        TouchArea { }
+                        VerticalLayout {
+                            padding: 8px;
+                            spacing: 5px;
+                            Text { height: 20px; text: "SELECTED HLAE KEYFRAME  " + root.selected-keyframe-id + "  •  TICK  " + root.selected-keyframe-tick; color: Colors.green; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; overflow: elide; }
+                            ComboBox {
+                                height: 32px;
+                                enabled: root.actions-enabled;
+                                model: [
+                                    "Edit keyframe", "Go to keyframe", "Go to 1 sec before", "Delete keyframe",
+                                    "Select only", "Add to selection", "Select range through ID", "Add range through ID",
+                                    "Select all", "Deselect all", "Invert selection"
+                                ];
+                                current-value <=> root.keyframe-action;
+                            }
+                            if root.editing-keyframe : ComboBox {
+                                height: 32px;
+                                enabled: root.actions-enabled;
+                                model: [
+                                    "Time — Move to current", "Time — Shift by seconds", "Time — Set absolute seconds",
+                                    "Position — Current camera", "Position — Set X Y Z",
+                                    "Angles — Current camera", "Angles — Set Pitch Yaw Roll",
+                                    "FOV — Current camera", "FOV — Set value", "Rotate — Pitch Yaw Roll",
+                                    "Anchor — Current camera", "Path offset — Align keyframe to current",
+                                    "Path offset — Add seconds", "Duration — Set seconds",
+                                    "Interpolation — Position", "Interpolation — Rotation", "Interpolation — FOV"
+                                ];
+                                current-value <=> root.keyframe-setting;
+                            }
+                            if root.editing-keyframe && root.setting-needs-value : LineEdit {
+                                height: 30px;
+                                enabled: root.actions-enabled;
+                                text <=> root.keyframe-value;
+                                placeholder-text: root.keyframe-setting == "Position — Set X Y Z" ? "X Y Z (use * to preserve an axis)" : (root.keyframe-setting == "Angles — Set Pitch Yaw Roll" || root.keyframe-setting == "Rotate — Pitch Yaw Roll" ? "Pitch Yaw Roll" : (root.keyframe-setting == "FOV — Set value" ? "FOV from 1 to 179" : "Seconds"));
+                            }
+                            if root.range-action : LineEdit { height: 30px; enabled: root.actions-enabled; text <=> root.keyframe-value; placeholder-text: "Ending HLAE keyframe ID"; }
+                            if root.editing-keyframe && root.keyframe-setting == "Interpolation — Position" : ComboBox { height: 30px; enabled: root.actions-enabled; model: ["Default", "Linear", "Cubic"]; current-value <=> root.keyframe-choice; }
+                            if root.editing-keyframe && root.keyframe-setting == "Interpolation — Rotation" : ComboBox { height: 30px; enabled: root.actions-enabled; model: ["Default", "sLinear", "sCubic"]; current-value <=> root.keyframe-choice; }
+                            if root.editing-keyframe && root.keyframe-setting == "Interpolation — FOV" : ComboBox { height: 30px; enabled: root.actions-enabled; model: ["Default", "Linear", "Cubic"]; current-value <=> root.keyframe-choice; }
+                            Caption { height: 28px; text: "Single-key edits select this exact HLAE ID first. IDs refresh from mirv_campath print after execution."; color: Colors.muted; font-size: 9px; wrap: word-wrap; }
+                            DirectorButton { text: "EXECUTE HLAE ACTION"; enabled: root.actions-enabled; tone: #34542e; clicked => { root.keyframe-action-requested(root.selected-keyframe-id, root.keyframe-action, root.keyframe-setting, root.interpolation-setting ? root.keyframe-choice : root.keyframe-value); } }
+                        }
+                    }
+                    Caption { height: 22px; text: root.command-status; color: Colors.blue-text; font-size: 9px; wrap: word-wrap; }
+                    Text { height: 20px; text: "HLAE KEYFRAME ID  →  DEMO TICK"; color: Colors.green; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; }
+                    for keyframe in root.keyframes : ShortcutCell {
+                        key-name: "" + keyframe.id;
+                        key-width: 100px;
+                        action-name: "TICK  " + keyframe.tick;
+                        selected: root.has-selected-keyframe && root.selected-keyframe-id == keyframe.id;
+                        enabled: root.actions-enabled;
+                        activated => { root.keyframe-activated(keyframe.id, keyframe.tick); }
+                    }
+                    Text { height: 20px; text: "MIRV SHORTCUTS"; color: Colors.cream; font-family: "TF2 Build"; font-size: 10px; vertical-alignment: center; }
+                    for shortcut in root.shortcuts : ShortcutCell {
+                        key-name: shortcut.key;
+                        action-name: shortcut.label;
+                        enabled: root.actions-enabled;
+                        activated => { root.dismiss-selection-requested(); }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                height: 42px;
+                spacing: 6px;
+                DirectorButton { horizontal-stretch: 1; text: root.panel-toggle-key + "  HIDE PANEL"; enabled: root.actions-enabled; clicked => { root.hide-requested(); } }
+                DirectorButton { horizontal-stretch: 1; text: root.interaction-toggle-key + (root.interaction-mode ? "  RETURN TO TF2" : "  ENABLE CLICKS"); enabled: root.actions-enabled; tone: root.interaction-mode ? #34542e : Colors.blue; clicked => { root.interaction-toggle-requested(); } }
+            }
+            // Keep file and quit actions in dedicated full-width rows so they
+            // never compete with navigation/focus buttons at narrow heights.
+            DirectorButton {
+                text: root.load-campath-key + "  LOAD CAMPATH XML";
+                enabled: root.actions-enabled;
+                tone: #34542e;
+                clicked => { root.load-campath-requested(); }
+            }
+            DirectorButton {
+                text: "CLOSE TF2";
+                tone: #652f27;
+                clicked => { root.quit-tf2-requested(); }
+            }
+            Text { height: 30px; text: root.record-order; color: Colors.blue-text; font-family: "TF2 Build"; font-size: 9px; horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap; }
+            Caption { height: 18px; text: root.interaction-mode ? "DIRECTOR CLICK MODE • TF2 INPUT RELEASED" : "PRESS " + root.interaction-toggle-key + " TO RELEASE TF2 INPUT AND CLICK DIRECTOR"; color: root.interaction-mode ? Colors.green : Colors.muted; font-size: 9px; horizontal-alignment: center; }
+        }
+    }
+}

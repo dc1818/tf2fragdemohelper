@@ -243,6 +243,10 @@ pub struct AppSettings {
     pub hlae_executable: PathBuf,
     pub ffmpeg_executable: PathBuf,
     pub recording_output_directory: PathBuf,
+    /// Additional safe command-line switches used only for Helper-launched
+    /// manual HLAE sessions. Session ownership, offline safety, demo loading,
+    /// and the automatic TF2 CFG polling queue remain managed by the Helper.
+    pub manual_hlae_launch_options: String,
     pub performance_profile: String,
     pub lead_seconds: u32,
     pub outro_seconds: u32,
@@ -296,10 +300,17 @@ pub struct MirvShortcuts {
     pub enter_camera: String,
     pub add_keyframe: String,
     pub play_campath: String,
+    pub draw_campath: String,
     pub start_recording: String,
     pub stop_recording: String,
     pub print_keyframes: String,
     pub save_campath: String,
+    pub load_campath: String,
+    pub execute_director_action: String,
+    pub overlay_panel_toggle: String,
+    pub overlay_interaction_toggle: String,
+    #[serde(default)]
+    pub overlay_panel_toggle_default_version: u8,
 }
 
 impl Default for MirvShortcuts {
@@ -315,10 +326,16 @@ impl Default for MirvShortcuts {
             enter_camera: "6".into(),
             add_keyframe: "7".into(),
             play_campath: "8".into(),
+            draw_campath: "/".into(),
             start_recording: "9".into(),
             stop_recording: "0".into(),
             print_keyframes: "-".into(),
             save_campath: "=".into(),
+            load_campath: "F8".into(),
+            execute_director_action: "'".into(),
+            overlay_panel_toggle: "C".into(),
+            overlay_interaction_toggle: "F11".into(),
+            overlay_panel_toggle_default_version: 3,
         }
     }
 }
@@ -356,6 +373,25 @@ impl MirvShortcuts {
     }
 
     pub fn normalize(&mut self) {
+        // HOME, Y, and S were short-lived overlay defaults. Migrate only the
+        // matching default at each version so a deliberately customized key is
+        // preserved, and never re-migrate after the C default is recorded.
+        if self.overlay_panel_toggle_default_version == 0 {
+            if self.overlay_panel_toggle.eq_ignore_ascii_case("HOME") {
+                self.overlay_panel_toggle = "C".into();
+            }
+            self.overlay_panel_toggle_default_version = 3;
+        } else if self.overlay_panel_toggle_default_version == 1 {
+            if self.overlay_panel_toggle.eq_ignore_ascii_case("Y") {
+                self.overlay_panel_toggle = "C".into();
+            }
+            self.overlay_panel_toggle_default_version = 3;
+        } else if self.overlay_panel_toggle_default_version == 2 {
+            if self.overlay_panel_toggle.eq_ignore_ascii_case("S") {
+                self.overlay_panel_toggle = "C".into();
+            }
+            self.overlay_panel_toggle_default_version = 3;
+        }
         let defaults = Self::default();
         self.advance_time = Self::normalized_key(&self.advance_time, &defaults.advance_time);
         self.toggle_hud = Self::normalized_key(&self.toggle_hud, &defaults.toggle_hud);
@@ -367,17 +403,36 @@ impl MirvShortcuts {
         self.enter_camera = Self::normalized_key(&self.enter_camera, &defaults.enter_camera);
         self.add_keyframe = Self::normalized_key(&self.add_keyframe, &defaults.add_keyframe);
         self.play_campath = Self::normalized_key(&self.play_campath, &defaults.play_campath);
+        self.draw_campath = Self::normalized_key(&self.draw_campath, &defaults.draw_campath);
         self.start_recording = Self::normalized_key(&self.start_recording, &defaults.start_recording);
         self.stop_recording = Self::normalized_key(&self.stop_recording, &defaults.stop_recording);
         self.print_keyframes = Self::normalized_key(&self.print_keyframes, &defaults.print_keyframes);
         self.save_campath = Self::normalized_key(&self.save_campath, &defaults.save_campath);
+        self.load_campath = Self::normalized_key(&self.load_campath, &defaults.load_campath);
+        self.execute_director_action = Self::normalized_key(
+            &self.execute_director_action,
+            &defaults.execute_director_action,
+        );
+        self.overlay_panel_toggle = Self::normalized_key(
+            &self.overlay_panel_toggle,
+            &defaults.overlay_panel_toggle,
+        );
+        self.overlay_interaction_toggle = Self::normalized_key(
+            &self.overlay_interaction_toggle,
+            &defaults.overlay_interaction_toggle,
+        );
 
         let mut seen = BTreeSet::new();
         let keys = [
             &self.advance_time, &self.toggle_hud, &self.show_help, &self.back_one_second,
             &self.safe_restart, &self.next_kill_tick, &self.pause_resume, &self.enter_camera,
-            &self.add_keyframe, &self.play_campath, &self.start_recording, &self.stop_recording,
+            &self.add_keyframe, &self.play_campath, &self.draw_campath,
+            &self.start_recording, &self.stop_recording,
             &self.print_keyframes, &self.save_campath,
+            &self.load_campath,
+            &self.execute_director_action,
+            &self.overlay_panel_toggle,
+            &self.overlay_interaction_toggle,
         ];
         if keys.iter().any(|key| !seen.insert(key.to_ascii_lowercase())) {
             *self = defaults;
@@ -389,7 +444,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             output_directory: PathBuf::new(), item_schema: PathBuf::new(), tf2_executable: PathBuf::new(),
-            hlae_executable: PathBuf::new(), ffmpeg_executable: PathBuf::new(), recording_output_directory: PathBuf::new(), performance_profile: "High".into(),
+            hlae_executable: PathBuf::new(), ffmpeg_executable: PathBuf::new(), recording_output_directory: PathBuf::new(), manual_hlae_launch_options: String::new(), performance_profile: "High".into(),
             lead_seconds: 8, outro_seconds: 3,
             capture_fps: 120, jpg_quality: 90, recording_format: "MP4 - Standard".into(), resolution: "2560x1440".into(),
             mp4_compatibility: "DaVinci Resolve / Universal".into(), mp4_video_codec: "H.264 / libx264".into(),
@@ -577,6 +632,58 @@ mod settings_tests {
         assert_eq!(shortcuts.toggle_hud, "]");
         assert_eq!(shortcuts.show_help, "1");
         assert_eq!(shortcuts.save_campath, "=");
+        assert_eq!(shortcuts.load_campath, "F8");
+        assert_eq!(shortcuts.draw_campath, "/");
+        assert_eq!(shortcuts.execute_director_action, "'");
+        assert_eq!(shortcuts.overlay_panel_toggle, "C");
+        assert_eq!(shortcuts.overlay_interaction_toggle, "F11");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 3);
+    }
+
+    #[test]
+    fn legacy_overlay_defaults_migrate_once_to_c() {
+        let mut shortcuts: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"HOME"}"#,
+        )
+        .unwrap();
+        shortcuts.normalize();
+        assert_eq!(shortcuts.overlay_panel_toggle, "C");
+        assert_eq!(shortcuts.overlay_panel_toggle_default_version, 3);
+
+        shortcuts.overlay_panel_toggle = "HOME".into();
+        shortcuts.normalize();
+        assert_eq!(shortcuts.overlay_panel_toggle, "HOME");
+
+        let mut y_default: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"Y","overlay_panel_toggle_default_version":1}"#,
+        )
+        .unwrap();
+        y_default.normalize();
+        assert_eq!(y_default.overlay_panel_toggle, "C");
+        assert_eq!(y_default.overlay_panel_toggle_default_version, 3);
+
+        let mut s_default: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"S","overlay_panel_toggle_default_version":2}"#,
+        )
+        .unwrap();
+        s_default.normalize();
+        assert_eq!(s_default.overlay_panel_toggle, "C");
+        assert_eq!(s_default.overlay_panel_toggle_default_version, 3);
+
+        let mut custom: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"Q","overlay_panel_toggle_default_version":1}"#,
+        )
+        .unwrap();
+        custom.normalize();
+        assert_eq!(custom.overlay_panel_toggle, "Q");
+        assert_eq!(custom.overlay_panel_toggle_default_version, 3);
+
+        let mut current_custom: MirvShortcuts = serde_json::from_str(
+            r#"{"overlay_panel_toggle":"S","overlay_panel_toggle_default_version":3}"#,
+        )
+        .unwrap();
+        current_custom.normalize();
+        assert_eq!(current_custom.overlay_panel_toggle, "S");
     }
 
     #[test]

@@ -494,12 +494,17 @@ component MirvShortcutPanel inherits Rectangle {
     in-out property <string> enter-camera;
     in-out property <string> add-keyframe;
     in-out property <string> play-campath;
+    in-out property <string> draw-campath;
     in-out property <string> start-recording;
     in-out property <string> stop-recording;
     in-out property <string> print-keyframes;
     in-out property <string> save-campath;
+    in-out property <string> load-campath;
+    in-out property <string> execute-director-action;
+    in-out property <string> overlay-panel-toggle;
+    in-out property <string> overlay-interaction-toggle;
 
-    height: root.compact ? 274px : 190px;
+    height: root.compact ? 375px : 250px;
     background: Tf2Colors.panel-dark;
     border-width: 1px;
     border-color: Tf2Colors.border;
@@ -516,7 +521,11 @@ component MirvShortcutPanel inherits Rectangle {
                     root.advance-time = "["; root.toggle-hud = "]"; root.show-help = "1"; root.back-one-second = "2";
                     root.safe-restart = "3"; root.next-kill-tick = "4"; root.pause-resume = "5"; root.enter-camera = "6";
                     root.add-keyframe = "7"; root.play-campath = "8"; root.start-recording = "9"; root.stop-recording = "0";
-                    root.print-keyframes = "-"; root.save-campath = "=";
+                    root.draw-campath = "/"; root.print-keyframes = "-"; root.save-campath = "=";
+                    root.load-campath = "F8";
+                    root.execute-director-action = "'";
+                    root.overlay-panel-toggle = "C";
+                    root.overlay-interaction-toggle = "F11";
                 }
             }
         }
@@ -529,15 +538,21 @@ component MirvShortcutPanel inherits Rectangle {
         }
         if !root.compact : HorizontalLayout {
             spacing: 16px;
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } }
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next kill tick"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } }
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } }
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } }
+            // Full frames use five equal-width columns capped at four rows.
+            // The 19 binds are balanced 4/4/4/4/3 so the final column can
+            // never grow into the content below this panel.
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next frag (1s early)"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Draw campath"; binding <=> root.draw-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } ShortcutCapture { label: "Load campath XML"; binding <=> root.load-campath; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Emergency action fallback"; binding <=> root.execute-director-action; } ShortcutCapture { label: "Hide/show overlay panel"; binding <=> root.overlay-panel-toggle; } ShortcutCapture { label: "Focus Director / TF2"; binding <=> root.overlay-interaction-toggle; } }
         }
         if root.compact : HorizontalLayout {
             spacing: 12px;
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next kill tick"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } }
-            VerticalLayout { spacing: 2px; ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } }
+            // Compact frames use three even columns capped at seven rows.
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Advance 0.25s"; binding <=> root.advance-time; } ShortcutCapture { label: "Toggle HUD"; binding <=> root.toggle-hud; } ShortcutCapture { label: "Show controls"; binding <=> root.show-help; } ShortcutCapture { label: "Back 1 second"; binding <=> root.back-one-second; } ShortcutCapture { label: "Safe restart"; binding <=> root.safe-restart; } ShortcutCapture { label: "Next frag (1s early)"; binding <=> root.next-kill-tick; } ShortcutCapture { label: "Pause / resume"; binding <=> root.pause-resume; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Enter MIRV camera"; binding <=> root.enter-camera; } ShortcutCapture { label: "Add keyframe"; binding <=> root.add-keyframe; } ShortcutCapture { label: "Play campath"; binding <=> root.play-campath; } ShortcutCapture { label: "Draw campath"; binding <=> root.draw-campath; } ShortcutCapture { label: "Start recording"; binding <=> root.start-recording; } ShortcutCapture { label: "Stop recording"; binding <=> root.stop-recording; } }
+            VerticalLayout { horizontal-stretch: 1; spacing: 2px; ShortcutCapture { label: "Print keyframes"; binding <=> root.print-keyframes; } ShortcutCapture { label: "Save campath"; binding <=> root.save-campath; } ShortcutCapture { label: "Load campath XML"; binding <=> root.load-campath; } ShortcutCapture { label: "Emergency action fallback"; binding <=> root.execute-director-action; } ShortcutCapture { label: "Hide/show overlay panel"; binding <=> root.overlay-panel-toggle; } ShortcutCapture { label: "Focus Director / TF2"; binding <=> root.overlay-interaction-toggle; } }
         }
     }
 }
@@ -682,6 +697,9 @@ export component AppWindow inherits Window {
     in-out property <string> hlae-path;
     in-out property <string> ffmpeg-path;
     in-out property <string> recording-directory;
+    in-out property <string> manual-hlae-launch-options;
+    in-out property <bool> manual-hlae-launch-options-valid: true;
+    in-out property <string> manual-hlae-launch-options-status: "OPTIONAL";
     in-out property <string> resolution: "2560x1440";
     in-out property <string> dx-level: "98";
     in-out property <string> skybox: "Default";
@@ -711,10 +729,15 @@ export component AppWindow inherits Window {
     in-out property <string> mirv-enter-camera: "6";
     in-out property <string> mirv-add-keyframe: "7";
     in-out property <string> mirv-play-campath: "8";
+    in-out property <string> mirv-draw-campath: "/";
     in-out property <string> mirv-start-recording: "9";
     in-out property <string> mirv-stop-recording: "0";
     in-out property <string> mirv-print-keyframes: "-";
     in-out property <string> mirv-save-campath: "=";
+    in-out property <string> mirv-load-campath: "F8";
+    in-out property <string> mirv-execute-director-action: "'";
+    in-out property <string> mirv-overlay-panel-toggle: "C";
+    in-out property <string> mirv-overlay-interaction-toggle: "F11";
     in-out property <string> custom-resources;
 
     callback choose-demos(); callback choose-export-directory(); callback choose-item-schema();
@@ -729,6 +752,7 @@ export component AppWindow inherits Window {
     changed hlae-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed ffmpeg-path => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed recording-directory => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed manual-hlae-launch-options => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed capture-fps => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed recording-format => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed jpg-quality => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
@@ -772,10 +796,15 @@ export component AppWindow inherits Window {
     changed mirv-enter-camera => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-add-keyframe => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-play-campath => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-draw-campath => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-start-recording => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-stop-recording => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-print-keyframes => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed mirv-save-campath => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-load-campath => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-execute-director-action => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-overlay-panel-toggle => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
+    changed mirv-overlay-interaction-toggle => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
     changed custom-resources => { if !root.recording-settings-syncing { root.recording-settings-changed(); } }
 
     private property <bool> compact: self.width <= 1220px || self.height <= 700px;
@@ -1001,12 +1030,12 @@ export component AppWindow inherits Window {
             width: recording-settings-scroll.width - (root.compact ? 30px : 42px);
             height: Math.max(
                 recording-settings-scroll.height - (root.compact ? 18px : 28px),
-                root.compact ? (822px + root.recording-advanced-panel-height) : (880px + root.recording-advanced-panel-height)
+                root.compact ? (862px + root.recording-advanced-panel-height) : (920px + root.recording-advanced-panel-height)
             );
             spacing: root.compact ? 7px : 10px;
             if !root.compact : HorizontalLayout { height: 26px; Tf2Heading { font-size: 21px; text: "HLAE RECORDING SETTINGS"; } Rectangle { horizontal-stretch: 1; } }
             HorizontalLayout {
-                height: root.compact ? 226px : 266px;
+                height: root.compact ? 266px : 306px;
                 spacing: root.compact ? 7px : 11px;
                 Tf2Panel {
                     width: 50%;
@@ -1019,6 +1048,19 @@ export component AppWindow inherits Window {
                             Row { Tf2Label { width: root.compact ? 80px : 125px; font-size: root.compact ? 14px : 15px; text: "HLAE"; } Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.hlae-path; } Tf2Button { width: root.compact ? 80px : 100px; height: root.compact ? 32px : 36px; label-font-size: root.compact ? 14px : 16px; text: "BROWSE"; clicked => { root.choose-setting-path("hlae"); } } }
                             Row { Tf2Label { width: root.compact ? 80px : 125px; font-size: root.compact ? 14px : 15px; text: "FFMPEG"; } Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.ffmpeg-path; } Tf2Button { width: root.compact ? 80px : 100px; height: root.compact ? 32px : 36px; label-font-size: root.compact ? 14px : 16px; text: "BROWSE"; clicked => { root.choose-setting-path("ffmpeg"); } } }
                             Row { Tf2Label { width: root.compact ? 80px : 125px; font-size: root.compact ? 14px : 15px; text: "OUTPUT"; } Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.recording-directory; } Tf2Button { width: root.compact ? 80px : 100px; height: root.compact ? 32px : 36px; label-font-size: root.compact ? 14px : 16px; text: "BROWSE"; clicked => { root.choose-setting-path("recording-output"); } } }
+                            Row {
+                                Tf2Label { width: root.compact ? 144px : 172px; font-size: root.compact ? 12px : 13px; text: "MANUAL LAUNCH OPTIONS"; }
+                                Tf2LineEdit { height: root.compact ? 32px : 36px; text <=> root.manual-hlae-launch-options; placeholder: "Use -option or +command value; e.g. -high -nojoy"; }
+                                Text {
+                                    width: root.compact ? 58px : 68px;
+                                    text: root.manual-hlae-launch-options-status;
+                                    color: root.manual-hlae-launch-options-status == "VALID" ? Tf2Colors.green : root.manual-hlae-launch-options-valid ? Tf2Colors.dim : Tf2Colors.red-hover;
+                                    font-family: "TF2 Build";
+                                    font-size: root.compact ? 9px : 10px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
                             if root.compact : Row { Tf2Label { width: 80px; font-size: 14px; text: "FPS"; } ComboBox { width: 90px; height: 32px; model: ["120", "60", "240", "480"]; current-value <=> root.capture-fps; } }
                             if !root.compact : Row { Tf2Label { width: 125px; font-size: 15px; text: "FORMAT"; } ComboBox { height: 36px; model: ["MP4 - Standard", "MP4 - Compatible", "MP4 - Lossless", "MOV - DNxHR", "TGA Image Sequence", "JPG Image Sequence", "AVI - Raw"]; current-value <=> root.recording-format; } Rectangle { width: 18px; } Tf2Label { width: 32px; font-size: 15px; text: "FPS"; horizontal-alignment: right; } ComboBox { width: 90px; height: 36px; model: ["120", "60", "240", "480"]; current-value <=> root.capture-fps; } if root.recording-format == "JPG Image Sequence" : Tf2Label { width: 72px; font-size: 15px; text: "JPG"; } if root.recording-format == "JPG Image Sequence" : SpinBox { width: 82px; height: 36px; value <=> root.jpg-quality; minimum: 1; maximum: 100; } }
                         }
@@ -1115,8 +1157,13 @@ export component AppWindow inherits Window {
                 safe-restart <=> root.mirv-safe-restart; next-kill-tick <=> root.mirv-next-kill-tick;
                 pause-resume <=> root.mirv-pause-resume; enter-camera <=> root.mirv-enter-camera;
                 add-keyframe <=> root.mirv-add-keyframe; play-campath <=> root.mirv-play-campath;
+                draw-campath <=> root.mirv-draw-campath;
                 start-recording <=> root.mirv-start-recording; stop-recording <=> root.mirv-stop-recording;
                 print-keyframes <=> root.mirv-print-keyframes; save-campath <=> root.mirv-save-campath;
+                load-campath <=> root.mirv-load-campath;
+                execute-director-action <=> root.mirv-execute-director-action;
+                overlay-panel-toggle <=> root.mirv-overlay-panel-toggle;
+                overlay-interaction-toggle <=> root.mirv-overlay-interaction-toggle;
             }
             VerticalLayout {
                 vertical-stretch: 1;
@@ -1158,13 +1205,26 @@ export component AppWindow inherits Window {
                     clicked => { root.recording-settings-section = root.recording-settings-section == 0 ? -1 : 0; }
                 }
                 if root.recording-settings-section == 0 : Tf2Panel {
-                    height: 190px;
+                    height: 224px;
                     GridLayout {
                         padding: 7px; spacing: 4px;
                         Row { Tf2Label { width: 92px; text: "TF2 EXE"; } Tf2LineEdit { height: 30px; text <=> root.tf2-path; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("tf2"); } } }
                         Row { Tf2Label { width: 92px; text: "HLAE"; } Tf2LineEdit { height: 30px; text <=> root.hlae-path; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("hlae"); } } }
                         Row { Tf2Label { width: 92px; text: "FFMPEG"; } Tf2LineEdit { height: 30px; text <=> root.ffmpeg-path; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("ffmpeg"); } } }
                         Row { Tf2Label { width: 92px; text: "OUTPUT"; } Tf2LineEdit { height: 30px; text <=> root.recording-directory; } Tf2Button { width: 82px; height: 30px; label-font-size: 12px; text: "BROWSE"; clicked => { root.choose-setting-path("recording-output"); } } }
+                        Row {
+                            Tf2Label { width: 142px; font-size: 11px; text: "MANUAL LAUNCH OPTIONS"; }
+                            Tf2LineEdit { height: 30px; text <=> root.manual-hlae-launch-options; placeholder: "-option or +command value"; }
+                            Text {
+                                width: 58px;
+                                text: root.manual-hlae-launch-options-status;
+                                color: root.manual-hlae-launch-options-status == "VALID" ? Tf2Colors.green : root.manual-hlae-launch-options-valid ? Tf2Colors.dim : Tf2Colors.red-hover;
+                                font-family: "TF2 Build";
+                                font-size: 9px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
                         Row { Tf2Label { width: 92px; text: "FORMAT"; } ComboBox { height: 30px; model: ["MP4 - Standard", "MP4 - Compatible", "MP4 - Lossless", "MOV - DNxHR", "TGA Image Sequence", "JPG Image Sequence", "AVI - Raw"]; current-value <=> root.recording-format; } Tf2Label { width: 32px; text: "FPS"; horizontal-alignment: right; } ComboBox { width: 82px; height: 30px; model: ["120", "60", "240", "480"]; current-value <=> root.capture-fps; } if root.recording-format == "JPG Image Sequence" : SpinBox { width: 70px; height: 30px; value <=> root.jpg-quality; minimum: 1; maximum: 100; } }
                     }
                 }
@@ -1257,8 +1317,13 @@ export component AppWindow inherits Window {
                     safe-restart <=> root.mirv-safe-restart; next-kill-tick <=> root.mirv-next-kill-tick;
                     pause-resume <=> root.mirv-pause-resume; enter-camera <=> root.mirv-enter-camera;
                     add-keyframe <=> root.mirv-add-keyframe; play-campath <=> root.mirv-play-campath;
+                    draw-campath <=> root.mirv-draw-campath;
                     start-recording <=> root.mirv-start-recording; stop-recording <=> root.mirv-stop-recording;
                     print-keyframes <=> root.mirv-print-keyframes; save-campath <=> root.mirv-save-campath;
+                    load-campath <=> root.mirv-load-campath;
+                    execute-director-action <=> root.mirv-execute-director-action;
+                    overlay-panel-toggle <=> root.mirv-overlay-panel-toggle;
+                    overlay-interaction-toggle <=> root.mirv-overlay-interaction-toggle;
                 }
 
                 Tf2Button {

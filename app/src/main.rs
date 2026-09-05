@@ -970,6 +970,8 @@ fn main() -> Result<()> {
             .to_string()
             .into(),
     );
+    ui.set_manual_hlae_launch_options(settings.manual_hlae_launch_options.clone().into());
+    update_manual_launch_options_validation(&ui);
     ui.set_lead_seconds(settings.lead_seconds.min(60) as i32);
     ui.set_outro_seconds(settings.outro_seconds.min(60) as i32);
     ui.set_capture_fps(settings.capture_fps.to_string().into());
@@ -1016,10 +1018,21 @@ fn main() -> Result<()> {
     ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
     ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
     ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_draw_campath(settings.mirv_shortcuts.draw_campath.clone().into());
     ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
     ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
     ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
     ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
+    ui.set_mirv_load_campath(settings.mirv_shortcuts.load_campath.clone().into());
+    ui.set_mirv_execute_director_action(
+        settings.mirv_shortcuts.execute_director_action.clone().into(),
+    );
+    ui.set_mirv_overlay_panel_toggle(
+        settings.mirv_shortcuts.overlay_panel_toggle.clone().into(),
+    );
+    ui.set_mirv_overlay_interaction_toggle(
+        settings.mirv_shortcuts.overlay_interaction_toggle.clone().into(),
+    );
     ui.set_custom_resources(
         settings
             .custom_resources
@@ -2531,6 +2544,7 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.hlae_executable = PathBuf::from(ui.get_hlae_path().to_string());
     settings.ffmpeg_executable = PathBuf::from(ui.get_ffmpeg_path().to_string());
     settings.recording_output_directory = PathBuf::from(ui.get_recording_directory().to_string());
+    settings.manual_hlae_launch_options = ui.get_manual_hlae_launch_options().to_string();
     settings.lead_seconds = ui.get_lead_seconds().clamp(0, 60) as u32;
     settings.outro_seconds = ui.get_outro_seconds().clamp(0, 60) as u32;
     settings.capture_fps = ui.get_capture_fps().parse().unwrap_or(120);
@@ -2577,10 +2591,18 @@ fn sync_settings_from_ui(ui: &AppWindow, settings: &mut AppSettings) {
     settings.mirv_shortcuts.enter_camera = ui.get_mirv_enter_camera().to_string();
     settings.mirv_shortcuts.add_keyframe = ui.get_mirv_add_keyframe().to_string();
     settings.mirv_shortcuts.play_campath = ui.get_mirv_play_campath().to_string();
+    settings.mirv_shortcuts.draw_campath = ui.get_mirv_draw_campath().to_string();
     settings.mirv_shortcuts.start_recording = ui.get_mirv_start_recording().to_string();
     settings.mirv_shortcuts.stop_recording = ui.get_mirv_stop_recording().to_string();
     settings.mirv_shortcuts.print_keyframes = ui.get_mirv_print_keyframes().to_string();
     settings.mirv_shortcuts.save_campath = ui.get_mirv_save_campath().to_string();
+    settings.mirv_shortcuts.load_campath = ui.get_mirv_load_campath().to_string();
+    settings.mirv_shortcuts.execute_director_action =
+        ui.get_mirv_execute_director_action().to_string();
+    settings.mirv_shortcuts.overlay_panel_toggle =
+        ui.get_mirv_overlay_panel_toggle().to_string();
+    settings.mirv_shortcuts.overlay_interaction_toggle =
+        ui.get_mirv_overlay_interaction_toggle().to_string();
     settings.custom_resources = split_paths(&ui.get_custom_resources().to_string());
     settings.normalize_encoding_options();
     settings.normalize_recording_options();
@@ -2597,6 +2619,8 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_skybox(settings.skybox.clone().into());
     ui.set_hud(settings.hud.clone().into());
     ui.set_viewmodels(settings.viewmodels.clone().into());
+    ui.set_manual_hlae_launch_options(settings.manual_hlae_launch_options.clone().into());
+    update_manual_launch_options_validation(ui);
     ui.set_mirv_advance_time(settings.mirv_shortcuts.advance_time.clone().into());
     ui.set_mirv_toggle_hud(settings.mirv_shortcuts.toggle_hud.clone().into());
     ui.set_mirv_show_help(settings.mirv_shortcuts.show_help.clone().into());
@@ -2607,14 +2631,48 @@ fn apply_normalized_recording_settings(ui: &AppWindow, settings: &AppSettings) {
     ui.set_mirv_enter_camera(settings.mirv_shortcuts.enter_camera.clone().into());
     ui.set_mirv_add_keyframe(settings.mirv_shortcuts.add_keyframe.clone().into());
     ui.set_mirv_play_campath(settings.mirv_shortcuts.play_campath.clone().into());
+    ui.set_mirv_draw_campath(settings.mirv_shortcuts.draw_campath.clone().into());
     ui.set_mirv_start_recording(settings.mirv_shortcuts.start_recording.clone().into());
     ui.set_mirv_stop_recording(settings.mirv_shortcuts.stop_recording.clone().into());
     ui.set_mirv_print_keyframes(settings.mirv_shortcuts.print_keyframes.clone().into());
     ui.set_mirv_save_campath(settings.mirv_shortcuts.save_campath.clone().into());
+    ui.set_mirv_load_campath(settings.mirv_shortcuts.load_campath.clone().into());
+    ui.set_mirv_execute_director_action(
+        settings.mirv_shortcuts.execute_director_action.clone().into(),
+    );
+    ui.set_mirv_overlay_panel_toggle(
+        settings.mirv_shortcuts.overlay_panel_toggle.clone().into(),
+    );
+    ui.set_mirv_overlay_interaction_toggle(
+        settings.mirv_shortcuts.overlay_interaction_toggle.clone().into(),
+    );
     ui.set_recording_settings_syncing(false);
 }
 
+fn update_manual_launch_options_validation(ui: &AppWindow) -> bool {
+    let value = ui.get_manual_hlae_launch_options().to_string();
+    match recording::validate_manual_launch_options(&value) {
+        Ok(()) => {
+            ui.set_manual_hlae_launch_options_valid(true);
+            ui.set_manual_hlae_launch_options_status(
+                if value.trim().is_empty() { "OPTIONAL" } else { "VALID" }.into(),
+            );
+            true
+        }
+        Err(error) => {
+            ui.set_manual_hlae_launch_options_valid(false);
+            ui.set_manual_hlae_launch_options_status("INVALID".into());
+            ui.set_status_text(format!("Manual Launch Options: {error}").into());
+            false
+        }
+    }
+}
+
 fn persist_recording_settings(ui: &AppWindow, state: &Arc<Mutex<State>>, report_manual_save: bool) {
+    if !update_manual_launch_options_validation(ui) {
+        ui.set_recording_save_status("OPTIONS INVALID".into());
+        return;
+    }
     let (save_result, normalized) = {
         let mut state = state.lock();
         state.settings.output_directory = PathBuf::from(ui.get_export_directory().to_string());

@@ -3476,7 +3476,7 @@ fn manual_hotkey_cfg(
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
         let cue_tick = (tick - MANUAL_ONE_SECOND_TICKS).max(target_tick).max(0);
         lines.push(format!(
-            "alias tf2frag_manual_kill_{current} \"demo_gototick {cue_tick} 0 1; alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}\"",
+            "alias tf2frag_manual_kill_{current} \"alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}; demo_gototick {cue_tick} 0 1\"",
             kill_ticks.len()
         ));
     }
@@ -6062,6 +6062,9 @@ mod recording_tests {
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 1/3 FRAG_TICK 900 CUE_TICK 833"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 FRAG_TICK 925 CUE_TICK 858"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 FRAG_TICK 970 CUE_TICK 903"));
+        assert!(cfg.contains(
+            "alias tf2frag_manual_kill_3 \"alias tf2frag_manual_next_kill tf2frag_manual_kill_1; echo TF2FRAG_DIRECTOR_TICK 903; echo TF2FRAG_MANUAL_KILL 3/3 FRAG_TICK 970 CUE_TICK 903; demo_gototick 903 0 1\""
+        ));
         assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
         assert!(cfg.contains(
             "bind \"[\" \"mirv_skip time 0.25; echo TF2FRAG_DIRECTOR_TICK_OFFSET 17\""

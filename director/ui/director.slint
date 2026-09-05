@@ -134,11 +134,13 @@ export component DirectorStripWindow inherits Window {
     in property <int> selected-cue-index: -1;
     callback keyframe-activated(int, int);
     callback cue-activated(int);
+    callback dismiss-selection-requested();
 
     Rectangle {
         background: Colors.header;
         border-width: 1px;
         border-color: Colors.border;
+        TouchArea { clicked => { root.dismiss-selection-requested(); } }
 
         HorizontalLayout {
             padding-left: root.narrow-layout ? 6px : 14px;
@@ -300,6 +302,7 @@ export component DirectorCardWindow inherits Window {
     callback frag-goto-requested();
     callback keyframe-activated(int, int);
     callback keyframe-action-requested(int, string, string, string);
+    callback dismiss-selection-requested();
 
     changed keyframe-setting => {
         if root.keyframe-setting == "Interpolation — Rotation" {
@@ -313,6 +316,7 @@ export component DirectorCardWindow inherits Window {
         background: Colors.app;
         border-width: 1px;
         border-color: Colors.border;
+        TouchArea { clicked => { root.dismiss-selection-requested(); } }
         VerticalLayout {
             padding: 10px;
             spacing: 7px;
@@ -374,6 +378,9 @@ export component DirectorCardWindow inherits Window {
                         background: Colors.panel;
                         border-width: 1px;
                         border-color: Colors.green;
+                        // Blank space inside the editor keeps it open. Controls
+                        // are layered above this area and remain interactive.
+                        TouchArea { }
                         VerticalLayout {
                             padding: 8px;
                             spacing: 5px;
@@ -431,6 +438,7 @@ export component DirectorCardWindow inherits Window {
                         key-name: shortcut.key;
                         action-name: shortcut.label;
                         enabled: root.actions-enabled;
+                        activated => { root.dismiss-selection-requested(); }
                     }
                 }
             }

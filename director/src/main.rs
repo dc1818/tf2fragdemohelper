@@ -172,6 +172,7 @@ fn main() -> Result<()> {
         let weak_card = card.as_weak();
         let panel_visible = panel_visible.clone();
         let interaction_mode = interaction_mode.clone();
+        let selected_keyframe = selected_keyframe.clone();
         let demo_ready = demo_ready.clone();
         card.on_hide_requested(move || {
             if !demo_ready.get() {
@@ -183,6 +184,7 @@ fn main() -> Result<()> {
             if interaction_mode.get() {
                 toggle_overlay_interaction(&strip, &card, &interaction_mode);
             }
+            clear_selected_keyframe(&strip, &card, &selected_keyframe);
             set_panel_visibility(&strip, &card, &panel_visible, false);
         });
     }
@@ -190,11 +192,35 @@ fn main() -> Result<()> {
         let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let interaction_mode = interaction_mode.clone();
+        let selected_keyframe = selected_keyframe.clone();
         card.on_interaction_toggle_requested(move || {
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
+            clear_selected_keyframe(&strip, &card, &selected_keyframe);
             toggle_overlay_interaction(&strip, &card, &interaction_mode);
+        });
+    }
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let selected_keyframe = selected_keyframe.clone();
+        strip.on_dismiss_selection_requested(move || {
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            clear_selected_keyframe(&strip, &card, &selected_keyframe);
+        });
+    }
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let selected_keyframe = selected_keyframe.clone();
+        card.on_dismiss_selection_requested(move || {
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
+                return;
+            };
+            clear_selected_keyframe(&strip, &card, &selected_keyframe);
         });
     }
     {
@@ -236,6 +262,7 @@ fn main() -> Result<()> {
         let highlighted_cue = highlighted_cue.clone();
         let last_tick = last_tick.clone();
         let panel_visible = panel_visible.clone();
+        let selected_keyframe = selected_keyframe.clone();
         let demo_ready = demo_ready.clone();
         strip.on_cue_activated(move |index| {
             if !demo_ready.get() {
@@ -251,26 +278,30 @@ fn main() -> Result<()> {
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
+            clear_selected_keyframe(&strip, &card, &selected_keyframe);
             strip.set_selected_cue_index(index.min(i32::MAX as usize) as i32);
             update_playback_state(&strip, &card, &session, last_tick.get(), true, Some(index));
             set_panel_visibility(&strip, &card, &panel_visible, true);
         });
     }
     {
+        let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let session = session.clone();
         let highlighted_cue = highlighted_cue.clone();
         let last_tick = last_tick.clone();
         let action_queue = action_queue.clone();
         let direct_action_sender = direct_action_sender.clone();
+        let selected_keyframe = selected_keyframe.clone();
         let demo_ready = demo_ready.clone();
         card.on_frag_goto_requested(move || {
             if !demo_ready.get() {
                 return;
             }
-            let Some(card) = weak_card.upgrade() else {
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
+            clear_selected_keyframe(&strip, &card, &selected_keyframe);
             let Some(index) = displayed_cue_index(&session, last_tick.get(), highlighted_cue.get())
             else {
                 card.set_command_status("NO FRAG IS AVAILABLE TO SEEK".into());
@@ -295,13 +326,15 @@ fn main() -> Result<()> {
         });
     }
     {
+        let weak_strip = strip.as_weak();
         let weak_card = card.as_weak();
         let session = session.clone();
         let action_queue = action_queue.clone();
         let direct_action_sender = direct_action_sender.clone();
+        let selected_keyframe = selected_keyframe.clone();
         let demo_ready = demo_ready.clone();
         card.on_keyframe_action_requested(move |id, action, setting, value| {
-            let Some(card) = weak_card.upgrade() else {
+            let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
             };
             if !demo_ready.get() {
@@ -318,13 +351,16 @@ fn main() -> Result<()> {
                 &session.telemetry_marker_prefix,
                 session.start_tick,
             ) {
-                Ok((command, label)) => dispatch_director_action(
-                    direct_action_sender.as_ref(),
-                    &action_queue,
-                    &card,
-                    command,
-                    label,
-                ),
+                Ok((command, label)) => {
+                    dispatch_director_action(
+                        direct_action_sender.as_ref(),
+                        &action_queue,
+                        &card,
+                        command,
+                        label,
+                    );
+                    clear_selected_keyframe(&strip, &card, &selected_keyframe);
+                }
                 Err(error) => card.set_command_status(
                     format!("ACTION NOT SENT: {error}")
                         .to_ascii_uppercase()
@@ -416,6 +452,37 @@ fn main() -> Result<()> {
         );
     }
 
+    // Dismiss the editor when the user clicks back into TF2. WindowFromPoint
+    // distinguishes a real game click from a click on either non-activating
+    // overlay window, even while TF2 remains the foreground process.
+    let selection_dismiss_timer = Timer::default();
+    #[cfg(target_os = "windows")]
+    {
+        let weak_strip = strip.as_weak();
+        let weak_card = card.as_weak();
+        let selected_keyframe = selected_keyframe.clone();
+        let was_down = Rc::new(Cell::new(false));
+        selection_dismiss_timer.start(
+            TimerMode::Repeated,
+            Duration::from_millis(30),
+            move || {
+                let down = [0x01, 0x02, 0x04]
+                    .into_iter()
+                    .any(global_key_is_down);
+                if down && !was_down.replace(down) && cursor_is_over_tf2() {
+                    let (Some(strip), Some(card)) =
+                        (weak_strip.upgrade(), weak_card.upgrade())
+                    else {
+                        return;
+                    };
+                    clear_selected_keyframe(&strip, &card, &selected_keyframe);
+                } else if !down {
+                    was_down.set(false);
+                }
+            },
+        );
+    }
+
     let direct_action_timer = Timer::default();
     if let Some(results) = direct_action_results {
         let weak_card = card.as_weak();
@@ -484,6 +551,7 @@ fn main() -> Result<()> {
                     }
                     if poll.demo_loading {
                         demo_ready.set(false);
+                        clear_selected_keyframe(&strip, &card, &selected_keyframe);
                         set_demo_actions_enabled(&strip, &card, false);
                         strip.set_telemetry_status("LOADING".into());
                         card.set_command_status("WAITING FOR DEMO TO FINISH LOADING".into());
@@ -646,6 +714,7 @@ fn main() -> Result<()> {
         &topmost_timer,
         &hotkey_timer,
         &interaction_hotkey_timer,
+        &selection_dismiss_timer,
         &direct_action_timer,
         &telemetry_timer,
     );
@@ -1612,6 +1681,7 @@ struct TickLogTail {
     offset: u64,
     carry: String,
     keyframe_capture: Option<Vec<ParsedCampathKey>>,
+    keyframe_capture_invalid: bool,
 }
 
 impl TickLogTail {
@@ -1622,6 +1692,7 @@ impl TickLogTail {
             offset: 0,
             carry: String::new(),
             keyframe_capture: None,
+            keyframe_capture_invalid: false,
         }
     }
 
@@ -1645,6 +1716,7 @@ impl TickLogTail {
             self.offset = 0;
             self.carry.clear();
             self.keyframe_capture = None;
+            self.keyframe_capture_invalid = false;
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut bytes = Vec::new();
@@ -1687,12 +1759,19 @@ impl TickLogTail {
         }
         if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX) {
             self.keyframe_capture = Some(Vec::new());
+            self.keyframe_capture_invalid = false;
             return;
         }
         if line.contains(DIRECTOR_KEYFRAME_END_PREFIX) {
             if let Some(snapshot) = self.keyframe_capture.take() {
-                poll.keyframe_snapshot = Some(snapshot);
+                // A future/unknown HLAE row format must never erase the last
+                // verified marker set. A truly empty path has no data rows and
+                // remains a valid empty snapshot.
+                if !self.keyframe_capture_invalid {
+                    poll.keyframe_snapshot = Some(snapshot);
+                }
             }
+            self.keyframe_capture_invalid = false;
             return;
         }
         // HLAE prints a header and dashed separators before its rows. They are
@@ -1709,8 +1788,13 @@ impl TickLogTail {
             capture.push(key);
             return;
         }
+        if self.keyframe_capture.is_some() && line.contains(" : ") {
+            self.keyframe_capture_invalid = true;
+            return;
+        }
         if is_campath_identity_mutation(line) {
             self.keyframe_capture = None;
+            self.keyframe_capture_invalid = false;
             poll.keyframes_refreshing = true;
         }
     }
@@ -1779,7 +1863,10 @@ fn parse_campath_key(line: &str) -> Option<ParsedCampathKey> {
     let mut fields = left.split_whitespace().rev();
     let id = fields.next()?.parse::<i32>().ok()?;
     let selected = fields.next()?.eq_ignore_ascii_case("Y");
-    let tick_text = right.split(',').next()?.trim();
+    // AdvancedFX removed commas from mirv_campath print in newer releases.
+    // The tick remains the first field in both the old comma-separated and
+    // current whitespace-separated formats.
+    let tick_text = right.split_whitespace().next()?.trim_end_matches(',');
     let tick = parse_campath_tick(tick_text)?;
     Some(ParsedCampathKey { id, tick, selected })
 }
@@ -1924,6 +2011,30 @@ fn find_tf2_window_handle() -> Option<*mut std::ffi::c_void> {
 }
 
 #[cfg(target_os = "windows")]
+fn cursor_is_over_tf2() -> bool {
+    const GA_ROOT: u32 = 2;
+    let Some(tf2) = find_tf2_window_handle() else {
+        return false;
+    };
+    let mut point = WindowsPoint { x: 0, y: 0 };
+    unsafe {
+        if GetCursorPos(&mut point) == 0 {
+            return false;
+        }
+        let pointed = WindowFromPoint(point);
+        !pointed.is_null() && GetAncestor(pointed, GA_ROOT) == tf2
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct WindowsPoint {
+    x: i32,
+    y: i32,
+}
+
+#[cfg(target_os = "windows")]
 #[repr(C)]
 struct WindowsInput {
     kind: u32,
@@ -2064,6 +2175,8 @@ unsafe extern "system" {
     ) -> i32;
     fn GetClassNameW(window: *mut std::ffi::c_void, class_name: *mut u16, maximum: i32) -> i32;
     fn GetAsyncKeyState(virtual_key: i32) -> i16;
+    fn GetCursorPos(point: *mut WindowsPoint) -> i32;
+    fn GetAncestor(window: *mut std::ffi::c_void, flags: u32) -> *mut std::ffi::c_void;
     fn GetForegroundWindow() -> *mut std::ffi::c_void;
     fn GetWindowThreadProcessId(window: *mut std::ffi::c_void, process_id: *mut u32) -> u32;
     fn GetWindowLongPtrW(window: *mut std::ffi::c_void, index: i32) -> isize;
@@ -2083,6 +2196,7 @@ unsafe extern "system" {
     fn SetForegroundWindow(window: *mut std::ffi::c_void) -> i32;
     fn SetFocus(window: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
     fn AttachThreadInput(thread: u32, attach_to: u32, attach: i32) -> i32;
+    fn WindowFromPoint(point: WindowsPoint) -> *mut std::ffi::c_void;
 }
 
 #[cfg(target_os = "windows")]
@@ -2184,6 +2298,14 @@ mod tests {
             })
         );
         assert_eq!(parse_campath_tick("12345+10"), Some(12_355));
+        assert_eq!(
+            parse_campath_key("Y n 3 : 12400 185.970 185.970 -> ( 1 2 3 )"),
+            Some(ParsedCampathKey {
+                id: 3,
+                tick: 12_400,
+                selected: false,
+            })
+        );
     }
 
     #[test]
@@ -2212,7 +2334,7 @@ mod tests {
 
         let mut completed = TelemetryPoll::default();
         tail.consume_line(
-            "Y n 1 : 12100 , 180.6",
+            "Y n 1 : 12100 180.6 180.6 -> ( 1 2 3 )",
             "TF2FRAG_DIRECTOR_TICK",
             &mut completed,
         );
@@ -2237,6 +2359,20 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn unknown_nonempty_hlae_rows_cannot_erase_verified_keyframes() {
+        let mut tail = TickLogTail::new(PathBuf::new());
+        let mut poll = TelemetryPoll::default();
+        for line in [
+            DIRECTOR_KEYFRAME_BEGIN_PREFIX,
+            "Y n 0 : future-format-without-a-readable-tick",
+            DIRECTOR_KEYFRAME_END_PREFIX,
+        ] {
+            tail.consume_line(line, "TF2FRAG_DIRECTOR_TICK", &mut poll);
+        }
+        assert!(poll.keyframe_snapshot.is_none());
     }
 
     #[test]

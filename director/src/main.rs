@@ -20,8 +20,9 @@ use std::{
 };
 use tf2_mirv_director::{
     DirectorControl, DirectorSession, DIRECTOR_ACTION_ACK_PREFIX, DIRECTOR_ACTION_FILE_PREFIX,
-    DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_END_PREFIX,
-    DIRECTOR_POLL_READY_MARKER, DIRECTOR_POLL_UNAVAILABLE_MARKER, DIRECTOR_TICK_OFFSET_PREFIX,
+    DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_DIRTY_MARKER,
+    DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_POLL_READY_MARKER, DIRECTOR_POLL_UNAVAILABLE_MARKER,
+    DIRECTOR_TICK_OFFSET_PREFIX,
 };
 
 const ONE_SECOND_TICKS: i64 = 67;
@@ -351,7 +352,12 @@ fn main() -> Result<()> {
                 &session.telemetry_marker_prefix,
                 session.start_tick,
             ) {
-                Ok((command, label)) => {
+                Ok((mut command, label)) => {
+                    if action.as_str() == "Delete keyframe"
+                        || action.as_str() == "Edit keyframe"
+                    {
+                        command.push_str(&format!("; echo {DIRECTOR_KEYFRAME_DIRTY_MARKER}"));
+                    }
                     dispatch_director_action(
                         direct_action_sender.as_ref(),
                         &action_queue,
@@ -525,6 +531,7 @@ fn main() -> Result<()> {
         let selected_keyframe = selected_keyframe.clone();
         let last_tick = last_tick.clone();
         let action_queue = action_queue.clone();
+        let direct_action_sender = direct_action_sender.clone();
         let demo_ready = demo_ready.clone();
         let mut tail = TickLogTail::new(session.telemetry_log.clone());
         let telemetry_diagnostic = telemetry_diagnostic.clone();
@@ -534,6 +541,7 @@ fn main() -> Result<()> {
         let mut reported_no_tick = false;
         let mut reported_first_tick = false;
         let mut reported_error = false;
+        let mut keyframe_refresh_due = None::<Instant>;
         telemetry_timer.start(TimerMode::Repeated, Duration::from_millis(15), move || {
             let (Some(strip), Some(card)) = (weak_strip.upgrade(), weak_card.upgrade()) else {
                 return;
@@ -596,6 +604,11 @@ fn main() -> Result<()> {
                         card.set_command_status(
                             "KEYFRAMES REFRESHING — KEEPING LAST VERIFIED MARKERS".into(),
                         );
+                        // HLAE can commit an add/remove on the following frame,
+                        // so the immediate print in the same TF2 command buffer
+                        // can still contain the previous table. Re-query once
+                        // the mutation has settled, including while paused.
+                        keyframe_refresh_due = Some(Instant::now() + Duration::from_millis(150));
                     }
                     if let Some(keys) = poll.keyframe_snapshot {
                         let rows = keys
@@ -639,6 +652,16 @@ fn main() -> Result<()> {
                     }
                     if let Some(status) = action_queue.borrow_mut().take_timeout_status() {
                         card.set_command_status(status.into());
+                    }
+                    if keyframe_refresh_due.is_some_and(|due| Instant::now() >= due) {
+                        keyframe_refresh_due = None;
+                        dispatch_director_action(
+                            direct_action_sender.as_ref(),
+                            &action_queue,
+                            &card,
+                            "tf2frag_manual_sync_keyframes".into(),
+                            "REFRESH KEYFRAME MARKERS".into(),
+                        );
                     }
                     if !poll.tick_updates.is_empty() {
                         for update in poll.tick_updates {
@@ -1682,6 +1705,7 @@ struct TickLogTail {
     carry: String,
     keyframe_capture: Option<Vec<ParsedCampathKey>>,
     keyframe_capture_invalid: bool,
+    keyframe_capture_saw_header: bool,
 }
 
 impl TickLogTail {
@@ -1693,6 +1717,7 @@ impl TickLogTail {
             carry: String::new(),
             keyframe_capture: None,
             keyframe_capture_invalid: false,
+            keyframe_capture_saw_header: false,
         }
     }
 
@@ -1717,6 +1742,7 @@ impl TickLogTail {
             self.carry.clear();
             self.keyframe_capture = None;
             self.keyframe_capture_invalid = false;
+            self.keyframe_capture_saw_header = false;
         }
         file.seek(SeekFrom::Start(self.offset))?;
         let mut bytes = Vec::new();
@@ -1760,6 +1786,7 @@ impl TickLogTail {
         if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX) {
             self.keyframe_capture = Some(Vec::new());
             self.keyframe_capture_invalid = false;
+            self.keyframe_capture_saw_header = false;
             return;
         }
         if line.contains(DIRECTOR_KEYFRAME_END_PREFIX) {
@@ -1767,11 +1794,12 @@ impl TickLogTail {
                 // A future/unknown HLAE row format must never erase the last
                 // verified marker set. A truly empty path has no data rows and
                 // remains a valid empty snapshot.
-                if !self.keyframe_capture_invalid {
+                if !self.keyframe_capture_invalid && self.keyframe_capture_saw_header {
                     poll.keyframe_snapshot = Some(snapshot);
                 }
             }
             self.keyframe_capture_invalid = false;
+            self.keyframe_capture_saw_header = false;
             return;
         }
         // HLAE prints a header and dashed separators before its rows. They are
@@ -1780,6 +1808,9 @@ impl TickLogTail {
             && (line.contains("passed? selected? id : tick[offset]")
                 || line.trim_end().ends_with("----"))
         {
+            if line.contains("passed? selected? id : tick[offset]") {
+                self.keyframe_capture_saw_header = true;
+            }
             return;
         }
         if let (Some(capture), Some(key)) =
@@ -1795,6 +1826,13 @@ impl TickLogTail {
         if is_campath_identity_mutation(line) {
             self.keyframe_capture = None;
             self.keyframe_capture_invalid = false;
+            self.keyframe_capture_saw_header = false;
+            poll.keyframes_refreshing = true;
+        }
+        if line.contains(DIRECTOR_KEYFRAME_DIRTY_MARKER) {
+            self.keyframe_capture = None;
+            self.keyframe_capture_invalid = false;
+            self.keyframe_capture_saw_header = false;
             poll.keyframes_refreshing = true;
         }
     }
@@ -2359,6 +2397,43 @@ mod tests {
                 },
             ])
         );
+    }
+
+    #[test]
+    fn only_a_real_hlae_table_can_publish_an_empty_keyframe_snapshot() {
+        let mut tail = TickLogTail::new(PathBuf::new());
+        let mut missing_table = TelemetryPoll::default();
+        for line in [
+            DIRECTOR_KEYFRAME_BEGIN_PREFIX,
+            DIRECTOR_KEYFRAME_END_PREFIX,
+        ] {
+            tail.consume_line(line, "TF2FRAG_DIRECTOR_TICK", &mut missing_table);
+        }
+        assert!(missing_table.keyframe_snapshot.is_none());
+
+        let mut empty_table = TelemetryPoll::default();
+        for line in [
+            DIRECTOR_KEYFRAME_BEGIN_PREFIX,
+            "passed? selected? id : tick[offset] , time [s]",
+            "----------------------------------------------------",
+            DIRECTOR_KEYFRAME_END_PREFIX,
+        ] {
+            tail.consume_line(line, "TF2FRAG_DIRECTOR_TICK", &mut empty_table);
+        }
+        assert_eq!(empty_table.keyframe_snapshot, Some(Vec::new()));
+    }
+
+    #[test]
+    fn explicit_keyframe_dirty_marker_requests_a_settled_refresh() {
+        let mut tail = TickLogTail::new(PathBuf::new());
+        let mut poll = TelemetryPoll::default();
+        tail.consume_line(
+            DIRECTOR_KEYFRAME_DIRTY_MARKER,
+            "TF2FRAG_DIRECTOR_TICK",
+            &mut poll,
+        );
+        assert!(poll.keyframes_refreshing);
+        assert!(poll.keyframe_snapshot.is_none());
     }
 
     #[test]

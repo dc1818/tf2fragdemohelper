@@ -21,7 +21,8 @@ use std::{
 use tf2_mirv_director::{
     DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_ACTION_FILE_PREFIX,
     DIRECTOR_ACTION_SLOTS, DIRECTOR_SESSION_SCHEMA,
-    DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_END_PREFIX,
+    DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_DIRTY_MARKER,
+    DIRECTOR_KEYFRAME_END_PREFIX,
     DIRECTOR_POLL_READY_MARKER, DIRECTOR_POLL_UNAVAILABLE_MARKER, DIRECTOR_TICK_MARKER_PREFIX,
     DIRECTOR_TICK_OFFSET_PREFIX,
 };
@@ -3320,7 +3321,7 @@ fn manual_seek_targets(target_tick: i64) -> Vec<i64> {
     targets
 }
 
-fn manual_hlae_vdm_text(_candidate: &Candidate, target_tick: i64) -> String {
+fn manual_hlae_vdm_text(candidate: &Candidate, target_tick: i64) -> String {
     let target_tick = target_tick.max(0);
     let mut lines = vec!["demoactions".to_owned(), "{".to_owned()];
     let mut action = 1;
@@ -3355,6 +3356,28 @@ fn manual_hlae_vdm_text(_candidate: &Candidate, target_tick: i64) -> String {
         None,
         "tf2frag_manual_ready",
     );
+    let mut campath_restore_ticks = candidate.point_of_kill_ticks.clone();
+    if campath_restore_ticks.is_empty() {
+        campath_restore_ticks.push(target_tick);
+    }
+    for tick in &mut campath_restore_ticks {
+        *tick = (*tick - MANUAL_ONE_SECOND_TICKS)
+            .max(target_tick)
+            .max(0);
+    }
+    campath_restore_ticks.sort_unstable();
+    campath_restore_ticks.dedup();
+    for cue_tick in campath_restore_ticks {
+        add_vdm_action(
+            &mut lines,
+            &mut action,
+            "PlayCommands",
+            "Restore MIRV campath after frag seek",
+            cue_tick + 1,
+            None,
+            "tf2frag_manual_restore_campath",
+        );
+    }
     lines.push("}".into());
     lines.join("\n")
 }
@@ -3440,6 +3463,9 @@ fn manual_hotkey_cfg(
         "alias tf2frag_manual_stop \"exec tf2fragdemohelper_manual_stop\"".into(),
         "alias tf2frag_manual_save \"exec tf2fragdemohelper_manual_save\"".into(),
         format!("alias tf2frag_manual_sync_keyframes \"echo {DIRECTOR_KEYFRAME_BEGIN_PREFIX}; mirv_campath print; echo {DIRECTOR_KEYFRAME_END_PREFIX}\""),
+        "alias tf2frag_manual_restore_campath_noop \"\"".into(),
+        "alias tf2frag_manual_restore_campath_do \"alias tf2frag_manual_restore_campath tf2frag_manual_restore_campath_noop; mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_RESTORED_AFTER_FRAG_SEEK; tf2frag_manual_sync_keyframes\"".into(),
+        "alias tf2frag_manual_restore_campath tf2frag_manual_restore_campath_noop".into(),
         format!(
             "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE {}_EMERGENCY_DIRECTOR_FALLBACK\"",
             shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
@@ -3476,7 +3502,7 @@ fn manual_hotkey_cfg(
         let next = if current == kill_ticks.len() { 1 } else { current + 1 };
         let cue_tick = (tick - MANUAL_ONE_SECOND_TICKS).max(target_tick).max(0);
         lines.push(format!(
-            "alias tf2frag_manual_kill_{current} \"alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}; demo_gototick {cue_tick} 0 1\"",
+            "alias tf2frag_manual_kill_{current} \"alias tf2frag_manual_next_kill tf2frag_manual_kill_{next}; alias tf2frag_manual_restore_campath tf2frag_manual_restore_campath_do; echo {DIRECTOR_TICK_MARKER_PREFIX} {cue_tick}; echo TF2FRAG_MANUAL_KILL {current}/{} FRAG_TICK {tick} CUE_TICK {cue_tick}; demo_gototick {cue_tick} 0 1\"",
             kill_ticks.len()
         ));
     }
@@ -3496,7 +3522,7 @@ fn manual_hotkey_cfg(
         format!("bind \"{}\" \"tf2frag_manual_next_kill\"", shortcuts.next_kill_tick),
         format!("bind \"{}\" \"demo_togglepause\"", shortcuts.pause_resume),
         format!("bind \"{}\" \"sv_cheats 1; thirdperson; r_drawviewmodel 0; spec_autodirector 0; mirv_input camera\"", shortcuts.enter_camera),
-        format!("bind \"{}\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED; tf2frag_manual_sync_keyframes\"", shortcuts.add_keyframe),
+        format!("bind \"{}\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED; echo {DIRECTOR_KEYFRAME_DIRTY_MARKER}; tf2frag_manual_sync_keyframes\"", shortcuts.add_keyframe),
         format!("bind \"{}\" \"mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_ENABLED_THIRDPERSON\"", shortcuts.play_campath),
         format!("bind \"{}\" \"tf2frag_manual_toggle_draw\"", shortcuts.draw_campath),
         format!("bind \"{}\" \"tf2frag_manual_start\"", shortcuts.start_recording),
@@ -6063,7 +6089,10 @@ mod recording_tests {
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 2/3 FRAG_TICK 925 CUE_TICK 858"));
         assert!(cfg.contains("TF2FRAG_MANUAL_KILL 3/3 FRAG_TICK 970 CUE_TICK 903"));
         assert!(cfg.contains(
-            "alias tf2frag_manual_kill_3 \"alias tf2frag_manual_next_kill tf2frag_manual_kill_1; echo TF2FRAG_DIRECTOR_TICK 903; echo TF2FRAG_MANUAL_KILL 3/3 FRAG_TICK 970 CUE_TICK 903; demo_gototick 903 0 1\""
+            "alias tf2frag_manual_kill_3 \"alias tf2frag_manual_next_kill tf2frag_manual_kill_1; alias tf2frag_manual_restore_campath tf2frag_manual_restore_campath_do; echo TF2FRAG_DIRECTOR_TICK 903; echo TF2FRAG_MANUAL_KILL 3/3 FRAG_TICK 970 CUE_TICK 903; demo_gototick 903 0 1\""
+        ));
+        assert!(cfg.contains(
+            "alias tf2frag_manual_restore_campath_do \"alias tf2frag_manual_restore_campath tf2frag_manual_restore_campath_noop; mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_RESTORED_AFTER_FRAG_SEEK; tf2frag_manual_sync_keyframes\""
         ));
         assert!(cfg.contains("bind \"1\" \"tf2frag_manual_help\""));
         assert!(cfg.contains(
@@ -6090,7 +6119,7 @@ mod recording_tests {
         assert!(cfg.contains("TF2FRAG_DIRECTOR_KEYFRAMES_BEGIN"));
         assert!(cfg.contains("TF2FRAG_DIRECTOR_KEYFRAMES_END"));
         assert!(cfg.contains(
-            "bind \"7\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED; tf2frag_manual_sync_keyframes\""
+            "bind \"7\" \"mirv_campath add; echo TF2FRAG_MANUAL_KEYFRAME_ADDED; echo TF2FRAG_DIRECTOR_KEYFRAMES_DIRTY; tf2frag_manual_sync_keyframes\""
         ));
         assert!(cfg.contains("bind \"-\" \"tf2frag_manual_sync_keyframes\""));
         assert!(cfg.contains(
@@ -6283,6 +6312,8 @@ mod recording_tests {
         assert!(vdm.contains("commands \"tf2frag_manual_seek_001\""));
         assert!(vdm.contains("starttick \"501\""));
         assert!(vdm.contains("commands \"tf2frag_manual_ready\""));
+        assert!(vdm.contains("Restore MIRV campath after frag seek"));
+        assert!(vdm.contains("commands \"tf2frag_manual_restore_campath\""));
         assert!(!vdm.contains("demo_pause"));
         assert!(!vdm.contains("mirv_cmd"));
         assert!(!vdm.contains("TF2FRAG_DIRECTOR_TICK"));

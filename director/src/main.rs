@@ -1097,11 +1097,11 @@ fn validate_campath_xml(path: &Path) -> Result<usize> {
         let quaternion = ["qw", "qx", "qy", "qz"];
         let euler_count = euler
             .iter()
-            .filter(|attribute| point.attribute(*attribute).is_some())
+            .filter(|attribute| point.attribute(**attribute).is_some())
             .count();
         let quaternion_count = quaternion
             .iter()
-            .filter(|attribute| point.attribute(*attribute).is_some())
+            .filter(|attribute| point.attribute(**attribute).is_some())
             .count();
         if !matches!(euler_count, 0 | 3) || !matches!(quaternion_count, 0 | 4) {
             bail!("campath point {point_count} has an incomplete rotation");

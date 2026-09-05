@@ -3398,10 +3398,10 @@ fn manual_seek_control_cfg(candidate: &Candidate, target_tick: i64) -> Vec<Strin
         "alias tf2frag_manual_seek_arm_ready \"alias tf2frag_manual_ready tf2frag_manual_ready_do\""
             .into(),
     );
-    let first = if targets.is_empty() {
-        "tf2frag_manual_seek_arm_ready".into()
+    let first: &str = if targets.is_empty() {
+        "tf2frag_manual_seek_arm_ready"
     } else {
-        "tf2frag_manual_seek_arm_001".into()
+        "tf2frag_manual_seek_arm_001"
     };
     lines.push(format!("alias tf2frag_manual_seek_arm {first}"));
     lines.push("tf2frag_manual_seek_arm".into());

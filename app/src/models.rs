@@ -305,6 +305,7 @@ pub struct MirvShortcuts {
     pub stop_recording: String,
     pub print_keyframes: String,
     pub save_campath: String,
+    pub load_campath: String,
     pub execute_director_action: String,
     pub overlay_panel_toggle: String,
     pub overlay_interaction_toggle: String,
@@ -330,6 +331,7 @@ impl Default for MirvShortcuts {
             stop_recording: "0".into(),
             print_keyframes: "-".into(),
             save_campath: "=".into(),
+            load_campath: "F8".into(),
             execute_director_action: "'".into(),
             overlay_panel_toggle: "C".into(),
             overlay_interaction_toggle: "F11".into(),
@@ -406,6 +408,7 @@ impl MirvShortcuts {
         self.stop_recording = Self::normalized_key(&self.stop_recording, &defaults.stop_recording);
         self.print_keyframes = Self::normalized_key(&self.print_keyframes, &defaults.print_keyframes);
         self.save_campath = Self::normalized_key(&self.save_campath, &defaults.save_campath);
+        self.load_campath = Self::normalized_key(&self.load_campath, &defaults.load_campath);
         self.execute_director_action = Self::normalized_key(
             &self.execute_director_action,
             &defaults.execute_director_action,
@@ -426,6 +429,7 @@ impl MirvShortcuts {
             &self.add_keyframe, &self.play_campath, &self.draw_campath,
             &self.start_recording, &self.stop_recording,
             &self.print_keyframes, &self.save_campath,
+            &self.load_campath,
             &self.execute_director_action,
             &self.overlay_panel_toggle,
             &self.overlay_interaction_toggle,
@@ -628,6 +632,7 @@ mod settings_tests {
         assert_eq!(shortcuts.toggle_hud, "]");
         assert_eq!(shortcuts.show_help, "1");
         assert_eq!(shortcuts.save_campath, "=");
+        assert_eq!(shortcuts.load_campath, "F8");
         assert_eq!(shortcuts.draw_campath, "/");
         assert_eq!(shortcuts.execute_director_action, "'");
         assert_eq!(shortcuts.overlay_panel_toggle, "C");

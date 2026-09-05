@@ -278,6 +278,7 @@ export component DirectorCardWindow inherits Window {
     in property <string> next-frag-tags;
     in property <string> panel-toggle-key;
     in property <string> interaction-toggle-key;
+    in property <string> load-campath-key;
     in property <bool> interaction-mode;
     in property <string> record-order;
     in property <[ShortcutRow]> shortcuts;
@@ -300,6 +301,7 @@ export component DirectorCardWindow inherits Window {
     callback hide-requested();
     callback interaction-toggle-requested();
     callback frag-goto-requested();
+    callback load-campath-requested();
     callback quit-tf2-requested();
     callback keyframe-activated(int, int);
     callback keyframe-action-requested(int, string, string, string);
@@ -450,8 +452,14 @@ export component DirectorCardWindow inherits Window {
                 DirectorButton { horizontal-stretch: 1; text: root.panel-toggle-key + "  HIDE PANEL"; enabled: root.actions-enabled; clicked => { root.hide-requested(); } }
                 DirectorButton { horizontal-stretch: 1; text: root.interaction-toggle-key + (root.interaction-mode ? "  RETURN TO TF2" : "  ENABLE CLICKS"); enabled: root.actions-enabled; tone: root.interaction-mode ? #34542e : Colors.blue; clicked => { root.interaction-toggle-requested(); } }
             }
-            // Keep quit in a dedicated full-width row so it never competes
-            // with the two navigation/focus buttons at narrow panel heights.
+            // Keep file and quit actions in dedicated full-width rows so they
+            // never compete with navigation/focus buttons at narrow heights.
+            DirectorButton {
+                text: root.load-campath-key + "  LOAD CAMPATH XML";
+                enabled: root.actions-enabled;
+                tone: #34542e;
+                clicked => { root.load-campath-requested(); }
+            }
             DirectorButton {
                 text: "CLOSE TF2";
                 tone: #652f27;

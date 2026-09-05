@@ -22,7 +22,7 @@ use tf2_mirv_director::{
     DirectorControl, DirectorCue, DirectorSession, DirectorShortcut, DIRECTOR_ACTION_FILE_PREFIX,
     DIRECTOR_ACTION_SLOTS, DIRECTOR_SESSION_SCHEMA,
     DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_DIRTY_MARKER,
-    DIRECTOR_KEYFRAME_END_PREFIX,
+    DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_LOAD_CAMPATH_REQUEST_MARKER,
     DIRECTOR_POLL_READY_MARKER, DIRECTOR_POLL_UNAVAILABLE_MARKER, DIRECTOR_TICK_MARKER_PREFIX,
     DIRECTOR_TICK_OFFSET_PREFIX,
 };
@@ -1356,6 +1356,7 @@ fn build_director_session(
             "Refresh keyframe markers",
         ),
         ("save_campath", &shortcuts.save_campath, "Save campath XML"),
+        ("load_campath", &shortcuts.load_campath, "Load campath XML"),
         (
             "execute_director_action",
             &shortcuts.execute_director_action,
@@ -3467,13 +3468,13 @@ fn manual_hotkey_cfg(
         "alias tf2frag_manual_restore_campath_do \"alias tf2frag_manual_restore_campath tf2frag_manual_restore_campath_noop; mirv_input end; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo TF2FRAG_MANUAL_CAMPATH_RESTORED_AFTER_FRAG_SEEK; tf2frag_manual_sync_keyframes\"".into(),
         "alias tf2frag_manual_restore_campath tf2frag_manual_restore_campath_noop".into(),
         format!(
-            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE {}_EMERGENCY_DIRECTOR_FALLBACK\"",
+            "alias tf2frag_manual_help \"echo TF2FRAG_KEYS {}_FORWARD_0.25_SECONDS {}_TOGGLE_HUD {}_HELP {}_BACK_1_SECOND {}_CLIP_START {}_NEXT_KILL {}_PAUSE {}_CAMERA {}_KEYFRAME {}_PLAY_PATH {}_DRAW_PATH {}_RECORD {}_STOP {}_PRINT {}_SAVE {}_LOAD_CAMPATH {}_EMERGENCY_DIRECTOR_FALLBACK\"",
             shortcuts.advance_time, shortcuts.toggle_hud, shortcuts.show_help,
             shortcuts.back_one_second, shortcuts.safe_restart, shortcuts.next_kill_tick,
             shortcuts.pause_resume, shortcuts.enter_camera, shortcuts.add_keyframe,
             shortcuts.play_campath, shortcuts.draw_campath,
             shortcuts.start_recording, shortcuts.stop_recording,
-            shortcuts.print_keyframes, shortcuts.save_campath,
+            shortcuts.print_keyframes, shortcuts.save_campath, shortcuts.load_campath,
             shortcuts.execute_director_action,
         ),
         format!("alias tf2frag_manual_clip_start \"demo_pause; mirv_input end; mirv_campath enabled 0; mirv_campath draw enabled 0; mirv_cmd enabled 0; alias tf2frag_director_poll tf2frag_director_poll_stop; tf2frag_manual_seek_arm; echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET {target_tick}; playdemo {staged_demo}\""),
@@ -3529,6 +3530,7 @@ fn manual_hotkey_cfg(
         format!("bind \"{}\" \"tf2frag_manual_stop\"", shortcuts.stop_recording),
         format!("bind \"{}\" \"tf2frag_manual_sync_keyframes\"", shortcuts.print_keyframes),
         format!("bind \"{}\" \"tf2frag_manual_save\"", shortcuts.save_campath),
+        format!("bind \"{}\" \"echo {DIRECTOR_LOAD_CAMPATH_REQUEST_MARKER}\"", shortcuts.load_campath),
         format!("bind \"{}\" \"tf2frag_director_execute\"", shortcuts.execute_director_action),
         "echo TF2FRAG_MANUAL_READY".into(),
         "tf2frag_manual_sync_keyframes".into(),
@@ -5948,18 +5950,20 @@ mod recording_tests {
         assert_eq!(session.cues[0].victims, vec!["Alice"]);
         assert!(session.cues[1].victims.is_empty());
         assert_eq!(session.whole_candidate_tags, vec!["multi kill"]);
-        assert_eq!(session.shortcuts.len(), 18);
+        assert_eq!(session.shortcuts.len(), 19);
         assert_eq!(session.shortcuts[0].key, "[");
         assert_eq!(session.shortcuts[7].label, "MIRV camera");
         assert_eq!(session.campath_file, campath);
         assert_eq!(session.shortcuts[10].key, "/");
         assert_eq!(session.shortcuts[10].label, "Show / hide campath + IDs");
-        assert_eq!(session.shortcuts[15].key, "'");
-        assert_eq!(session.shortcuts[15].label, "Emergency action fallback");
-        assert_eq!(session.shortcuts[16].key, "C");
-        assert_eq!(session.shortcuts[17].key, "F11");
+        assert_eq!(session.shortcuts[15].key, "F8");
+        assert_eq!(session.shortcuts[15].label, "Load campath XML");
+        assert_eq!(session.shortcuts[16].key, "'");
+        assert_eq!(session.shortcuts[16].label, "Emergency action fallback");
+        assert_eq!(session.shortcuts[17].key, "C");
+        assert_eq!(session.shortcuts[18].key, "F11");
         assert_eq!(
-            session.shortcuts[17].label,
+            session.shortcuts[18].label,
             "Focus Director / return to TF2"
         );
         assert_eq!(session.telemetry_marker_prefix, DIRECTOR_TICK_MARKER_PREFIX);
@@ -6111,6 +6115,9 @@ mod recording_tests {
         assert!(cfg.contains("bind \"9\" \"tf2frag_manual_start\""));
         assert!(cfg.contains("bind \"0\" \"tf2frag_manual_stop\""));
         assert!(cfg.contains("bind \"=\" \"tf2frag_manual_save\""));
+        assert!(cfg.contains(
+            "bind \"F8\" \"echo TF2FRAG_DIRECTOR_LOAD_CAMPATH_REQUESTED\""
+        ));
         assert!(cfg.contains("bind \"/\" \"tf2frag_manual_toggle_draw\""));
         assert!(cfg.contains("mirv_campath draw enabled 1"));
         assert!(cfg.contains("mirv_campath draw enabled 0"));
@@ -6131,7 +6138,7 @@ mod recording_tests {
         assert!(cfg.contains(
             "echo TF2FRAG_MANUAL_SAFE_RESTART_FROM_ZERO TARGET 500; playdemo demos/tf2fragdemohelper_manual/session/candidate.dem"
         ));
-        assert!(!cfg.contains("bind \"F"));
+        assert!(!cfg.contains("bind \"F1\""));
         assert!(cfg.contains("mirv_cmd clear"));
         assert!(cfg.contains("mirv_cmd enabled 1"));
         assert!(cfg.contains(

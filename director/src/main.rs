@@ -21,8 +21,8 @@ use std::{
 use tf2_mirv_director::{
     DirectorControl, DirectorSession, DIRECTOR_ACTION_ACK_PREFIX, DIRECTOR_ACTION_FILE_PREFIX,
     DIRECTOR_ACTION_SLOTS, DIRECTOR_KEYFRAME_BEGIN_PREFIX, DIRECTOR_KEYFRAME_DIRTY_MARKER,
-    DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_POLL_READY_MARKER, DIRECTOR_POLL_UNAVAILABLE_MARKER,
-    DIRECTOR_TICK_OFFSET_PREFIX,
+    DIRECTOR_KEYFRAME_END_PREFIX, DIRECTOR_LOAD_CAMPATH_REQUEST_MARKER,
+    DIRECTOR_POLL_READY_MARKER, DIRECTOR_POLL_UNAVAILABLE_MARKER, DIRECTOR_TICK_OFFSET_PREFIX,
 };
 
 const ONE_SECOND_TICKS: i64 = 67;
@@ -32,6 +32,8 @@ const DEMO_READY_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const DIRECT_CONTROL_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const DIRECTOR_ACTION_ACK_TIMEOUT: Duration = Duration::from_secs(8);
 const RCON_RETRY_DELAY: Duration = Duration::from_millis(250);
+const MAX_CAMPATH_XML_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_CAMPATH_POINTS: usize = 100_000;
 
 slint::include_modules!();
 
@@ -91,12 +93,14 @@ fn main() -> Result<()> {
     };
     let panel_toggle_key = shortcut_key("overlay_panel_toggle", "C");
     let interaction_toggle_key = shortcut_key("overlay_interaction_toggle", "F11");
+    let load_campath_key = shortcut_key("load_campath", "F8");
     strip.set_start_tick(to_ui_tick(session.start_tick));
     strip.set_end_tick(to_ui_tick(session.end_tick));
     strip.set_panel_toggle_key(panel_toggle_key.clone().into());
     card.set_panel_toggle_key(panel_toggle_key.clone().into());
     strip.set_interaction_toggle_key(interaction_toggle_key.clone().into());
     card.set_interaction_toggle_key(interaction_toggle_key.clone().into());
+    card.set_load_campath_key(load_campath_key.clone().into());
     strip.set_interaction_mode(false);
     card.set_interaction_mode(false);
     let initial_command_status = if automatic_cfg_mailbox {
@@ -379,6 +383,17 @@ fn main() -> Result<()> {
         let weak_card = card.as_weak();
         let action_queue = action_queue.clone();
         let direct_action_sender = direct_action_sender.clone();
+        card.on_load_campath_requested(move || {
+            let Some(card) = weak_card.upgrade() else {
+                return;
+            };
+            choose_and_load_campath(direct_action_sender.as_ref(), &action_queue, &card);
+        });
+    }
+    {
+        let weak_card = card.as_weak();
+        let action_queue = action_queue.clone();
+        let direct_action_sender = direct_action_sender.clone();
         card.on_quit_tf2_requested(move || {
             let Some(card) = weak_card.upgrade() else {
                 return;
@@ -613,6 +628,17 @@ fn main() -> Result<()> {
                     }
                     if !demo_ready.get() {
                         return;
+                    }
+                    if poll.load_campath_requested {
+                        append_telemetry_diagnostic(
+                            &telemetry_diagnostic,
+                            "status=LOAD_CAMPATH_FILE_PICKER_REQUESTED",
+                        );
+                        choose_and_load_campath(
+                            direct_action_sender.as_ref(),
+                            &action_queue,
+                            &card,
+                        );
                     }
                     if poll.keyframes_refreshing {
                         // Keep the last complete HLAE table visible while the next
@@ -955,6 +981,150 @@ fn dispatch_director_action(
                 .into(),
         ),
     }
+}
+
+fn choose_and_load_campath(
+    direct: Option<&Sender<DirectActionRequest>>,
+    queue: &RefCell<DirectorActionQueue>,
+    card: &DirectorCardWindow,
+) {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Load an HLAE campath XML")
+        .add_filter("HLAE campath XML", &["xml"])
+        .pick_file()
+    else {
+        card.set_command_status("CAMPATH LOAD CANCELED".into());
+        return;
+    };
+
+    match validated_campath_load_command(&path) {
+        Ok((command, point_count)) => dispatch_director_action(
+            direct,
+            queue,
+            card,
+            command,
+            format!("LOAD CAMPATH • {point_count} KEYFRAME(S)"),
+        ),
+        Err(error) => {
+            let message = format!("The selected file is not a valid HLAE campath XML.\n\n{error:#}");
+            card.set_command_status("CAMPATH NOT LOADED • INVALID XML".into());
+            rfd::MessageDialog::new()
+                .set_title("Invalid HLAE campath XML")
+                .set_description(&message)
+                .set_level(rfd::MessageLevel::Error)
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show();
+        }
+    }
+}
+
+fn validated_campath_load_command(path: &Path) -> Result<(String, usize)> {
+    let point_count = validate_campath_xml(path)?;
+    if !path.is_absolute() {
+        bail!("the selected campath path is not absolute");
+    }
+    let path_text = path
+        .to_str()
+        .context("the campath path is not valid Unicode")?;
+    if path_text
+        .chars()
+        .any(|character| character.is_control() || matches!(character, '"' | ';'))
+    {
+        bail!("the campath path contains characters that are unsafe in a TF2 command");
+    }
+    let command_path = path_text.replace('\\', "/");
+    Ok((
+        format!(
+            "mirv_input end; mirv_campath load \"{command_path}\"; thirdperson; r_drawviewmodel 0; mirv_campath enabled 1; echo {DIRECTOR_KEYFRAME_DIRTY_MARKER}"
+        ),
+        point_count,
+    ))
+}
+
+fn validate_campath_xml(path: &Path) -> Result<usize> {
+    if !path.is_file() {
+        bail!("the selected path is not a file");
+    }
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xml"))
+    {
+        bail!("the file must use the .xml extension");
+    }
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("could not inspect {}", path.display()))?;
+    if metadata.len() == 0 {
+        bail!("the XML file is empty");
+    }
+    if metadata.len() > MAX_CAMPATH_XML_BYTES {
+        bail!("the XML file is larger than 16 MiB");
+    }
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("could not read {} as UTF-8 XML", path.display()))?;
+    let document = roxmltree::Document::parse(&contents).context("the XML is not well formed")?;
+    let root = document.root_element();
+    if root.tag_name().name() != "campath" {
+        bail!("the root element must be <campath>");
+    }
+    let points = root
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "points")
+        .context("the <campath> element does not contain <points>")?;
+
+    let mut point_count = 0_usize;
+    for point in points
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "p")
+    {
+        point_count += 1;
+        if point_count > MAX_CAMPATH_POINTS {
+            bail!("the campath contains more than {MAX_CAMPATH_POINTS} points");
+        }
+        for attribute in ["t", "x", "y", "z", "fov"] {
+            let value = point.attribute(attribute).with_context(|| {
+                format!("campath point {point_count} is missing '{attribute}'")
+            })?;
+            let number = value.parse::<f64>().with_context(|| {
+                format!("campath point {point_count} has an invalid '{attribute}' value")
+            })?;
+            if !number.is_finite() {
+                bail!("campath point {point_count} has a non-finite '{attribute}' value");
+            }
+        }
+
+        let euler = ["rx", "ry", "rz"];
+        let quaternion = ["qw", "qx", "qy", "qz"];
+        let euler_count = euler
+            .iter()
+            .filter(|attribute| point.attribute(*attribute).is_some())
+            .count();
+        let quaternion_count = quaternion
+            .iter()
+            .filter(|attribute| point.attribute(*attribute).is_some())
+            .count();
+        if !matches!(euler_count, 0 | 3) || !matches!(quaternion_count, 0 | 4) {
+            bail!("campath point {point_count} has an incomplete rotation");
+        }
+        if euler_count == 0 && quaternion_count == 0 {
+            bail!("campath point {point_count} has no Euler or quaternion rotation");
+        }
+        for attribute in euler.into_iter().chain(quaternion) {
+            let Some(value) = point.attribute(attribute) else {
+                continue;
+            };
+            let number = value.parse::<f64>().with_context(|| {
+                format!("campath point {point_count} has an invalid '{attribute}' value")
+            })?;
+            if !number.is_finite() {
+                bail!("campath point {point_count} has a non-finite '{attribute}' value");
+            }
+        }
+    }
+    if point_count == 0 {
+        bail!("the campath does not contain any <p> keyframes");
+    }
+    Ok(point_count)
 }
 
 struct DirectActionRequest {
@@ -1800,6 +1970,9 @@ impl TickLogTail {
         if line.contains(DIRECTOR_POLL_UNAVAILABLE_MARKER) {
             poll.director_poll_unavailable = true;
         }
+        if line.contains(DIRECTOR_LOAD_CAMPATH_REQUEST_MARKER) {
+            poll.load_campath_requested = true;
+        }
         if line.contains(DIRECTOR_KEYFRAME_BEGIN_PREFIX) {
             self.keyframe_capture = Some(Vec::new());
             self.keyframe_capture_invalid = false;
@@ -1880,6 +2053,7 @@ struct TelemetryPoll {
     action_acks: Vec<u64>,
     director_poll_ready: bool,
     director_poll_unavailable: bool,
+    load_campath_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2273,6 +2447,64 @@ fn load_session(path: &Path) -> Result<DirectorSession> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_test_xml(name: &str, contents: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tf2fragdemohelper-{name}-{}-{nonce}.xml",
+            std::process::id()
+        ));
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn validates_hlae_campath_xml_and_builds_the_documented_load_sequence() {
+        let path = write_test_xml(
+            "valid-campath",
+            r#"<?xml version="1.0"?>
+<campath><points>
+<p t="1.25" x="10" y="20" z="30" rx="0" ry="90" rz="0" fov="75" />
+<p t="2.50" x="40" y="50" z="60" qw="1" qx="0" qy="0" qz="0" fov="90" />
+</points></campath>"#,
+        );
+        let (command, point_count) = validated_campath_load_command(&path).unwrap();
+        let expected_path = path.to_string_lossy().replace('\\', "/");
+        assert_eq!(point_count, 2);
+        assert!(command.contains(&format!("mirv_campath load \"{expected_path}\"")));
+        assert!(command.contains("mirv_campath enabled 1"));
+        assert!(command.ends_with(DIRECTOR_KEYFRAME_DIRTY_MARKER));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_generic_xml_and_incomplete_hlae_points() {
+        let generic = write_test_xml("generic", "<document><points /></document>");
+        assert!(validate_campath_xml(&generic).is_err());
+        fs::remove_file(generic).unwrap();
+
+        let incomplete = write_test_xml(
+            "incomplete",
+            r#"<campath><points><p t="1" x="2" y="3" z="4" rx="0" ry="0" fov="90" /></points></campath>"#,
+        );
+        assert!(validate_campath_xml(&incomplete).is_err());
+        fs::remove_file(incomplete).unwrap();
+    }
+
+    #[test]
+    fn detects_cross_platform_load_campath_shortcut_marker() {
+        let mut tail = TickLogTail::new(PathBuf::new());
+        let mut poll = TelemetryPoll::default();
+        tail.consume_line(
+            &format!("08/30 12:30:22 {DIRECTOR_LOAD_CAMPATH_REQUEST_MARKER}"),
+            "TF2FRAG_DIRECTOR_TICK",
+            &mut poll,
+        );
+        assert!(poll.load_campath_requested);
+    }
 
     #[test]
     fn parses_timestamped_tick_markers() {

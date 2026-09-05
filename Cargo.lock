@@ -5117,6 +5117,8 @@ name = "tf2-mirv-director"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rfd",
+ "roxmltree",
  "serde",
  "serde_json",
  "slint",
